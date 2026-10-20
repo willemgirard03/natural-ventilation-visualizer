@@ -244,9 +244,23 @@ EnergyPlus is the reference engine: the tool's data follows EnergyPlus's own inp
 | Example\_02 (2226\_Emmenweid) | 12 | 96 s | 0.009 °C | 99.7% | within 0.03% |
 
 - **Weather file:** the runs used `CAN_BC_Vancouver_Intl_AP_718920_TDY-CWEC2020v2.epw`, identified from the extreme design week (10–16 August) and three sizing temperatures. The CWEC2020v2, TMYx and three morphed future files do not match.
-- **The only remaining difference is the shading method.** ClimateStudio asks for GPU pixel counting; without a GPU, EnergyPlus falls back to polygon clipping. Lights, equipment and people match exactly; transmitted solar differs by about 0.01% over the year.
+- **Shading is not the cause of the remaining difference** (corrected 20 Oct; the sandbox result was first put down to shading). ClimateStudio asks for GPU pixel counting; the sandbox had no GPU and fell back to polygon clipping, so transmitted solar differed by about 0.01% over the year. The run on the desktop's GPU (below) matches transmitted solar exactly, yet the temperature difference is unchanged. Lights, equipment and people match exactly in both.
 - **The larger hourly differences come from window control flipping.** In naturally ventilated zones on warm afternoons, both runs swing 2–4 °C from hour to hour: windows open above 25 °C, the large opening area dumps the heat within one 10-minute step, the windows close, and the cycle repeats. Tiny shading differences shift the timing of each flip. This on/off behaviour of ClimateStudio's simple ventilation is itself worth showing students.
 - **Where EnergyPlus runs:** a Linux server works and runs these models in 1.5–2.5 minutes; a GPU is needed only to reproduce pixel-counting shading exactly.
+
+**Gate test, step 1 repeated on the desktop (20 Oct): passed.** `tools/run_alignment.py example02 --repeat` ran EnergyPlus 23.1.0-87ed9199d4 on Windows with GPU pixel-counting shading, on ClimateStudio's unmodified `.epJSON`, in about 2 minutes:
+
+| Measure | Desktop (GPU) | Sandbox (no GPU) |
+| --- | --- | --- |
+| Mean difference in zone air temperature | 0.0084 °C | 0.009 °C |
+| Zone-hours within 0.5 °C | 99.74% | 99.7% |
+| Transmitted solar | identical | about 0.01% off |
+| Annual totals | within 0.05% for most outputs; ventilation heat gain 7.9% (a small total) | within 0.03% |
+| Warnings and severe errors | 36 and 2, the same as ClimateStudio's run | — |
+
+- **The runs are identical until late July.** Every zone matches ClimateStudio to within 0.01 °C for the first 210 days. Differences begin on day 211 (30 July) and stay in the three naturally ventilated offices (`GF_Office_2_1`, `GF_Office_1_0`, `2F_Office_8`; up to 5.8 °C in single hours), with small spill-over into the two meeting rooms. Circulation, toilets and the stairwell never differ by more than 0.05 °C.
+- **EnergyPlus is repeatable on one computer.** Three runs on the desktop gave bit-identical results. The difference from ClimateStudio therefore comes from running on a different computer: most likely rounding-level differences between processors or system libraries, amplified by the window control flipping described above (an interpretation, not yet tested). Exact agreement with ClimateStudio is not achievable without ClimateStudio's own computer; the test thresholds are a mean difference of at most 0.05 °C and at least 99% of zone-hours within 0.5 °C.
+- **EnergyPlus cannot run from the project drive.** The drive is formatted exFAT, and EnergyPlus 23.1 crashes at startup (Windows error 0xC0000409 in `ucrtbase.dll`) when started from it; the same files run normally from C:, with or without spaces in the path. See Workflow and constraints for how each computer gets its copy.
 
 Step 2, still to do: the same comparison for an input file written by the tool itself rather than by ClimateStudio.
 
@@ -382,9 +396,9 @@ No ClimateStudio license is available, so validation works only from the two run
 | Project on a removable drive | Everything lives under `E:\ARCH 540`. Files shared in this chat are in `E:\ARCH 540\A2`; treat that folder as read-only reference data, except the repository folder `A2\natural-ventilation-visualizer`. |
 | Several computers | The code repository sits on the drive and is pushed to GitHub, so any computer can continue. |
 | Context does not travel | This plan is exported to `PLAN.md` in the repository; Claude Code reads it at the start of each session. Decisions made later are added to it. |
-| EnergyPlus is the reference engine | EnergyPlus 23.1 (free) must be available on whichever computer runs the alignment tests. With a GPU, pixel-counting shading reproduces ClimateStudio exactly. |
+| EnergyPlus is the reference engine | EnergyPlus 23.1 (free) must be available on whichever computer runs the alignment tests, on its internal drive (it crashes when run from the exFAT project drive). With a GPU, pixel-counting shading reproduces ClimateStudio's solar exactly; zone temperatures still differ slightly between computers (see EnergyPlus foundation). |
 
-**Machines and accounts.** Two Windows computers with Rhino 8 and Claude Code: a desktop with an NVIDIA GTX 1080 Ti and a laptop with a GTX 1660 Ti Max-Q. Both GPUs allow EnergyPlus's pixel-counting shading (so ClimateStudio's runs can be reproduced exactly) and browser GPU computing. GitHub user `willemgirard03`; the repository will be public, suggested name `natural-ventilation-visualizer`. Because it is public, course-provided models and results stay out of it: the code refers to files in `A2` by path. A permissive code license such as MIT suits a public tool; choose it during setup. No Carbonfly (LGPL) code is copied, only published values.
+**Machines and accounts.** Two Windows computers with Rhino 8 and Claude Code: a desktop with an NVIDIA GTX 1080 Ti and a laptop with a GTX 1660 Ti Max-Q. Both GPUs allow EnergyPlus's pixel-counting shading (so ClimateStudio's solar results can be reproduced exactly) and browser GPU computing. GitHub user `willemgirard03`; the repository will be public, suggested name `natural-ventilation-visualizer`. Because it is public, course-provided models and results stay out of it: the code refers to files in `A2` by path. A permissive code license such as MIT suits a public tool; choose it during setup. No Carbonfly (LGPL) code is copied, only published values.
 
 **First Claude Code task: set up the repository (done 20 Oct).** The repository is `E:\ARCH 540\A2\natural-ventilation-visualizer`, inside `A2` rather than beside it; only this folder is published, and the rest of `A2` stays local and read-only. It is public at https://github.com/willemgirard03/natural-ventilation-visualizer under the MIT license, with a `.gitignore` that excludes EnergyPlus results, Rhino/Grasshopper models and archives. Commits use the GitHub noreply email. The drive records no file ownership, so each computer needs `git config --global --add safe.directory "E:/ARCH 540/A2/natural-ventilation-visualizer"` once (adjust the drive letter), plus `gh auth login`. Still to do: check the repository on the laptop. The original steps:
 
@@ -395,7 +409,11 @@ No ClimateStudio license is available, so validation works only from the two run
 5. Keep large files out of the repository. GitHub rejects files over 100 MB, and the results folders hold a 984 MB shading file and 40–150 MB `.eso` files. The repository refers to them by path in `A2` instead; only small test inputs (`.epJSON`, weather files) may be copied in.
 6. First commit and push, then a quick check that a second computer can clone it.
 
-**Then phase 2,** starting with the automated alignment test: run EnergyPlus on the Example\_02 `.epJSON`, compare with ClimateStudio's `.eso`, and report the result. This repeats the sandbox test on your own computer.
+**Then phase 2,** starting with the automated alignment test: run EnergyPlus on the Example\_02 `.epJSON`, compare with ClimateStudio's `.eso`, and report the result. This repeats the sandbox test on your own computer. **Done 20 Oct on the desktop:** passed; see EnergyPlus foundation.
+
+**Running EnergyPlus on each computer.** The master copy is `E:\ARCH 540\tools\EnergyPlus-23.1.0` (the portable zip, 635 MB unpacked), but EnergyPlus cannot run from the exFAT drive, so each computer runs a local copy at `C:\EnergyPlus-23.1.0`. Only what a run and the Python API need is copied: the top-level program files, `pyenergyplus` and `python_standard_lib`, about 125 MB, taking about 5 seconds. Examples, documentation and pre/post-processors are left out, because the desktop's C: drive has only about 8 GB free. `tools/run_alignment.py` makes this copy itself the first time it runs on a computer that lacks it, and checks the build before every run; `--energyplus` or the `EPLUS_DIR` environment variable point it elsewhere. Large outputs (`.eso`, the ~1 GB shading CSV, which the script deletes unless `--keep-shading` is given) are written to `runs/` on the project drive, which Git ignores.
+
+**On the laptop, once:** set the Git name and email (`git config --global user.name` / `user.email`, as on the desktop), install the GitHub CLI and sign in (`winget install --id GitHub.cli -e`, then `gh auth login --hostname github.com --git-protocol https --web`), trust the repository folder (`git config --global --add safe.directory "E:/ARCH 540/A2/natural-ventilation-visualizer"`, adjusting the drive letter), run `git pull`, then `%USERPROFILE%\.rhinocode\py39-rh8\python.exe tools\run_alignment.py example02`. The first run copies EnergyPlus to C:; a pass on the laptop also shows how close a third computer comes.
 
 ## Milestones and open questions
 
@@ -409,7 +427,7 @@ The results folders replaced the licensed desktop session: ClimateStudio's Energ
 
 | Dates | Work | Ends with |
 | --- | --- | --- |
-| 17–26 Oct | Repository setup; Example\_02 `.epJSON` importer; EnergyPlus runner and the alignment test on your own computer (GPU, so exact shading); 3D view of the imported zones | — |
+| 17–26 Oct | Repository setup; Example\_02 `.epJSON` importer; EnergyPlus runner and the alignment test on your own computer (GPU, so exact shading; done 20 Oct); 3D view of the imported zones | — |
 | 27 Oct – 11 Nov | Network solver for the whole building, following EnergyPlus's airflow network method; the tool writes an airflow-network `.epJSON` and runs EnergyPlus to check it; window interpretation (casement default, awning stress test); first whole-building particle view from network flows | User review 1 (12 Nov): Example\_02 imported, EnergyPlus alignment shown, airflow paths through the building |
 | 12–26 Nov | 3D grid solver for the big moves (double-height office, stairwell) with particles; plan and section slices; heat gains from people, lights and equipment; CO2 checked against Example\_02 | User review 2 (27 Nov) |
 | 27 Nov – 2 Dec | Comfort readouts in rooms; model checks; atrium variant of Example\_02 checked against EnergyPlus; fixes from reviews | User review 3 (3 Dec) |

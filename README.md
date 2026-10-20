@@ -15,18 +15,23 @@ Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findi
 | Path | What it is |
 | --- | --- |
 | `prototype/section-airflow.html` | Phase 1 2D section prototype. Open it in any browser. |
-| `tools/compare_eso.py` | Compares two EnergyPlus `.eso` result files output by output; the core of the alignment test. |
+| `tools/run_alignment.py` | EnergyPlus alignment test: re-runs a ClimateStudio model and compares with ClimateStudio's results. |
+| `tools/compare_eso.py` | Compares two EnergyPlus `.eso` result files output by output; used by the alignment test. |
 | `tools/cs_desktop_kit/` | ClimateStudio inspection scripts (see its README). |
 | `PLAN.md` | Project plan; read first at the start of every session. |
 | `HANDOFF.md` | Notes from the planning chat. |
 
-## Comparing EnergyPlus results
+## EnergyPlus alignment test
 
 ```
-python tools/compare_eso.py reference.eso candidate.eso
+python tools/run_alignment.py example02 [--repeat]
 ```
 
-Requires Python 3, no extra packages. Alignment tests use EnergyPlus 23.1.0 (the build ClimateStudio 2.2 uses), kept outside this repository.
+Runs EnergyPlus 23.1.0 (the build ClimateStudio 2.2 uses) on ClimateStudio's own input file and compares every hourly output with ClimateStudio's results; the report goes to `runs/<case>/report.txt`. Requires Python 3 with no extra packages (Rhino 8's Python works: `%USERPROFILE%\.rhinocode\py39-rh8\python.exe`).
+
+EnergyPlus is kept outside this repository, and it must run from an internal drive: it crashes at startup from an exFAT drive. The script uses `C:\EnergyPlus-23.1.0` (or `--energyplus`, or the `EPLUS_DIR` environment variable) and, if it is missing, copies the ~125 MB needed from `E:\ARCH 540\tools\EnergyPlus-23.1.0` in a few seconds.
+
+To compare any two result files directly: `python tools/compare_eso.py reference.eso candidate.eso`.
 
 ## Data
 

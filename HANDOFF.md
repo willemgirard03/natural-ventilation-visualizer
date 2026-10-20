@@ -14,7 +14,7 @@ Everything built in the planning chat, ready to become the first commit of the r
 
 1. **Get the plan as `PLAN.md`.** Open the plan document (Natural Ventilation Visualizer — Project Plan) and download it as Markdown. Save it in this folder as `PLAN.md`. The two diagrams become placeholders in Markdown; the text carries everything Claude Code needs.
 2. **Copy this folder to the drive.** It ended up at `E:\ARCH 540\A2\natural-ventilation-visualizer` (decided 20 Oct). Apart from this folder, leave `E:\ARCH 540\A2` untouched; it is read-only reference data.
-3. **Put EnergyPlus 23.1 on the drive, outside the repository.** Download the portable zip, the exact build ClimateStudio used, and unzip it to `E:\ARCH 540\tools\EnergyPlus-23.1.0`. It then works on either computer without installing:
+3. **Put EnergyPlus 23.1 on the drive, outside the repository.** Download the portable zip, the exact build ClimateStudio used, and unzip it to `E:\ARCH 540\tools\EnergyPlus-23.1.0`. (Found 20 Oct: it cannot run from the exFAT drive; `tools/run_alignment.py` copies the files a run needs to `C:\EnergyPlus-23.1.0` on each computer. See PLAN.md.)
    https://github.com/NREL/EnergyPlus/releases/download/v23.1.0/EnergyPlus-23.1.0-87ed9199d4-Windows-x86_64.zip
 
 ## Key facts Claude Code will need
@@ -22,7 +22,7 @@ Everything built in the planning chat, ready to become the first commit of the r
 - **Weather file for both ClimateStudio runs:** `CAN_BC_Vancouver_Intl_AP_718920_TDY-CWEC2020v2.epw`.
 - **Primary case, Example_02:** `A2\Example 02\Results\2226_Emmenweid.epJSON` is the run's input; `2226_Emmenweidout.eso` holds its results. The `.idf` beside them is a later edit; do not use it for comparison.
 - **Advanced case, Example_01:** `Willem_Girard_CS_V3.epJSON` and `Willem_Girard_CS_V3out.eso`, same rules.
-- **Sandbox result to reproduce:** re-running each `.epJSON` with EnergyPlus 23.1 matched ClimateStudio to a mean of 0.009 °C (Example_02) and 0.0003 °C (Example_01). The only difference was shading: the sandbox had no GPU. On your GPU, the match should be closer still.
+- **Sandbox result to reproduce:** re-running each `.epJSON` with EnergyPlus 23.1 matched ClimateStudio to a mean of 0.009 °C (Example_02) and 0.0003 °C (Example_01). The sandbox had no GPU, so shading was suspected; the desktop run on 20 Oct (GPU) matched solar exactly but temperatures to the same 0.008 °C, so the remaining difference comes from running on a different computer, not shading. See PLAN.md.
 - **Never commit** anything from `A2`: no course models, `.eso` files (40–150 MB) or shading CSVs (up to 984 MB). GitHub rejects files over 100 MB, and the repository is public.
 
 ## First message to give Claude Code
