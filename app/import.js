@@ -2,6 +2,10 @@ import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
 import { View3D, TYPE_COLORS, PROBLEM, zoneColor } from './view3d.js';
 import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
+import { buildNetwork, solveNetwork } from '../src/solver/network.js';
+import { flowStreams } from '../src/solver/paths.js';
+import { standardPressure } from '../src/solver/air.js';
+import { AirflowParticles, temperatureColor } from './particles.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -21,6 +25,38 @@ function cell(v, digits) {
 let model = null;
 $('version').textContent = MODEL_VERSION;
 const view = new View3D($('viewer'), { onSelect: showInfo });
+const air = new AirflowParticles(view);
+let net = null, airflow = null; // the network for the loaded model, and its latest solution
+
+// Solves the network for the conditions in the Airflow controls and hands the flows to the particles.
+function solveAir() {
+  if (!model || !net) return;
+  const loc = Object.values(model.epjson['Site:Location'] || {})[0] || {};
+  const site = { elevation: loc.elevation ?? 0, latitude: loc.latitude ?? 45 };
+  const open = $('windows-open').checked, tIn = Number($('t-in').value);
+  const conditions = {
+    site,
+    outdoor: { t: Number($('t-out').value), w: 0.008, pressure: standardPressure(site.elevation), windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value) },
+    zones: Object.fromEntries(net.zones.map((z) => [z, { t: tIn, w: 0.008 }])),
+    open: Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, open ? l.openFactor : 0])),
+  };
+  const solution = solveNetwork(net, conditions);
+  const flows = flowStreams(net, solution, conditions);
+  airflow = { solution, flows, conditions };
+  air.setFlows(flows, conditions);
+  const volume = Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0);
+  const m3h = (flows.outdoorIn / 1.2) * 3600;
+  $('air-total').textContent = `Outdoor air ${fmt(m3h, 0)} m³/h · ${fmt(m3h / volume, m3h / volume < 1 ? 2 : 1)} air changes/h`;
+  $('air-total').title = 'Outdoor air entering the building through windows, doors and leaks, from the airflow network. Air changes per hour: that flow divided by the volume of all zones.';
+}
+for (const id of ['t-out', 't-in', 'wind', 'wind-dir', 'windows-open']) $(id).addEventListener('input', () => { solveAir(); if (model) showInfo(view.find(selected)); });
+$('show-air').addEventListener('change', (e) => {
+  air.setVisible(e.target.checked);
+  if (e.target.checked) air.play(); else { air.stop(); air.clear(); }
+  legend();
+});
+$('air-speed').addEventListener('input', (e) => { air.speed = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
+let selected = null;
 
 const load = (file) => loadText(file.name, () => file.text());
 
@@ -55,6 +91,7 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
 // Details of the selected surface, window, zone or shading surface, and any checks that name it.
 function showInfo(found) {
   const box = $('info');
+  selected = found?.item?.name ?? null;
   if (!found) { box.hidden = true; return; }
   const { kind, item } = found;
   const rows = [];
@@ -76,12 +113,27 @@ function showInfo(found) {
   } else {
     rows.push(`<b>${esc(item.name)}</b>`, 'Shading surface');
   }
+  if (airflow && $('show-air').checked) rows.push(...airLines(kind, item));
   for (const c of model.checks.filter((c) => c.objects.includes(item.name))) {
     const cls = c.level === 'error' ? 'error-text' : c.level === 'warning' ? 'warning-text' : 'muted';
     rows.push(`<span class="${cls}">${esc(c.message)}</span>`);
   }
   box.innerHTML = rows.map((r) => `<div>${r}</div>`).join('');
   box.hidden = false;
+}
+
+// Air moving through a zone, or through a window, door or surface leak, from the latest solution.
+function airLines(kind, item) {
+  const m3h = (kg) => fmt((kg / 1.2) * 3600, 0);
+  if (kind === 'zone') {
+    const q = (airflow.flows.throughflow[net.zones.indexOf(item.name)] / 1.2) * 3600;
+    return [`Air through the zone: ${fmt(q, 0)} m³/h, ${fmt(q / item.volume.value, 1)} air changes/h`];
+  }
+  const i = net.links.findIndex((l) => l.name === item.name);
+  if (i < 0) return [];
+  const r = airflow.solution.links[i], l = net.links[i], other = l.to ?? 'outdoors';
+  const what = l.type === 'crack' ? 'Leakage' : 'Air';
+  return [`${what}: ${m3h(r.forward)} m³/h ${esc(l.from)} → ${esc(other)}, ${m3h(r.backward)} m³/h ${esc(other)} → ${esc(l.from)}`];
 }
 
 function legend() {
@@ -96,6 +148,7 @@ function legend() {
   if (Object.keys(model.windows).length) items.push(chip(TYPE_COLORS.Glazing, 'Glazing'));
   if (view.doors.length) items.push(chip(TYPE_COLORS.Door, `Door, added (${view.doors.length})`, `The tool adds an open ${DOOR.width} × ${DOOR.height} m door between each room and the circulation zones it shares a wall with, and between adjoining circulation zones, so air can move through the building. Circulation is recognised by zone name (circulation, corridor, hall, lobby, stair, vestibule, foyer, atrium).`));
   if (model.shading.length) items.push(chip(TYPE_COLORS.Shading, 'Shading'));
+  if ($('show-air').checked) items.push(`<span title="Particle colour: the temperature of the air they carry"><i style="background:linear-gradient(90deg,#${temperatureColor(14).getHexString()},#${temperatureColor(22).getHexString()},#${temperatureColor(30).getHexString()});width:36px"></i>Air 14–30 °C</span>`);
   if (view.problems.length) items.push(chip(PROBLEM, 'Named by a model check', 'The arrow shows the way EnergyPlus takes as outward, from the order of the corner points.'));
   $('legend').innerHTML = items.join('');
 }
@@ -180,6 +233,10 @@ function render(m) {
   $('results').hidden = false;
   view.resize();
   view.setModel(m, { doors: interiorDoors(m) });
+  net = buildNetwork(m);
+  air.setNetwork(net, m);
+  solveAir();
+  if ($('show-air').checked) air.play();
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);
   view.select(null);

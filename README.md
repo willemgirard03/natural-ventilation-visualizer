@@ -19,6 +19,7 @@ Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findi
 | `src/solver/` | Airflow network solver: zone pressures and flows through every crack, window and door at one moment, matching EnergyPlus's airflow network. |
 | `app/import.html` | Model import page: load an `.epJSON`, see it in 3D, see zones, windows, constructions and model checks, export it again. |
 | `app/view3d.js` | 3D view of the model (three.js): surfaces by type or zone, windows, shading, a horizontal cut, selection, model-check problems in red. |
+| `app/particles.js` | Airflow particles in the 3D view, following the network solver's flows. |
 | `tests/` | Automated tests (`npm test`), including checks against EnergyPlus's own reading of the two example models. |
 | `tools/run_alignment.py` | EnergyPlus alignment test: re-runs a ClimateStudio model and compares with ClimateStudio's results. |
 | `tools/run_energyplus.py` | Runs EnergyPlus 23.1 on any `.epJSON` with the examples' weather file. |

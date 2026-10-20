@@ -95,3 +95,14 @@ test('the solver balances every zone, gives two-way flow when warm inside, and l
   const sw = windy.links.find((l) => l.name === 'Room:s:w');
   assert.ok(sw.backward > 10 * sw.forward, 'a south wind blows in through the south window');
 });
+
+test('flow streams: two-way windows bring cold air in at the bottom, and every zone sends on what it receives', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const net = buildNetwork(twoRooms(), { doors: false });
+  const conditions = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0.5, 'Hall:s:w': 0.5 }, zones: { Room: { t: 26, w: 0.008 }, Hall: { t: 26, w: 0.008 } }, outdoor: { t: 16, w: 0.007, pressure: 101325, windSpeed: 0, windDirection: 0 } };
+  const f = flowStreams(net, solveNetwork(net, conditions), conditions);
+  const win = net.links.findIndex((l) => l.name === 'Room:s:w');
+  const [inflow, outflow] = [f.streams.find((s) => s.link === win && s.from < 0), f.streams.find((s) => s.link === win && s.from >= 0)];
+  assert.ok(inflow.band[1] <= outflow.band[0] + 1e-12 && inflow.band[0] === 0, 'outdoor air enters through the bottom band');
+  net.zones.forEach((z, i) => near(f.outlets[i].reduce((s, x) => s + x.rate, 0), f.throughflow[i], 1e-9, `${z} sends on its inflow`));
+});

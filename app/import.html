@@ -101,6 +101,8 @@ button.quiet { background: transparent; color: var(--accent); }
 .view-tools label { display: inline-flex; align-items: center; gap: 6px; }
 .view-tools select, .view-tools output { font: inherit; color: var(--ink); }
 .view-tools output { min-width: 4.5em; font-variant-numeric: tabular-nums; }
+.view-tools input[type=number] { width: 4.2em; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 2px 4px; }
+#air-total { color: var(--ink); }
 .viewer { position: relative; height: min(64vh, 620px); min-height: 320px; border-radius: 8px; overflow: hidden; background: var(--panel); }
 .viewer canvas { display: block; width: 100%; height: 100%; }
 .pick-info {
@@ -142,6 +144,16 @@ footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
       <label title="Surrounding buildings and other shading surfaces"><input type="checkbox" id="show-shading" checked> Shading</label>
       <button id="fit" class="quiet" title="Fit the whole building in view">Fit</button>
       <span title="Left click: select a surface or window · Right drag: orbit · Middle drag: pan · Wheel: zoom">Mouse controls</span>
+    </div>
+    <div class="view-tools">
+      <label title="Particles follow the airflow network: where outdoor air enters, which rooms it passes through and where it leaves. They do not show the pattern of air inside each room."><input type="checkbox" id="show-air" checked> Airflow</label>
+      <label title="Outdoor air temperature">Outdoor <input type="number" id="t-out" value="18" step="1"> °C</label>
+      <label title="Indoor air temperature, the same in every zone for now">Indoor <input type="number" id="t-in" value="26" step="1"> °C</label>
+      <label title="Wind speed at the weather station">Wind <input type="number" id="wind" value="3" min="0" step="0.5"> m/s</label>
+      <label title="Direction the wind comes from, in degrees clockwise from north (270 = west)">from <input type="number" id="wind-dir" value="270" min="0" max="359" step="15">°</label>
+      <label title="Open every operable window as far as its operable fraction allows"><input type="checkbox" id="windows-open" checked> Windows open</label>
+      <label title="How much faster than real time the particles move">Speed <input type="range" id="air-speed" min="1" max="30" value="5"> <output id="air-speed-value">×5</output></label>
+      <output id="air-total"></output>
     </div>
     <div class="viewer" id="viewer">
       <div class="pick-info" id="info" hidden></div>
