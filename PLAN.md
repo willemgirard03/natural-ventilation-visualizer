@@ -284,11 +284,28 @@ Results on Example\_02 (EnergyPlus 23.1, full year, no severe errors in the annu
 | Variant | Mean flow through windows | Between zones | Zone temperature vs ClimateStudio's simple mode |
 | --- | --- | --- | --- |
 | Network, cracks only | 13,745 m³/h | 122 m³/h through cracks, under 1% | mean difference 0.31 °C, 92% of zone-hours within 0.5 °C |
-| Network with the 17 added doors | 14,012 m³/h | 6,962 m³/h through the doors (230–532 m³/h each, median 454); 24 m³/h through cracks | mean difference 0.55 °C, 50% within 0.5 °C; circulation zones differ most (0.7 °C) |
+| Network with the 17 added doors | 14,001 m³/h | 9,482 m³/h through the doors (318–712 m³/h each, median 602); 20 m³/h through cracks | mean difference 0.62 °C, 42% within 0.5 °C; circulation zones differ most |
 
 - **Without interior openings the network is twelve separate rooms.** That is why the doors were added.
-- **With doors, the stairwell works as a stack.** Over the year, about 210 m³/h enters it through its ground-floor doors and 205 m³/h leaves through its upper-floor doors; in July and August about twice that. This is the kind of path the network solver must reproduce.
-- **Sizing warmup does not converge with doors.** EnergyPlus reports 12 severe errors, all in the extreme-summer sizing period for the ideal-loads equipment, which is switched off; the annual run converges. Worth removing later, for example by skipping zone sizing in the network variant.
+- **With doors, the stairwell works as a stack.** Over the year, about 210 m³/h enters it through its ground-floor doors and leaves through its upper-floor doors; in July and August about 340 m³/h. This is the kind of path the network solver must reproduce.
+- **Sizing warmup does not converge with doors.** EnergyPlus reports 6 severe errors, all in the extreme-summer sizing period for the ideal-loads equipment, which is switched off; the annual run converges. Worth removing later, for example by skipping zone sizing in the network variant.
+- **Corrected 20 Oct:** the first door run wrote the doors' corners from the wrong starting corner for this model's geometry rules, so EnergyPlus read each door as 2.1 m wide and 0.9 m tall. The figures above are from the corrected run.
+
+**Network solver (built 20 Oct).** `src/solver/network.js` solves the same network for one moment: zone pressures and the flow both ways through every crack, window and door. It follows EnergyPlus 23.1's AirflowNetwork source code equation by equation, and the export and the solver share one list of network elements. Checked against an EnergyPlus run of Example\_02 for 1–7 July at 10-minute steps (`node tools/check_solver.mjs`, also an automated test): 1,008 steps, 138 links, every step converged.
+
+| Links | Mean flow | Difference from EnergyPlus |
+| --- | --- | --- |
+| Windows | 19,687 m³/h | 0.000% |
+| Doors | 10,461 m³/h | 0.001% |
+| Cracks | 288 m³/h | 0.001% |
+
+Each solve takes about 0.3 ms on the laptop, against 25 s for EnergyPlus to simulate the week. Fast enough to re-solve every frame while a student drags a window or changes the hour. What matching EnergyPlus exactly required, each worth knowing when comparing with ClimateStudio:
+
+- **ClimateStudio's weather station is suburban.** Its files contain a `Site:WeatherStation` that places the wind sensor in suburban terrain (exponent 0.22, 370 m) rather than EnergyPlus's default open country. Wind speeds at the building come out 40% higher, and wind pressures 95% higher, than EnergyPlus's defaults would give. The same applies to ClimateStudio's simple mode.
+- **EnergyPlus solves the network with the previous timestep's zone temperatures**, before updating the zones.
+- **A surface's height in the network is EnergyPlus's centroid**: the plain average of the corners when a surface has five or more. For Example\_02's L-shaped roof planes that is 1.2 m above the true centre of area.
+- **Simple openings treat the pressure difference at their centre as if it were at their bottom.** This places the neutral plane half the opening's height higher than physics would. The tool reproduces it for the comparison. A later option could offer the physical version, and the difference is worth showing students.
+
 
 These runs are the reference for the tool's network solver: hourly flow through every opening and crack (`AFN Linkage` outputs) and node pressures.
 
@@ -409,7 +426,7 @@ where V is zone volume, C the indoor concentration, N the number of people (dens
 The 2D prototype proves the solver; the path to 3D adds a fast network layer so a whole building stays real-time.
 
 1. **2D section solver (done).** Grid solver with buoyancy, heat gains, wind boundary layer and sash geometry as solid cells. Mass balance within 0–9% across test cases; closed windows read zero flow.
-2. **Network layer.** One node per zone, one link per opening, solving wind and stack pressures in milliseconds. Gives flow rates for every opening in every zone (12 in Example\_02, 46 in Example\_01), checked against EnergyPlus's own airflow network run of the same model.
+2. **Network layer (solver built 20 Oct; see EnergyPlus foundation).** One node per zone, one link per opening, solving wind and stack pressures in milliseconds. Gives flow rates for every opening in every zone (12 in Example\_02, 46 in Example\_01), checked against EnergyPlus's own airflow network run of the same model.
 3. **3D grid for a focus area.** The student picks a few zones (or one floor); the 3D grid solves those in detail, using network flow rates as boundary conditions at the openings. Plan and section are slices of this field.
 4. **GPU port.** Move the solver to WebGPU so finer grids and more zones stay interactive. Measure on a typical student laptop before committing.
 5. **Validation.** Compare against EnergyPlus for every model, and 3–5 room-scale cases against Carbonfly/OpenFOAM (same geometry, same boundary conditions). Publish the comparison in the tool so students know how far to trust it.

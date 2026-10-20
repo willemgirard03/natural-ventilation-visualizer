@@ -47,8 +47,57 @@ export function footprintAxis(model) {
   return { azimuth, ratio: Math.min(best.w, best.h) / Math.max(best.w, best.h) };
 }
 
-export function toAirflowNetwork(model, options = {}) {
+
+// The network's elements, shared by the EnergyPlus export and the tool's own solver so both use the
+// same inputs. Each link joins the zone of its surface ("from") to the adjacent zone or, when "to"
+// is null, to outdoors; flow from "from" to "to" is positive, as in EnergyPlus.
+//   crack:   coefficient (kg/s at 1 Pa, reference conditions) and exponent
+//   opening: a window or door; open over openFactor of its width, or a crack along its edges when closed.
+//            control: 'zone' (follows the zone's venting control), 'open' (always) or 'closed' (never).
+export function networkElements(model, options = {}) {
   const o = { ...NETWORK_DEFAULTS, ...options };
+  const links = [];
+  for (const s of Object.values(model.surfaces)) {
+    const interzone = s.boundary === 'Surface';
+    if (!(s.boundary === 'Outdoors' || (interzone && s.name < s.adjacentSurface))) continue; // one of each pair
+    links.push({
+      name: s.name, type: 'crack', from: s.zone, to: interzone ? s.adjacentZone : null, vertices: s.vertices,
+      coefficient: coefficient(o.surfaceLeakage50 * area(s.vertices), o.flowExponent), exponent: o.flowExponent,
+    });
+  }
+  const opening = (link) => ({
+    type: 'opening', closedCoefficient: coefficient(o.windowLeakage50, o.flowExponent), exponent: o.flowExponent,
+    dischargeCoefficient: o.dischargeCoefficient, ...link,
+  });
+  for (const w of Object.values(model.windows)) {
+    const parent = model.surfaces[w.parent];
+    if (!parent || parent.boundary !== 'Outdoors') continue;
+    const fraction = w.operableFraction?.value;
+    links.push(opening({ name: w.name, from: w.zone, to: null, vertices: w.vertices, openFactor: fraction ? Math.min(1, fraction) : 1, control: fraction ? 'zone' : 'closed' }));
+  }
+  const doors = o.doors ? interiorDoors(model) : [];
+  for (const d of doors) links.push(opening({ name: d.name, from: d.zone, to: d.partnerZone, vertices: d.vertices, openFactor: 1, control: 'open', door: d }));
+  return { zones: Object.keys(model.zones), links, doors, options: o };
+}
+
+// Extra outputs for checking the tool's solver: the inputs it needs and the network's results.
+const CHECK_OUTPUTS = [
+  'Site Outdoor Air Drybulb Temperature', 'Site Outdoor Air Humidity Ratio', 'Site Outdoor Air Barometric Pressure',
+  'Site Wind Speed', 'Site Wind Direction', 'Zone Mean Air Temperature', 'Zone Air Humidity Ratio',
+  'AFN Linkage Node 1 to Node 2 Pressure Difference', 'AFN Node Temperature', 'AFN Node Humidity Ratio',
+];
+const NETWORK_OUTPUTS = [
+  'AFN Linkage Node 1 to Node 2 Mass Flow Rate', 'AFN Linkage Node 2 to Node 1 Mass Flow Rate',
+  'AFN Surface Venting Window or Door Opening Factor', 'AFN Node Total Pressure',
+  'AFN Zone Infiltration Air Change Rate', 'AFN Zone Ventilation Air Change Rate',
+];
+
+// options beyond NETWORK_DEFAULTS:
+//   reporting: 'Hourly' (default) or 'Timestep' for the network outputs
+//   runPeriod: [beginMonth, beginDay, endMonth, endDay] to shorten the run
+//   checkOutputs: true adds the solver's inputs (weather, zone temperatures) at the same frequency
+export function toAirflowNetwork(model, options = {}) {
+  const { links, doors, options: o } = networkElements(model, options);
   const ep = structuredClone(model.epjson);
   // Simple airflow objects are replaced by the network.
   delete ep['ZoneVentilation:WindandStackOpenArea'];
@@ -87,59 +136,57 @@ export function toAirflowNetwork(model, options = {}) {
   ep['AirflowNetwork:MultiZone:Zone'] = zones;
 
   const cracks = {}, openings = {}, surfaces = {};
-  for (const s of Object.values(model.surfaces)) {
-    const interzone = s.boundary === 'Surface';
-    if (!(s.boundary === 'Outdoors' || (interzone && s.name < s.adjacentSurface))) continue; // one of each pair
-    const crack = `AFN Crack ${s.name}`;
-    cracks[crack] = {
-      air_mass_flow_coefficient_at_reference_conditions: coefficient(o.surfaceLeakage50 * area(s.vertices), o.flowExponent),
-      air_mass_flow_exponent: o.flowExponent,
-      reference_crack_conditions: 'AFN Reference Conditions',
-    };
-    surfaces[`AFN Surface ${s.name}`] = { surface_name: s.name, leakage_component_name: crack, window_door_opening_factor_or_crack_factor: 1 };
-  }
-  for (const w of Object.values(model.windows)) {
-    const parent = model.surfaces[w.parent];
-    if (!parent || parent.boundary !== 'Outdoors') continue;
-    const component = `AFN Window ${w.name}`;
+  for (const l of links) {
+    if (l.type === 'crack') {
+      cracks[`AFN Crack ${l.name}`] = { air_mass_flow_coefficient_at_reference_conditions: l.coefficient, air_mass_flow_exponent: l.exponent, reference_crack_conditions: 'AFN Reference Conditions' };
+      surfaces[`AFN Surface ${l.name}`] = { surface_name: l.name, leakage_component_name: `AFN Crack ${l.name}`, window_door_opening_factor_or_crack_factor: 1 };
+      continue;
+    }
+    const component = l.door ? 'AFN Interior Door' : `AFN Window ${l.name}`;
     openings[component] = {
-      air_mass_flow_coefficient_when_opening_is_closed: coefficient(o.windowLeakage50, o.flowExponent),
-      air_mass_flow_exponent_when_opening_is_closed: o.flowExponent,
+      air_mass_flow_coefficient_when_opening_is_closed: l.closedCoefficient,
+      air_mass_flow_exponent_when_opening_is_closed: l.exponent,
       minimum_density_difference_for_two_way_flow: 0.0001,
-      discharge_coefficient: o.dischargeCoefficient,
+      discharge_coefficient: l.dischargeCoefficient,
     };
-    const fraction = w.operableFraction?.value;
-    surfaces[`AFN Surface ${w.name}`] = {
-      surface_name: w.name,
-      leakage_component_name: component,
-      window_door_opening_factor_or_crack_factor: fraction ? Math.min(1, fraction) : 1,
-      ventilation_control_mode: fraction ? 'ZoneLevel' : 'NoVent',
+    surfaces[`AFN Surface ${l.name}`] = {
+      surface_name: l.name, leakage_component_name: component, window_door_opening_factor_or_crack_factor: l.openFactor,
+      ventilation_control_mode: { zone: 'ZoneLevel', open: 'Constant', closed: 'NoVent' }[l.control],
     };
   }
-  if (o.doors) addDoors(model, ep, surfaces, openings, o);
+  if (doors.length) writeDoors(ep, doors);
   ep['AirflowNetwork:MultiZone:Surface:Crack'] = cracks;
   ep['AirflowNetwork:MultiZone:Component:SimpleOpening'] = openings;
   ep['AirflowNetwork:MultiZone:Surface'] = surfaces;
 
-  // Hourly network results: flow through every linkage, window opening, node pressure, zone air changes.
+  const frequency = o.reporting || 'Hourly';
   const outputs = { ...ep['Output:Variable'] };
-  for (const variable of ['AFN Linkage Node 1 to Node 2 Mass Flow Rate', 'AFN Linkage Node 2 to Node 1 Mass Flow Rate',
-    'AFN Surface Venting Window or Door Opening Factor', 'AFN Node Total Pressure',
-    'AFN Zone Infiltration Air Change Rate', 'AFN Zone Ventilation Air Change Rate']) {
-    outputs[variable] = { key_value: '*', variable_name: variable, reporting_frequency: 'Hourly' };
+  for (const v of [...NETWORK_OUTPUTS, ...(o.checkOutputs ? CHECK_OUTPUTS : [])]) {
+    outputs[`AFN check ${v}`] = { key_value: '*', variable_name: v, reporting_frequency: frequency };
   }
   ep['Output:Variable'] = outputs;
+  if (o.runPeriod) {
+    const [bm, bd, em, ed] = o.runPeriod;
+    const [name, rp] = Object.entries(ep.RunPeriod || { 'Run Period 1': {} })[0];
+    ep.RunPeriod = { [name]: { ...rp, begin_month: bm, begin_day_of_month: bd, end_month: em, end_day_of_month: ed } };
+  }
   return ep;
 }
 
-// Writes the tool's interior doors as door subsurfaces (one in each zone, pointing at each other),
-// with an always-open simple opening on one of each pair.
-function addDoors(model, ep, surfaces, openings, o) {
-  const doors = interiorDoors(model);
-  if (!doors.length) return;
+// Writes the tool's interior doors as door subsurfaces, one in each zone, pointing at each other.
+// Corners follow the model's GlobalGeometryRules: EnergyPlus reads a rectangle's width and height
+// from the corner order, so a door listed from the wrong corner would be read lying on its side.
+function writeDoors(ep, doors) {
   const rules = Object.values(ep.GlobalGeometryRules || {})[0] || {};
   const relative = String(rules.coordinate_system || 'Relative').toLowerCase() === 'relative';
-  const local = (pts, zone) => (relative ? fromBuilding(pts, ep.Zone[zone]) : pts);
+  const first = { upperleftcorner: 0, lowerleftcorner: 1, lowerrightcorner: 2, upperrightcorner: 3 }[String(rules.starting_vertex_position || 'UpperLeftCorner').toLowerCase()] ?? 0;
+  const clockwise = String(rules.vertex_entry_direction || 'Counterclockwise').toLowerCase() === 'clockwise';
+  // Door corners come upper left, lower left, lower right, upper right (counterclockwise from outside).
+  const ordered = (pts) => {
+    const r = [...pts.slice(first), ...pts.slice(0, first)];
+    return clockwise ? [r[0], ...r.slice(1).reverse()] : r;
+  };
+  const local = (pts, zone) => ordered(relative ? fromBuilding(pts, ep.Zone[zone]) : pts);
   ep.Material = { ...ep.Material, 'AFN Door Wood': { roughness: 'MediumSmooth', thickness: 0.04, conductivity: 0.15, density: 600, specific_heat: 1600 } };
   ep.Construction = { ...ep.Construction, 'AFN Interior Door': { outside_layer: 'AFN Door Wood' } };
   const fen = { ...ep['FenestrationSurface:Detailed'] };
@@ -148,16 +195,9 @@ function addDoors(model, ep, surfaces, openings, o) {
     local(pts, zone).forEach(([x, y, z], i) => Object.assign(f, { [`vertex_${i + 1}_x_coordinate`]: x, [`vertex_${i + 1}_y_coordinate`]: y, [`vertex_${i + 1}_z_coordinate`]: z }));
     fen[name] = f;
   };
-  openings['AFN Interior Door'] = {
-    air_mass_flow_coefficient_when_opening_is_closed: coefficient(o.windowLeakage50, o.flowExponent),
-    air_mass_flow_exponent_when_opening_is_closed: o.flowExponent,
-    minimum_density_difference_for_two_way_flow: 0.0001,
-    discharge_coefficient: o.dischargeCoefficient,
-  };
   for (const d of doors) {
     write(d.name, d.surface, d.partnerName, d.vertices, d.zone);
     write(d.partnerName, d.partnerSurface, d.name, d.partnerVertices, d.partnerZone);
-    surfaces[`AFN Surface ${d.name}`] = { surface_name: d.name, leakage_component_name: 'AFN Interior Door', window_door_opening_factor_or_crack_factor: 1, ventilation_control_mode: 'Constant' };
   }
   ep['FenestrationSurface:Detailed'] = fen;
 }

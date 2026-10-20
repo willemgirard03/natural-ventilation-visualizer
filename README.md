@@ -15,11 +15,14 @@ Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findi
 | Path | What it is |
 | --- | --- |
 | `prototype/section-airflow.html` | Phase 1 2D section prototype. Open it in any browser. |
-| `src/model/` | Project model: `.epJSON` importer and exporter, geometry, constructions, schedules. Plain JavaScript modules, no build step. |
+| `src/model/` | Project model: `.epJSON` importer and exporter, airflow network export, tool-added interior doors, geometry, constructions, schedules. Plain JavaScript modules, no build step. |
+| `src/solver/` | Airflow network solver: zone pressures and flows through every crack, window and door at one moment, matching EnergyPlus's airflow network. |
 | `app/import.html` | Model import page: load an `.epJSON`, see it in 3D, see zones, windows, constructions and model checks, export it again. |
 | `app/view3d.js` | 3D view of the model (three.js): surfaces by type or zone, windows, shading, a horizontal cut, selection, model-check problems in red. |
 | `tests/` | Automated tests (`npm test`), including checks against EnergyPlus's own reading of the two example models. |
 | `tools/run_alignment.py` | EnergyPlus alignment test: re-runs a ClimateStudio model and compares with ClimateStudio's results. |
+| `tools/run_energyplus.py` | Runs EnergyPlus 23.1 on any `.epJSON` with the examples' weather file. |
+| `tools/check_solver.mjs` | Checks the network solver against an EnergyPlus run, step by step. |
 | `tools/compare_eso.py` | Compares two EnergyPlus `.eso` result files output by output; used by the alignment test. |
 | `tools/cs_desktop_kit/` | ClimateStudio inspection scripts (see its README). |
 | `PLAN.md` | Project plan; read first at the start of every session. |
