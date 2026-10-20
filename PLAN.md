@@ -244,22 +244,27 @@ EnergyPlus is the reference engine: the tool's data follows EnergyPlus's own inp
 | Example\_02 (2226\_Emmenweid) | 12 | 96 s | 0.009 °C | 99.7% | within 0.03% |
 
 - **Weather file:** the runs used `CAN_BC_Vancouver_Intl_AP_718920_TDY-CWEC2020v2.epw`, identified from the extreme design week (10–16 August) and three sizing temperatures. The CWEC2020v2, TMYx and three morphed future files do not match.
-- **Shading is not the cause of the remaining difference** (corrected 20 Oct; the sandbox result was first put down to shading). ClimateStudio asks for GPU pixel counting; the sandbox had no GPU and fell back to polygon clipping, so transmitted solar differed by about 0.01% over the year. The run on the desktop's GPU (below) matches transmitted solar exactly, yet the temperature difference is unchanged. Lights, equipment and people match exactly in both.
-- **The larger hourly differences come from window control flipping.** In naturally ventilated zones on warm afternoons, both runs swing 2–4 °C from hour to hour: windows open above 25 °C, the large opening area dumps the heat within one 10-minute step, the windows close, and the cycle repeats. Tiny shading differences shift the timing of each flip. This on/off behaviour of ClimateStudio's simple ventilation is itself worth showing students.
+- **Shading explains the sandbox's Example\_01 difference but not Example\_02's** (corrected 20 Oct; both were first put down to shading). ClimateStudio asks for GPU pixel counting; the sandbox had no GPU and fell back to polygon clipping, so transmitted solar differed by about 0.01% over the year. On the desktop's GPU (below), transmitted solar matches exactly in both models: Example\_01's difference disappears, but Example\_02's is unchanged. Lights, equipment and people match exactly in all runs.
+- **The larger hourly differences come from window control flipping.** In naturally ventilated zones on warm afternoons, both runs swing 2–4 °C from hour to hour: windows open above 25 °C, the large opening area dumps the heat within one 10-minute step, the windows close, and the cycle repeats. Tiny numerical differences shift the timing of each flip. This on/off behaviour of ClimateStudio's simple ventilation is itself worth showing students.
 - **Where EnergyPlus runs:** a Linux server works and runs these models in 1.5–2.5 minutes; a GPU is needed only to reproduce pixel-counting shading exactly.
 
-**Gate test, step 1 repeated on the desktop (20 Oct): passed.** `tools/run_alignment.py example02 --repeat` ran EnergyPlus 23.1.0-87ed9199d4 on Windows with GPU pixel-counting shading, on ClimateStudio's unmodified `.epJSON`, in about 2 minutes:
+**Gate test, step 1 repeated on the desktop (20 Oct): passed for both models.** `tools/run_alignment.py` ran EnergyPlus 23.1.0-87ed9199d4 on Windows with GPU pixel-counting shading, on ClimateStudio's unmodified `.epJSON` files:
 
-| Measure | Desktop (GPU) | Sandbox (no GPU) |
-| --- | --- | --- |
-| Mean difference in zone air temperature | 0.0084 °C | 0.009 °C |
-| Zone-hours within 0.5 °C | 99.74% | 99.7% |
-| Transmitted solar | identical | about 0.01% off |
-| Annual totals | within 0.05% for most outputs; ventilation heat gain 7.9% (a small total) | within 0.03% |
-| Warnings and severe errors | 36 and 2, the same as ClimateStudio's run | — |
+| Measure | Example\_02, desktop (GPU) | Example\_02, sandbox | Example\_01, desktop (GPU) | Example\_01, sandbox |
+| --- | --- | --- | --- | --- |
+| Run time | 2 min | 96 s | 2 min 39 s | 136 s |
+| Outputs compared | 285 | — | 1,074 | — |
+| Mean difference in zone air temperature | 0.0084 °C | 0.009 °C | 0.00000005 °C | 0.0003 °C |
+| Largest hourly difference | 5.8 °C | — | 0.000002 °C | — |
+| Zone-hours within 0.5 °C | 99.74% | 99.7% | 100% | 99.99% |
+| Transmitted solar | identical | about 0.01% off | identical | about 0.01% off |
+| Annual totals | within 0.05% for most outputs; ventilation heat gain 7.9% (a small total) | within 0.03% | identical to 4 decimal places | within 0.01% |
+| Warnings and severe errors | 36 and 2, as in ClimateStudio's run | — | 99 and 11, as in ClimateStudio's run | — |
 
-- **The runs are identical until late July.** Every zone matches ClimateStudio to within 0.01 °C for the first 210 days. Differences begin on day 211 (30 July) and stay in the three naturally ventilated offices (`GF_Office_2_1`, `GF_Office_1_0`, `2F_Office_8`; up to 5.8 °C in single hours), with small spill-over into the two meeting rooms. Circulation, toilets and the stairwell never differ by more than 0.05 °C.
-- **EnergyPlus is repeatable on one computer.** Three runs on the desktop gave bit-identical results. The difference from ClimateStudio therefore comes from running on a different computer: most likely rounding-level differences between processors or system libraries, amplified by the window control flipping described above (an interpretation, not yet tested). Exact agreement with ClimateStudio is not achievable without ClimateStudio's own computer; the test thresholds are a mean difference of at most 0.05 °C and at least 99% of zone-hours within 0.5 °C.
+- **Example\_01 is reproduced exactly**, to the precision of the `.eso` files. With GPU shading, nothing distinguishes the desktop's run from ClimateStudio's.
+- **Example\_02 is identical until late July.** Every zone matches ClimateStudio to within 0.01 °C for the first 210 days. Differences begin on day 211 (30 July) and stay in the three naturally ventilated offices (`GF_Office_2_1`, `GF_Office_1_0`, `2F_Office_8`; up to 5.8 °C in single hours), with small spill-over into the two meeting rooms. Circulation, toilets and the stairwell never differ by more than 0.05 °C.
+- **Why the two models differ.** EnergyPlus is repeatable on one computer: three Example\_02 runs on the desktop were bit-identical. Between computers it is not quite: Example\_01's residual differences of about 0.000002 °C show rounding-level differences between the desktop and ClimateStudio's computer. In Example\_01 they stay at that size. In Example\_02 they are amplified once a window opening lands on the other side of its 25 °C setpoint, after which the window control flipping described above follows a different sequence. This is an interpretation consistent with all runs, not a proof; finding the first hour a window state differs would confirm it. Exact agreement on Example\_02 is not achievable without ClimateStudio's own computer, so the test thresholds are a mean difference of at most 0.05 °C and at least 99% of zone-hours within 0.5 °C.
+- **Example\_02's sensitivity is a property of the model.** Small changes in window timing produce hour-to-hour differences of several degrees in its naturally ventilated offices. The tool should show this on/off sensitivity rather than hide it.
 - **EnergyPlus cannot run from the project drive.** The drive is formatted exFAT, and EnergyPlus 23.1 crashes at startup (Windows error 0xC0000409 in `ucrtbase.dll`) when started from it; the same files run normally from C:, with or without spaces in the path. See Workflow and constraints for how each computer gets its copy.
 
 Step 2, still to do: the same comparison for an input file written by the tool itself rather than by ClimateStudio.
@@ -409,7 +414,7 @@ No ClimateStudio license is available, so validation works only from the two run
 5. Keep large files out of the repository. GitHub rejects files over 100 MB, and the results folders hold a 984 MB shading file and 40–150 MB `.eso` files. The repository refers to them by path in `A2` instead; only small test inputs (`.epJSON`, weather files) may be copied in.
 6. First commit and push, then a quick check that a second computer can clone it.
 
-**Then phase 2,** starting with the automated alignment test: run EnergyPlus on the Example\_02 `.epJSON`, compare with ClimateStudio's `.eso`, and report the result. This repeats the sandbox test on your own computer. **Done 20 Oct on the desktop:** passed; see EnergyPlus foundation.
+**Then phase 2,** starting with the automated alignment test: run EnergyPlus on the Example\_02 `.epJSON`, compare with ClimateStudio's `.eso`, and report the result. This repeats the sandbox test on your own computer. **Done 20 Oct on the desktop:** passed for Example\_02 and, ahead of schedule, for Example\_01; see EnergyPlus foundation.
 
 **Running EnergyPlus on each computer.** The master copy is `E:\ARCH 540\tools\EnergyPlus-23.1.0` (the portable zip, 635 MB unpacked), but EnergyPlus cannot run from the exFAT drive, so each computer runs a local copy at `C:\EnergyPlus-23.1.0`. Only what a run and the Python API need is copied: the top-level program files, `pyenergyplus` and `python_standard_lib`, about 125 MB, taking about 5 seconds. Examples, documentation and pre/post-processors are left out, because the desktop's C: drive has only about 8 GB free. `tools/run_alignment.py` makes this copy itself the first time it runs on a computer that lacks it, and checks the build before every run; `--energyplus` or the `EPLUS_DIR` environment variable point it elsewhere. Large outputs (`.eso`, the ~1 GB shading CSV, which the script deletes unless `--keep-shading` is given) are written to `runs/` on the project drive, which Git ignores.
 
