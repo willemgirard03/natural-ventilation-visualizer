@@ -1,0 +1,481 @@
+# Natural Ventilation Visualizer — Project Plan
+
+Oct 16, 2026 · @Will
+
+## Purpose and scope
+
+The tool shows students how air actually moves through their building — in plan, section and 3D, in real time — using the same model they already build for ClimateStudio thermal analysis.
+
+It fills the gap ClimateStudio leaves: ClimateStudio reports zone temperatures and ventilation rates, but shows no airflow pattern, no sash geometry, and little about how stack, cross and single-sided ventilation interact.
+
+- **Audience:** architecture students anywhere. A course that teaches ClimateStudio (starting January) prompted the idea and is a likely first audience, but the tool is not designed for one class.
+- **Primary job:** show how whole-building strategies (atria, double-height spaces, stacks and shafts, cross ventilation) move air through a building, and how those big moves are felt as comfort in the rooms. Particle flows are shown where the big moves happen; window type, position and opening size refine them. Not code compliance.
+- **Not in scope:** annual energy simulation, HVAC, solar gains (for now), validated quantitative CFD. ClimateStudio and OpenFOAM remain the tools for those.
+- **Licen****s****e stance:** works with a ClimateStudio model when one exists, and works fully without ClimateStudio.
+
+## Requirements
+
+Every consideration raised so far, in one place. "Phase" refers to the milestones at the end.
+
+| Requirement | Detail | Phase |
+| --- | --- | --- |
+| Visual, not just numbers | Live particles, speed, temperature and pressure fields; inflow/outflow labels at each opening | 1 (done in 2D) |
+| Plan, section and 3D | Section slices and plan slices of one 3D field; 3D particle view | 3 |
+| Real-time and lightweight | Interactive on a student laptop; no expensive GPU; 2D prototype runs \~3–5 ms per step (estimated) | 1–3 |
+| Captures stack, cross, single-sided ventilation and convection | Buoyancy, wind pressure, two-way flow through one opening, heat plumes | 1 (done in 2D) |
+| Transparent method | On-screen explanation of what is computed and what is not | 1 (done) |
+| Re-use ClimateStudio model setup | Zones, windows, opening fractions, temperature triggers, occupancy | 2 |
+| Work without ClimateStudio | Same conventions set up inside the tool or by layer naming | 2 |
+| Windows modelled as planes | Same 3–4 corner planes as ClimateStudio; the tool interprets them as awning, hopper, casement and redraws the sash | 2 |
+| Inherited settings with overrides | Values imported from ClimateStudio show their source; an override is marked (asterisk) and can be relinked | 2 |
+| Opening schedules | Temperature triggers as in ClimateStudio, plus an optional schedule | 2 |
+| Internal gains from occupancy | People density × metabolic rate × occupancy schedule, plus lights and equipment, as ClimateStudio does; no solar gains yet | 2 |
+| Stable zone identity | Splitting a zone never renumbers the others; zones keyed to Rhino object IDs or names | 2 |
+| Model quality control | Visible checks with click-to-select, like ClimateStudio's red outline for invalid windows | 2 |
+| Live sync with Rhino | Changes in Rhino update the tool automatically, with a re-sync button, like Twinmotion's Datasmith link | 4 |
+| Students on any laptop | Browser-based core; no install for the basic workflow | 1 |
+| CO2 levels | CO2 from occupancy, per zone and as a field in the room; shows whether ventilation is sufficient, not only whether air moves | 2–3 |
+| Surface classification like CS Intersector | Split and classify zone surfaces into roof, facade, partition, slab, external floor, ground slab, ground wall | 2 |
+| Wall thickness from constructions | Plan and section draw each surface at its construction's total thickness, from ClimateStudio or manual layers | 2 |
+| Construction properties | R-value and thermal capacitance per construction, for heat loss through walls and thermal mass | 3+ |
+| Simple vs network results | Show ClimateStudio's simple-mode airflow next to the network result, since simple mode assumes an ideal exhaust and cannot show real paths | 3 |
+| Pressure coefficient export (opportunity) | Compute wind pressure coefficients that include neighbouring buildings and export them for ClimateStudio's network CP input mode | 4+ |
+| EnergyPlus alignment | Data follows EnergyPlus's input format; annual results come from EnergyPlus; fast solvers agree with EnergyPlus; results line up with other EnergyPlus tools | 2–3 |
+| Measured occupancy schedules | Schedules from the ASHRAE Global Occupant Behavior Database as an alternative to design templates | 3 |
+| Whole-building strategies first | Atria, double-height spaces, stacks and shafts shown with particle flows; their effect shown as room comfort | 2–3 |
+| Sash type stored in the tool and in Rhino | Casement by default, awning as the stress test; saved in the tool and written back to Rhino window objects as user text | 2 (write-back later) |
+
+## What the ClimateStudio files contain
+
+The geometry is fully readable without a license; most ClimateStudio settings are too, but some are stored in an undocumented binary format. Checked by reading both files directly (rhino3dm and a decompressed .gh).
+
+**CS\_Building\_Model.3dm**
+
+- 47 zone volumes in this version of the file (the results folder comes from a later version with 46 zones and 92 windows), all closed (valid solids), one per layer named `CS::<Floor>::<Zone>`, e.g. `CS::Third_Floor::Meeting_Med`. The layer path already gives a stable, human-readable zone ID.
+- 85 glazing planes on `CS::Glazing`, all single 4-corner faces, all vertical, 84 of them 3.2 m tall. A bounding-box test suggests about 82 exterior and 3 interior windows (approximate; exact assignment needs face matching).
+- Ground surfaces, topography, exterior shading and a centre point on their own layers.
+- Elevator and stair zones run 24 m tall — natural stack-effect shafts worth showing.
+- No ClimateStudio data in object user text: zone and window settings are not stored on the Rhino objects. This is likely because this model is set up through Grasshopper, where the settings live in the .gh file; a model set up in the Rhino panel may store data differently.
+- Stray linework: `CS::Third_Floor::Bathroom` holds 9,298 curves (likely imported CAD). An example of what model checks should flag.
+
+**CS\_Simulation.gh** (ClimateStudio 2.2 components)
+
+| Data | Format | Readable without license? |
+| --- | --- | --- |
+| Component wiring (CS Energy Zone, CS Window, Internal Window, CS Boundary Object, CS Model Maker, Deconstruct CS Energy Model) | Grasshopper archive | Yes |
+| Natural ventilation settings | Plain JSON | Yes — buoyancy and wind on, opening setpoint 25 °C, outdoor air 10–26 °C, max humidity 90%, schedule "AllOn" |
+| HVAC system | Plain JSON | Yes — heating and cooling off (free-running), mechanical ventilation on |
+| Space-use templates and schedules (e.g. "OfficeMedium BLDG\_OCC\_SCH") | Base64 protobuf, field names stripped | Partly — names and hourly values are recoverable, but the layout is undocumented and may change between versions |
+| Window operable fraction, people density, metabolic rate | Not in the .gh JSON; confirmed instead in the results folders' .epJSON (see Findings) | Yes, via the .epJSON |
+
+**Deconstruct CS Energy Model** returns ClimateStudio's classified geometry, not settings or results (confirmed by you): Facade, Partition, Ceiling, Roof, External Floor, Floor, FloorGround, WallGround, Adiabatic Wall, Adiabatic Floor, Adiabatic Roof, Window, Internal Window and Shading. Without a license the ClimateStudio components do not compute, so this output is not available; the classified surfaces in the results folders' .epJSON files serve as the reference instead. Zone and window settings have to come from elsewhere: the plain JSON in the .gh, the library CSV export, an EnergyPlus input file if a results folder keeps one, or manual setup.
+
+The fourteen geometry categories map onto the seven construction types. The mapping below is inferred from the names and still to be confirmed:
+
+| Deconstruct output | Construction type |
+| --- | --- |
+| Facade | Facade |
+| Partition | Partition |
+| Floor, Ceiling | Slab (the same shared surface, seen from the zone above and the zone below) |
+| Roof | Roof |
+| External Floor | External Floor |
+| FloorGround | Ground Slab |
+| WallGround | Ground Wall |
+| Adiabatic Wall, Adiabatic Floor, Adiabatic Roof | Unknown; likely the matching wall, slab or roof construction with no heat flow through it |
+| Window, Internal Window | Glazing |
+| Shading | None |
+
+## Findings from the ClimateStudio results folder
+
+The results folder for a version of the shared model (`Willem_Girard_CS_V3`) contains ClimateStudio's complete EnergyPlus input as `.idf` and `.epJSON`, so these are confirmed facts rather than inferences. Settings may differ from the shared .gh file.
+
+**Run settings**
+
+| Setting | Value |
+| --- | --- |
+| EnergyPlus version | 23.1 |
+| Timesteps | 3 per hour (the research report said 4) |
+| Run period | Full year, hourly outputs |
+| Wind | Terrain "Suburbs": profile exponent 0.22, boundary layer 370 m, sensor at 10 m |
+| HVAC | Ideal loads with heating and cooling off; mechanical outdoor air capped at zero; so free-running |
+| Infiltration | 0.025 air changes per hour, constant |
+| Zones | 46, of which 31 have natural ventilation |
+| Windows | 92, all exterior; no interior windows in this run |
+| Airflow between zones | None: no airflow network and no zone mixing objects |
+
+**How simple airflow is written.** For each ventilated zone, ClimateStudio writes:
+
+- **One stack object** (name ends `_Buoy`) with the zone's total opening area, the wind term switched off (opening effectiveness 0), discharge coefficient 0.6, and height difference equal to a quarter of the window height (0.8 m for 3.2 m windows).
+- **One wind object per facade direction** (`_Wind0`, `_Wind1`, …) with that direction's opening area, effective angle set to the facade's compass direction, effectiveness calculated by EnergyPlus, and the stack term switched off (discharge coefficient 0).
+- **Opening area = glazing area × operable fraction** (0.8 in this model), split by facade direction. The wind areas sum exactly to the stack area.
+- **Controls on every object:** minimum indoor temperature 25 °C, indoor at least 1 K warmer than outdoor, outdoor between 10 and 26 °C, maximum wind 40 m/s.
+- **An hourly on/off availability schedule** per zone, open 47% of the year here. It appears to pre-apply the outdoor temperature and humidity limits hour by hour.
+
+What this means for students:
+
+- **Each zone is ventilated on its own.** No air passes between zones, so a stair or elevator shaft cannot drive stack ventilation across floors, and air cannot cross the building from one zone to another. The tool's network solver shows exactly what this leaves out.
+- **Wind and stack are added, not combined.** EnergyPlus combines wind and stack flow inside one ventilation object; splitting them into separate objects likely adds them instead, which tends to overstate airflow when both act. To confirm against EnergyPlus's documentation.
+
+**CO2 is calculated; reporting it is optional.** CO2 tracking is on, with outdoor CO2 from a yearly schedule of 409–415 ppm and EnergyPlus's default generation rate of 3.82×10⁻⁸ m³/s per watt of activity. At 125.28 W per person that is 0.0048 L/s, close to Persily and de Jonge's 0.0043 L/s. No CO2 output was requested in this run, so its results do not include it; the later version requests it, so ClimateStudio can report CO2. The tool can match these inputs exactly and show CO2 even when a ClimateStudio run did not ask for it.
+
+**People.** 0.0565 people/m², 125.28 W per person in every zone (one template). That is 1.2 met × 58 W/m² × 1.8 m², so ClimateStudio uses 58 W/m² per met, not the 58.2 in its documentation. EnergyPlus calculates the sensible share itself (sensible heat fraction set to autocalculate), so the tool should use EnergyPlus's correlation. Fraction radiant 0.3; occupancy schedule "OfficeMedium BLDG\_OCC\_SCH" (peak 0.95).
+
+**Constructions.** R and heat capacity computed from the layers, without surface film resistances.
+
+| Surface type | Construction | Thickness | R (m²·K/W) | Heat capacity (kJ/m²·K) |
+| --- | --- | --- | --- | --- |
+| Facade | 2226 Exterior Wall (plaster, two 365 mm clay block layers) | 0.795 m | 7.39 | 609 |
+| Roof | NECB-2020 CZ 8 Exterior Roof (Mass) | 0.509 m | 8.95 | 479 |
+| Partition | 200mmConcrete | 0.200 m | 0.10 | 456 |
+| Slab (ceiling side; floor side flipped) | 300mm concrete, 80mm insulation, 80mm screed | 0.460 m | 2.56 | 848 |
+| Ground slab | 300mmInsulation 200mmConcrete | 0.500 m | 8.92 | 471 |
+| External floor | defaultConstruction (no construction assigned) | 0.250 m | 0.11 | 504 |
+| Windows | TriplePaneLoE, simple glazing | — | U 0.785 W/m²·K | SHGC 0.764, VT 0.661 |
+
+Interzone surfaces appear twice, once per zone, with a `_FLIPPED` copy of the construction that reverses the layer order. The external floors silently fell back to a default construction, an example of what model checks should flag.
+
+**Usable results.** The hourly `.eso` file holds zone air, operative and radiant temperatures, ventilation and infiltration heat flows and humidity, readable without ClimateStudio (e.g. one zone ranged 16.3–30.8 °C over the year). This is the comparison data for validation. The binary `.csr` file is not needed.
+
+**Second pass: what the first reading missed**
+
+- **Two model versions.** The `.epJSON` (26 January) is the input that produced these results: the outputs finished two minutes after it was written and report the same 46 people objects. The `.idf` is a later version (29 January). It removes people, lights and equipment from storage, stairwells and elevators; adds more shading context (1,336 surfaces vs 420); requests the `Zone Air CO2 Concentration` output; and switches to the custom `CDS_*` constructions from Assemblies.gh, which also fixes the default external floor.
+- **Lights and equipment.** 6.57 W/m² of lighting and 10.33 W/m² of equipment in every zone, each on its own OfficeMedium schedule. Together that is about four times the sensible heat from people, so the tool's gains must include them.
+- **Ground temperature.** A constant 18 °C every month, EnergyPlus's typical value for ground under a heated building, not Vancouver's actual ground temperature. It matters for ground-floor zones.
+- **Weather and site.** Vancouver International Airport weather (a Canadian weather year file); the shading surfaces include surrounding context reaching about 700 m south of the building. Shading affects solar gains only; it plays no part in simple-mode wind.
+- **Space template.** "90.1-2019 MediumOffice - OpenOffice" (ASHRAE 90.1-2019), with outdoor air rates of 2.36 L/s per person plus 0.30 L/s per m², unused here because mechanical outdoor air is capped.
+- **Convection.** Inside surfaces use the TARP algorithm, outside surfaces DOE-2.
+- **The `.csr` file is partly readable.** It is ClimateStudio's own container: version string, weather file path, simulation settings (ground temperatures, reflectance), the space template, construction names, fuel types with what look like carbon and cost factors, then the hourly results as binary numbers. Not needed while the EnergyPlus files exist.
+- **Unventilated zones.** The 15 zones without natural ventilation are bathrooms, storage, stairwells, elevators, medium meeting rooms and one vestibule.
+
+**Custom constructions in the later version** (computed from layers, without film resistances):
+
+| Surface type | Construction | Thickness | R (m²·K/W) | Heat capacity (kJ/m²·K) |
+| --- | --- | --- | --- | --- |
+| Facade | CDS\_EW1: brick, wood fibre board, plywood, cellulose, brick | 0.720 m | 8.16 | 665 |
+| Partition | CDS\_W1: two gypsum boards each side of 180 mm cellulose | 0.230 m | 4.60 | 54 |
+| Slab | CDS\_F1: concrete topping, fibreboard, 175 mm CLT | 0.226 m | 1.51 | 237 |
+| Roof | CDS\_R1: tile, ballast, plywood, 300 mm wood fibre, 175 mm CLT | 0.590 m | 8.91 | 399 |
+| Ground slab | CDS\_EF1: 300 mm wood fibre board, concrete | 0.402 m | 7.19 | 333 |
+| External floor | CDS\_EF2: siding, wood fibre board, CLT, fibreboard, concrete | 0.538 m | 8.79 | 347 |
+
+ClimateStudio's three natural ventilation modes are described under ClimateStudio methods to replicate. Source for the simplified model ([Thermal Zone Settings](https://climatestudiodocs.com/docs/thermalZoneSettings.html)).
+
+## ClimateStudio methods to replicate
+
+Three parts of the ClimateStudio pipeline need to be reproduced so the tool works without a license and reads the same model the same way: surface classification, constructions, and the library.
+
+**Surface classification (CS Intersector).** Every zone solid passes through CS Intersector, which splits faces where zones meet and decides what each piece is. ClimateStudio assigns a construction to each of seven surface types ([Thermal Zone Settings](https://climatestudiodocs.com/docs/thermalZoneSettings.html)):
+
+| Surface type | ClimateStudio definition | How the tool can detect it |
+| --- | --- | --- |
+| Roof | Exterior top surfaces | Upward-facing face with no zone above it |
+| Facade | Exterior side surfaces | Vertical face with no zone on the other side, above ground |
+| Partition | Interior walls | Vertical face shared with another zone |
+| Slab | Interior floors (also used for interior ceilings) | Horizontal face shared with a zone above or below |
+| External floor | Exterior bottom surfaces not touching the ground | Downward face with no zone below and not on a ground surface |
+| Ground slab | Exterior bottom surfaces touching the ground surface | Downward face coincident with a ground surface |
+| Ground wall | Exterior surfaces below the ground surface that are not a ground slab | Face, or part of a face, below the ground surface |
+
+The detection rules are my proposal, not CS Intersector's documented logic. Partial overlaps matter: a wall half shared with a neighbour must split into a partition piece and a facade piece, and a window can only sit on the facade piece. Matching ClimateStudio's split results on the sample building is the test.
+
+**Constructions.** Each construction is a stack of material layers ordered outside to inside, each with a thickness in metres. Opaque materials are defined by properties including thermal conductivity and specific heat ([Manage Library](https://climatestudiodocs.com/docs/manageLibrary.html)). From the layers the tool can compute three values:
+
+```latex
+R_{layers} = \sum_i \frac{t_i}{k_i} \qquad C = \sum_i \rho_i \, c_i \, t_i \qquad T = \sum_i t_i
+```
+
+where t is thickness (m), k conductivity (W/m·K), ρ density (kg/m³) and c specific heat (J/kg·K). R is in m²·K/W, C in J/m²·K, T in m. Whether ClimateStudio's reported R-value also includes surface film resistances is unconfirmed.
+
+- **Thickness in drawings:** plan and section draw each surface as a band of thickness T, so the student sees walls, not lines. Which side of the modelled surface the thickness goes (inside, outside or centred) is an open question.
+- **Thermal use:** R gives heat loss through walls; C gives thermal mass (how slowly a heavy wall warms). Both are later phases; the 2D prototype treats walls as perfectly insulating with no mass.
+
+**The Assemblies.gh template** shows the manual route, in four components:
+
+1. **Get CS Material** searches the library by name (the example searches "Brick").
+2. **Construct CS Layer** takes a material and a thickness in metres.
+3. **Construct CS Construction** takes a name ("MyConstruction"), a category ("Facade"), the layers ordered outside to inside, and optional embodied energy, embodied carbon, cost and life.
+4. Outputs are the **Construction** and a **Construction Information** summary.
+
+The tool's manual setup should mirror these inputs so a student who has built constructions in ClimateStudio recognises them.
+
+**The library.** Zone templates, schedules, materials and constructions all live in the ClimateStudio library, locked by default. The whole library can be exported or imported as a set of CSV files ([Manage Library](https://climatestudiodocs.com/docs/manageLibrary.html)). A CSV export would give the tool every material, construction and schedule the class uses, but it needs a license; for now the same data comes from the EnergyPlus input files in the results folders.
+
+**Natural ventilation in ClimateStudio.** ClimateStudio is an EnergyPlus front end with no airflow solver of its own. Ventilation is calculated one of three ways, chosen in the advanced simulation settings. AirflowNetwork options and their override of the simple zone controls are confirmed on [Thermal Zone Settings](https://climatestudiodocs.com/docs/thermalZoneSettings.html); the three mode names come from the research report.
+
+| ClimateStudio mode | What EnergyPlus computes | What it cannot show | What the tool does |
+| --- | --- | --- | --- |
+| Simple airflow (default) | Each zone exchanges air with outdoors through `ZoneVentilation:WindandStackOpenArea`; the wind term assumes an "ideal exhaust" | Which window air enters or leaves by; any flow between zones | Network solver finds the actual paths; show both results side by side so students see why they differ |
+| Airflow network | Pressure network of zone nodes linked by openings, including flow between zones; wind pressure coefficients from EnergyPlus's surface-averaged formula based on building shape | Effect of neighbouring buildings on wind pressure | Same kind of network; the main comparison target for validation |
+| Airflow network CP input | Same network with pressure coefficients supplied from outside, e.g. CFD | — | Opportunity: the tool could compute context-aware coefficients and hand them to ClimateStudio |
+
+**Other ClimateStudio behaviour to match** (from the research report unless linked):
+
+- **Window placement:** windows must be planar, 3–4 corners, fully inside one parent surface and not touching its edges (an EnergyPlus constraint). Model checks should flag edge contact, and a window crossing a split line between two zones' surfaces must be split or flagged.
+- **Infiltration:** constant design flow per zone (coefficients 1, 0, 0, 0), with the rate taken from each zone's template ([Thermal Zone Settings](https://climatestudiodocs.com/docs/thermalZoneSettings.html)).
+- **Simulation defaults:** 3 timesteps per hour in the run we have (the report said 4), hourly results, full year.
+- **Wind:** weather-file wind is corrected for terrain and sensor height; the tool should apply the same correction so wind speeds line up.
+- **Results:** saved as binary `.CSR` files beside the Rhino file; tables can be exported to CSV from the interface, which is the practical route for comparisons.
+
+**Update:** the simple-mode fields are now known (see Findings from the ClimateStudio results folder). Still open: which opening type and closed-window leakage it writes for the network, and whether every interior window becomes a network opening. A results folder from an airflow network run would answer these.
+
+**Compatibility target.** The tool matches ClimateStudio's inputs and their meaning, not its numbers to the decimal. Numerical agreement needs the exact EnergyPlus input ClimateStudio writes, which is not public.
+
+## EnergyPlus foundation
+
+EnergyPlus is the reference engine: the tool's data follows EnergyPlus's own input format, its annual results come from EnergyPlus, and its fast solvers must agree with EnergyPlus for the same inputs. ClimateStudio becomes one input source among several, and results line up with any other EnergyPlus-based tool.
+
+| Layer | Role | Speed |
+| --- | --- | --- |
+| EnergyPlus annual run | Reference results for the whole year: zone temperatures, ventilation (simple or airflow network), CO2, comfort | Minutes; runs outside the browser |
+| Network solver | The same airflow network equations as EnergyPlus, for one moment in time | Milliseconds |
+| Grid solver | The airflow pattern inside rooms, with flows at openings taken from the network | Real time |
+
+- **Data model = EnergyPlus objects.** Zones, surfaces, windows, constructions, materials, schedules, people, lights, equipment, infiltration, ventilation, airflow network and CO2 objects are stored as EnergyPlus defines them. Fields EnergyPlus has no place for (sash type, hinge side, overrides) live in a side table keyed by object name.
+- **Import from any EnergyPlus tool.** ClimateStudio, Honeybee (Ladybug Tools), OpenStudio and DesignBuilder all write `.idf` or `.epJSON`; ClimateStudio's results folder is one case of this.
+- **Export and run.** The tool writes `.epJSON` and runs EnergyPlus on it, in two variants: ClimateStudio-style simple airflow (to reproduce ClimateStudio) and airflow network (to show flow between zones).
+- **Alignment test.** Re-running the imported ClimateStudio model through the tool's own export must reproduce ClimateStudio's hourly zone temperatures. Then the network solver is checked against EnergyPlus's airflow network for the same hours.
+- **Where EnergyPlus runs.** As far as I know there is no supported browser build, so a small local runner (a Python script using an installed EnergyPlus or its Python API) or a server is needed. Pin version 23.1 to match ClimateStudio; EnergyPlus releases twice a year. Open decision.
+
+**Gate test, step 1: passed.** EnergyPlus 23.1 (the same build ClimateStudio uses, 23.1.0-87ed9199d4) was installed in a Linux sandbox and run on ClimateStudio's own input files, unmodified, with the matching weather file. Every hourly output was compared with ClimateStudio's results:
+
+| Model | Zones | Run time | Mean difference in zone air temperature | Zone-hours within 0.5 °C | Annual totals |
+| --- | --- | --- | --- | --- | --- |
+| Example\_01 (Willem\_Girard\_CS\_V3) | 46 | 136 s | 0.0003 °C | 99.99% | within 0.01% |
+| Example\_02 (2226\_Emmenweid) | 12 | 96 s | 0.009 °C | 99.7% | within 0.03% |
+
+- **Weather file:** the runs used `CAN_BC_Vancouver_Intl_AP_718920_TDY-CWEC2020v2.epw`, identified from the extreme design week (10–16 August) and three sizing temperatures. The CWEC2020v2, TMYx and three morphed future files do not match.
+- **The only remaining difference is the shading method.** ClimateStudio asks for GPU pixel counting; without a GPU, EnergyPlus falls back to polygon clipping. Lights, equipment and people match exactly; transmitted solar differs by about 0.01% over the year.
+- **The larger hourly differences come from window control flipping.** In naturally ventilated zones on warm afternoons, both runs swing 2–4 °C from hour to hour: windows open above 25 °C, the large opening area dumps the heat within one 10-minute step, the windows close, and the cycle repeats. Tiny shading differences shift the timing of each flip. This on/off behaviour of ClimateStudio's simple ventilation is itself worth showing students.
+- **Where EnergyPlus runs:** a Linux server works and runs these models in 1.5–2.5 minutes; a GPU is needed only to reproduce pixel-counting shading exactly.
+
+Step 2, still to do: the same comparison for an input file written by the tool itself rather than by ClimateStudio.
+
+**Case study choice.** Example\_02 is the lighter validation case: 12 zones, the same ClimateStudio conventions, and it requested CO2 output, so its results include hourly CO2 for every zone to check the tool's CO2 calculation against.
+
+## Architecture
+
+The tool is a browser app with one project model at its centre; ClimateStudio and Rhino are inputs, not dependencies.
+
+&#91;embedded content: tool architecture · 3 inputs, 1 project model, 2 solvers, 1 viewer\]
+
+Dashed boxes are optional inputs. The importer works the same whether data comes from ClimateStudio or manual setup, so students without a license lose nothing but the import step. The ClimateStudio route reads the .epJSON that every ClimateStudio thermal run leaves in its results folder: it already contains the classified surfaces, windows with opening areas, constructions, schedules, people and ventilation settings, and reading it needs no license.
+
+**Delivery form.** Start as a web app that reads a saved .3dm (runs on any laptop, no install). Add live sync later through a small Rhino plugin that watches for edits and sends changed objects by ID to the tool, either in a panel docked inside Rhino or a browser tab on the same machine. A re-sync button re-sends everything if the link breaks.
+
+## Data model
+
+Every setting carries its source, so the tool can show where a value came from and let students override it without losing the link.
+
+**Objects**
+
+| Object | Geometry | Key | Settings |
+| --- | --- | --- | --- |
+| Zone | Closed solid, as in ClimateStudio | Rhino object ID, plus layer path as a readable name | Name, people density, metabolic rate, occupancy schedule, other internal loads |
+| Exterior window | 3–4 corner plane on a zone face | Rhino object ID | Operable fraction, opening setpoint, outdoor temperature limits, schedule, **sash type**, **hinge side** |
+| Interior window | Plane on a shared face between two zones | Rhino object ID | Same as exterior; door-like openings could be modelled as full-height interior windows (my assumption, unconfirmed) |
+| Ground, adiabatic, shading | Surfaces, as in ClimateStudio | Rhino object ID | Boundary type only |
+| Site | — | — | Weather file, wind speed and direction, outdoor temperature |
+
+**Surfaces and constructions**
+
+| Object | Source | Settings |
+| --- | --- | --- |
+| Classified surface | Split from zone solids, as CS Intersector does | Surface type (one of seven), the zones on each side, its construction |
+| Construction | ClimateStudio library CSV, a Grasshopper construction, or manual setup | Name, category, layers outside to inside; computed R-value, capacitance, total thickness |
+| Material | ClimateStudio library CSV or manual | Conductivity, density, specific heat |
+
+Each zone holds one construction per surface type, as in ClimateStudio; a surface takes its construction from its zone and type, and can be overridden like any other value.
+
+Sash type and hinge side are the new fields: ClimateStudio has no equivalent, so they default to casement, the closest match to how ClimateStudio treats windows. Awning is the stress test: when open it leaves gaps at the sides, so its free-area calculation differs. Sash type is set and saved in the tool and also written back to the Rhino window objects as user text (lower priority).
+
+**Window interpretation.** The plane is the rough opening. The tool chooses the sash angle that gives the inherited operable fraction as free area, then draws that sash in plan, section and 3D. For example, an awning at 0.3 operable fraction opens to the angle whose gap equals 30% of the plane's area. Where a mechanism cannot reach the fraction (a hopper limited to about 35°), the tool says so.
+
+**Inherited vs overridden.** Each value has one of three states:
+
+| State | Shown as | Meaning |
+| --- | --- | --- |
+| Inherited | Plain value, ClimateStudio icon | Read from the ClimateStudio export; updates on re-import |
+| Overridden | Value with asterisk | Changed in the tool; survives re-import; "Relink" restores the inherited value |
+| Local | Plain value, tool icon | Set in the tool with no ClimateStudio source (manual setup, sash type) |
+
+Overrides are stored by object ID, so they follow the object through re-imports and geometry edits.
+
+## Thermal gains
+
+Internal gains follow ClimateStudio's people model: peak density × metabolic heat × the hour's occupancy fraction. Lights and equipment add heat the same way (density × schedule) and must be included: in the sample run they give about four times the heat from people. Solar gains are out of scope for now.
+
+ClimateStudio defines 1 met as 58.2 W/m² of body surface and assumes 1.8 m² per adult, so a seated adult gives off about 104 W. Occupancy schedules hold 8,760 hourly fractions between 0 and 1 ([Thermal Zone Settings](https://climatestudiodocs.com/docs/thermalZoneSettings.html), [Schedule Editor](https://climatestudiodocs.com/docs/scheduleEditor.html)).
+
+```latex
+q_{people}(t) = \rho_{people} \cdot M \cdot 58.2 \cdot 1.8 \cdot s_{occ}(t) \quad [\mathrm{W/m^2\ floor}]
+```
+
+where ρ is people per m² of floor, M is the metabolic rate in met, and s is the occupancy schedule value at hour t.
+
+- **Where the heat goes:** people are spread over the occupied zone of the floor (0.1–1.8 m above it), not just the floor surface. This produces body-height plumes rather than a heated floor.
+- **Time control:** students pick a date and hour, or scrub through a day; the gain, the outdoor conditions and window states update together.
+- **Equipment and lighting:** included from the start, with the same pattern (density × schedule) and ClimateStudio's values from the results folders.
+- **Sensible heat:** ClimateStudio passes the total metabolic heat and lets EnergyPlus calculate the sensible share (sensible heat fraction set to autocalculate), so the tool uses EnergyPlus's correlation.
+
+**CO2.** The same occupancy that drives heat gains also produces CO2, and CO2 is the clearest measure of whether a room is ventilated enough. Each zone tracks a CO2 balance:
+
+```latex
+V \frac{dC}{dt} = N(t)\,G + Q\,(C_{out} - C) \qquad C_{steady} = C_{out} + \frac{N\,G}{Q}
+```
+
+where V is zone volume, C the indoor concentration, N the number of people (density × floor area × schedule), G the CO2 generated per person, Q the outdoor airflow into the zone from the solvers, and C\_out the outdoor concentration.
+
+- **Example:** 20 people at about 0.005 L/s each with 100 L/s of outdoor air gives about 1,000 ppm above outdoor. Halve the airflow and it doubles.
+- **Generation rates:** G from Persily and de Jonge (2017), by age, sex and metabolic rate; for example about 0.0043 L/s for an adult aged 21–30 at 1.2 met, averaged across sexes. The table covers seven metabolic levels (1.0–4.0 met), so values between them are interpolated. Outdoor CO2 defaults to 400 ppm (Carbonfly's default) and should be editable.
+- **In the room:** the grid solver carries CO2 like temperature, so stale corners and short-circuiting between two windows show up as a field, not just a zone average.
+- **Status:** ClimateStudio always calculates CO2 and reports it when asked (Example\_02 does; see Findings from the ClimateStudio results folder). The tool should offer ClimateStudio's inputs as one option (3.82×10⁻⁸ m³/s per watt, outdoor schedule around 413 ppm) next to Persily and de Jonge, and always show which it used.
+
+**Reused from Carbonfly** (open source, LGPL-3.0). Carbonfly's CO2 transport is OpenFOAM's own multi-species solver, so it cannot be lifted into a real-time tool. Its published inputs can be reused, implemented from the original sources:
+
+- **CO2 generation table** (Persily and de Jonge 2017), above.
+- **Breathing defaults:** 12 breaths per minute, 7.2 L/min. Exhaled air is therefore about 3.6% CO2. The tool's grid is too coarse for a breathing jet, so people become a steady CO2 and heat source at head height.
+- **Air quality bands:** EN 16798-1 categories by indoor-minus-outdoor CO2 (I: up to 550 ppm, II: 800, III: 1,350, IV: above), plus six other national standards. Carbonfly's caution carries over: CO2 indicates ventilation rate, not overall air quality.
+- **Single-sided window check:** Maas (1995) empirical formula for flow through one open window from wind speed, sash height and temperature difference; a quick cross-check for single-sided cases.
+- **Default wind pressure coefficients:** EN 1991-1-4 external pressure coefficients by facade zone for rectangular buildings, as a fallback for the network solver when no context-aware values exist. These are structural wind-load values, so treat them as rough.
+
+**Measured occupant behaviour (ASHRAE Global Occupant Behavior Database).** The database holds field measurements, not design templates: occupancy, occupant counts, window, door, shading, lighting, fan, plug load and HVAC behaviour from studies worldwide. Two Canadian studies were checked:
+
+| Study | Building | Data | Period |
+| --- | --- | --- | --- |
+| 8, Toronto | Apartments | Window open/closed (12 windows in 8 rooms), indoor temperature and humidity (30 rooms), on-site weather | April–August 2012, 15-minute |
+| 9, Ottawa | University offices (26 rooms) | Occupancy and lighting on/off events | May 2018 – July 2020 |
+
+- **Occupancy differs sharply from templates.** Ottawa offices peak at about 47% occupied on weekdays, against 95% in the OfficeMedium template; the daily mean is 0.25 vs 0.38. That changes heat gains and CO2 by roughly half at midday. Caveats: overnight values near 11% are probably sensor-gap artefacts, and data after March 2020 include pandemic conditions.
+- **Window behaviour is noisy.** Toronto windows were open 68% of the time with little dependence on outdoor temperature, from a small, gappy sample (37,000 of 113,000 records valid). Useful as an illustration, too thin to build a window-opening model from.
+- **Use in the tool:** measured profiles as a schedule source next to ClimateStudio templates and manual schedules, so students can compare design assumptions with how buildings are actually used.
+- **API:** a REST service at `api.ashraeobdatabase.com` (list behaviour types, search studies by behaviour, country, city and building type, download as ZIP) wrapped by the MIT-licensed `obplatform` Python package. Not testable from here; the data's own terms of use need checking before the tool redistributes any of it.
+
+## Physics roadmap
+
+The 2D prototype proves the solver; the path to 3D adds a fast network layer so a whole building stays real-time.
+
+1. **2D section solver (done).** Grid solver with buoyancy, heat gains, wind boundary layer and sash geometry as solid cells. Mass balance within 0–9% across test cases; closed windows read zero flow.
+2. **Network layer.** One node per zone, one link per opening, solving wind and stack pressures in milliseconds. Gives flow rates for every opening in every zone (12 in Example\_02, 46 in Example\_01), checked against EnergyPlus's own airflow network run of the same model.
+3. **3D grid for a focus area.** The student picks a few zones (or one floor); the 3D grid solves those in detail, using network flow rates as boundary conditions at the openings. Plan and section are slices of this field.
+4. **GPU port.** Move the solver to WebGPU so finer grids and more zones stay interactive. Measure on a typical student laptop before committing.
+5. **Validation.** Compare against EnergyPlus for every model, and 3–5 room-scale cases against Carbonfly/OpenFOAM (same geometry, same boundary conditions). Publish the comparison in the tool so students know how far to trust it.
+
+Added with the constructions and CO2 requirements: the network layer carries a CO2 balance per zone (phase 3); the grid solver carries CO2 as a second field next to temperature (phase 2 for 2D, phase 3 for 3D); wall conduction from R-values and thermal mass from capacitance follow once the airflow side is validated.
+
+Aligning with ClimateStudio's engine: the network solver should follow EnergyPlus's airflow network formulation (zone nodes, opening links, mass balance), so its results can be compared directly with a ClimateStudio network run. Wind at each opening should use the same terrain and sensor-height correction EnergyPlus applies, replacing the prototype's fixed 0.22 profile.
+
+**Priority: whole-building strategies.** The main use is big moves such as atria, double-height spaces and stair or elevator shafts, with their effect felt as comfort in the rooms. So the 3D grid covers the big moves and the rooms that open onto them at coarse resolution (roughly 0.25–0.5 m), particle flows are shown there, and other rooms are handled by the network. Sash-level detail appears only where a student zooms in. Whole-building 3D at sash resolution is not a goal: at 10 cm cells a 46-zone building is tens of millions of cells.
+
+**Test cases for big moves:**
+
+- **Example\_02:** `2F_Office_8` is an 8 m double-height space with 102 m² of windows; `GF_Stairwell_6` rises 12 m with no windows.
+- **Example\_01:** four 24 m stair and elevator shafts with no windows.
+- **An atrium variant of Example\_02** (for example, opening the stairwell to the office and adding a roof vent) can be validated against EnergyPlus through the tool's own export, though not against ClimateStudio.
+
+## Workflow and constraints
+
+No ClimateStudio license is available, so validation works only from the two runs already provided, and the project moves between computers on a removable drive with GitHub as the shared copy.
+
+| Constraint | Consequence |
+| --- | --- |
+| No ClimateStudio license | Validate only against Example\_01 and Example\_02 and their files. ClimateStudio's Grasshopper components can be inspected but their settings cannot be changed or re-run. The licensed capture experiments planned earlier (component dump, network-mode run, Intersector test set) are dropped unless a license becomes available. |
+| Project on a removable drive | Everything lives under `E:\ARCH 540`. Files shared in this chat are in `E:\ARCH 540\A2`; treat that folder as read-only reference data. |
+| Several computers | The code repository sits on the drive and is pushed to GitHub, so any computer can continue. |
+| Context does not travel | This plan is exported to `PLAN.md` in the repository; Claude Code reads it at the start of each session. Decisions made later are added to it. |
+| EnergyPlus is the reference engine | EnergyPlus 23.1 (free) must be available on whichever computer runs the alignment tests. With a GPU, pixel-counting shading reproduces ClimateStudio exactly. |
+
+**Machines and accounts.** Two Windows computers with Rhino 8 and Claude Code: a desktop with an NVIDIA GTX 1080 Ti and a laptop with a GTX 1660 Ti Max-Q. Both GPUs allow EnergyPlus's pixel-counting shading (so ClimateStudio's runs can be reproduced exactly) and browser GPU computing. GitHub user `willemgirard03`; the repository will be public, suggested name `natural-ventilation-visualizer`. Because it is public, course-provided models and results stay out of it: the code refers to files in `A2` by path. A permissive code license such as MIT suits a public tool; choose it during setup. No Carbonfly (LGPL) code is copied, only published values.
+
+**First Claude Code task: set up the repository.** New to GitHub, so step by step:
+
+1. Install Git and create a GitHub account (or sign in).
+2. Create the repository folder on the drive, e.g. `E:\ARCH 540\natural-ventilation-visualizer`, separate from `A2`.
+3. Add `PLAN.md`, a short `README.md`, a `.gitignore` and a license file.
+4. Bring in the work from this chat: the 2D prototype (`section-airflow.html`), the ClimateStudio inspection scripts (`cs_desktop_kit`), and the EnergyPlus comparison script (`compare_eso.py`).
+5. Keep large files out of the repository. GitHub rejects files over 100 MB, and the results folders hold a 984 MB shading file and 40–150 MB `.eso` files. The repository refers to them by path in `A2` instead; only small test inputs (`.epJSON`, weather files) may be copied in.
+6. First commit and push, then a quick check that a second computer can clone it.
+
+**Then phase 2,** starting with the automated alignment test: run EnergyPlus on the Example\_02 `.epJSON`, compare with ClimateStudio's `.eso`, and report the result. This repeats the sandbox test on your own computer.
+
+## Milestones and open questions
+
+Four phases, each ending at a gate the next phase depends on. Phase ends follow the review dates in the schedule below.
+
+&#91;embedded content: roadmap · 4 phases, 3 gates\]
+
+The results folders replaced the licensed desktop session: ClimateStudio's EnergyPlus input files provide the settings, and its outputs provide the comparison data.
+
+**Schedule to 10 December.** User reviews on 12 November, 27 November and 3 December set the phase ends, with peer reviews between them.
+
+| Dates | Work | Ends with |
+| --- | --- | --- |
+| 17–26 Oct | Repository setup; Example\_02 `.epJSON` importer; EnergyPlus runner and the alignment test on your own computer (GPU, so exact shading); 3D view of the imported zones | — |
+| 27 Oct – 11 Nov | Network solver for the whole building, following EnergyPlus's airflow network method; the tool writes an airflow-network `.epJSON` and runs EnergyPlus to check it; window interpretation (casement default, awning stress test); first whole-building particle view from network flows | User review 1 (12 Nov): Example\_02 imported, EnergyPlus alignment shown, airflow paths through the building |
+| 12–26 Nov | 3D grid solver for the big moves (double-height office, stairwell) with particles; plan and section slices; heat gains from people, lights and equipment; CO2 checked against Example\_02 | User review 2 (27 Nov) |
+| 27 Nov – 2 Dec | Comfort readouts in rooms; model checks; atrium variant of Example\_02 checked against EnergyPlus; fixes from reviews | User review 3 (3 Dec) |
+| 3–10 Dec | Example\_01 as the advanced check; documentation; demo; final fixes | Final deadline (10 Dec) |
+| After 10 Dec | Rhino live sync and write-back, measured occupancy schedules, pressure coefficient export, Carbonfly comparison, possible pilot with the January class | — |
+
+**Open questions**
+
+- [x] What does Deconstruct CS Energy Model output? Classified geometry only (fourteen categories), not settings or results; and without a license the ClimateStudio components do not compute at all.
+- [x] Which ClimateStudio version produced the runs? 2.2.9338, using EnergyPlus 23.1.0-87ed9199d4.
+- [x] Sensible share of metabolic heat? EnergyPlus calculates it (sensible heat fraction set to autocalculate).
+- [x] Does ClimateStudio model CO2? Yes, always; reporting it is optional (Example\_02 reports it).
+- [x] Which weather file did the runs use? `CAN_BC_Vancouver_Intl_AP_718920_TDY-CWEC2020v2.epw`.
+- [x] Where is sash type stored? Saved in the tool and written back to the Rhino window objects (lower priority).
+- [x] Default sash type? Casement; awning as the stress test.
+- [x] What should the tool answer first? Whole-building strategies (atria, stacks) and their effect on room comfort.
+- [x] Primary validation case? Example\_02, with Example\_01 as the advanced check.
+- [x] Who is it for? Architecture students anywhere; a January ClimateStudio course is a likely first audience.
+- [ ] Code license for the public repository (MIT suggested); decide during setup.
+- [ ] Where EnergyPlus runs for other students (local install or a server); decide after review 1.
+- [ ] Target student laptops: measure solver speed on the GTX 1660 Ti laptop before choosing grid resolution defaults.
+
+## Reference library
+
+Everything this plan relies on, so each claim can be traced. Statements not traceable to a row here come from general knowledge and are marked "unverified" in the text.
+
+**ClimateStudio documentation**
+
+| Page | Used for | Read |
+| --- | --- | --- |
+| [Thermal Zone Settings](https://climatestudiodocs.com/docs/thermalZoneSettings.html) | People density, metabolic rate, schedules, natural ventilation methods, AirflowNetwork override, the seven construction types | Yes |
+| [Zone](https://climatestudiodocs.com/docs/thermal_zone.html) | Zone geometry rules (closed solids, touching neighbours) | Yes |
+| [Windows](https://climatestudiodocs.com/docs/thermal_window.html) | Window geometry and ventilation settings (operable fraction, opening temperature) | Yes |
+| [Thermal Model](https://climatestudiodocs.com/docs/thermalModel.html) | Separate thermal model convention | Yes |
+| [Thermal Analysis](https://climatestudiodocs.com/docs/thermalAnalysis.html) | Simulation workflow; listed zone outputs (no CO2) | Yes |
+| [Schedule Editor](https://climatestudiodocs.com/docs/scheduleEditor.html) | 8,760-hour schedules, day schedules, clipboard import | Yes |
+| [Manage Library](https://climatestudiodocs.com/docs/manageLibrary.html) | Templates, materials, constructions; CSV export and import | Yes |
+| [EnergyPlus Simulation Settings](https://climatestudiodocs.com/docs/EnergyPlus.html) | Three airflow modes, timestep, terrain wind correction, ground temperatures | Via research report only |
+| [Results Panel](https://climatestudiodocs.com/docs/results.html) | `.CSR` result files, CSV export | Via research report only |
+| [Grasshopper Workflow Templates](https://climatestudiodocs.com/docs/grasshopperTemplates.html) | Natural Ventilation and Airflow Network Model templates | Via research report only |
+| [Shading](https://climatestudiodocs.com/docs/thermal_shading.html#shading) | Shading objects | Not yet |
+| [Ground and adiabatic boundary conditions](https://climatestudiodocs.com/docs/thermal_boundaryConditions.html) | Ground and adiabatic surfaces | Partly (summary on Thermal Zone Settings) |
+
+**Rhino and Grasshopper files**
+
+| File | Contents | Used for |
+| --- | --- | --- |
+| CS\_Building\_Model.3dm | 47 zone solids on `CS::<Floor>::<Zone>` layers, 85 glazing planes, ground, topography, shading | Test building; geometry and layer conventions |
+| CS\_Simulation.gh | Full ClimateStudio thermal pipeline: CS Intersector, CS Energy Zone, CS Window, Internal Window, CS Boundary Object, CS Model Maker, Deconstruct CS Energy Model; natural ventilation and HVAC settings as JSON | Pipeline to replicate; source of settings |
+| Assemblies.gh | Get CS Material, Construct CS Layer, Construct CS Construction | Manual construction workflow to mirror |
+
+**Other**
+
+| Item | Used for |
+| --- | --- |
+| deep-research-report.md (ChatGPT deep research, October 2026) | ClimateStudio internals with confidence labels; confirms the three airflow modes and that most internals are not public |
+| [EnergyPlus airflow reference](https://bigladdersoftware.com/epx/docs/22-1/input-output-reference/group-airflow.html) and [airflow network reference](https://bigladdersoftware.com/epx/docs/22-1/input-output-reference/group-airflow-network.html) | Equations behind ClimateStudio's ventilation modes (via research report) |
+| [McNeel Discourse: window does not fit into any parent surface](https://discourse.mcneel.com/t/window-4-does-not-fit-into-any-parent-surface/150302) | Example window-parenting error (via research report) |
+| [MDPI Atmosphere 9(3):113](https://www.mdpi.com/2073-4433/9/3/113) | Pressure coefficients from wind and context; airflow network concept |
+| [Section airflow prototype](https://claude.ai/artifact/V7BKiPBqGzpKDNRDRbCRME) | Phase 1 solver and renderer |
+| Fast Fluid Dynamics papers (Zuo and Chen), FluidX3D, Carbonfly, Eddy3D | Solver approach and validation tools, found by web search earlier in this project |
+| Carbonfly repository (github.com/RWTH-E3D/carbonfly), read directly | CO2 generation table, breathing defaults, air quality bands, Maas window formula, EN 1991-1-4 pressure coefficients; CO2 validation reference |
+| Persily and de Jonge (2017), Carbon dioxide generation rates for building occupants, Indoor Air 27(5) | Original source of the CO2 generation table (cited by Carbonfly; not yet read directly) |
+| CS\_Results.zip (Willem\_Girard\_CS\_V3 results folder) | ClimateStudio's full EnergyPlus input (.idf, .epJSON) and hourly outputs (.eso) for a simple-airflow run; source of the Findings section |
+| EnergyPlus repository (github.com/NatLabRockies/EnergyPlus) and documentation (energyplus.readthedocs.io) | The reference engine: input objects, equations, Python API; BSD-3-like license |
+| ASHRAE Global Occupant Behavior Database (ashraeobdatabase.com), obplatform package, data.zip (studies 8 and 9) | Measured occupancy, window and lighting behaviour; API for querying studies |
+| Example\_02.zip (2226\_Emmenweid: .3dm, .gh and results folder) | Lighter validation case (12 zones) with hourly CO2 results |
+| Vancouver weather files: TDY-CWEC2020v2 (matches both runs), CWEC2020v2, TMYx 2004–2018, morphed SSP5-8.5 2040s/2050s/2060s | Weather input for EnergyPlus runs; the morphed files allow future-climate comparisons |
+| Scripts written in this chat: cs\_desktop\_kit (component dump, object probe, EnergyPlus capture and input summarizer), compare\_eso.py | Inspecting ClimateStudio Grasshopper components; summarizing .idf/.epJSON files; comparing two EnergyPlus runs output by output |

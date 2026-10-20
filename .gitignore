@@ -1,0 +1,60 @@
+# Keep large simulation files and course material out of this public repository.
+# GitHub rejects files over 100 MB. Course models and results stay in E:\ARCH 540\A2
+# and are referred to by path.
+
+# EnergyPlus results (.eso files are 40-150 MB, shading CSVs up to ~1 GB)
+*.eso
+*.mtr
+*.shd
+*.sql
+*.audit
+*.bnd
+*.dxf
+*.edd
+*.eio
+*.end
+*.err
+*.mdd
+*.mtd
+*.rdd
+*.rvaudit
+*.csr
+*.htm
+*shading.csv
+*tbl.csv
+*zsz.csv
+*ssz.csv
+eplusout.*
+eplustbl.*
+eplusssz.*
+epluszsz.*
+
+# Local EnergyPlus run folders written by the alignment tests
+runs/
+out/
+results/
+
+# Rhino and Grasshopper models (course models stay local)
+*.3dm
+*.3dmbak
+*.rhl
+*.gh
+*.ghx
+*.ghbak
+
+# Archives
+*.zip
+*.7z
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editors and operating systems
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

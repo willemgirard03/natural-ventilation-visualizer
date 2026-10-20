@@ -1,0 +1,1184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Section airflow prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #E7EBE9;
+  --panel: #F3F5F4;
+  --ink: #1D2124;
+  --ink-soft: #586065;
+  --rule: #C4CBC8;
+  --accent: #2356A3;
+  --accent-ink: #FFFFFF;
+  --halo: rgba(243, 245, 244, 0.92);
+  color-scheme: light;
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #1B1E21;
+    --panel: #23272B;
+    --ink: #E3E7E5;
+    --ink-soft: #9AA3A8;
+    --rule: #3A4146;
+    --accent: #86AEEB;
+    --accent-ink: #0F1C30;
+    --halo: rgba(27, 30, 33, 0.9);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #1B1E21;
+  --panel: #23272B;
+  --ink: #E3E7E5;
+  --ink-soft: #9AA3A8;
+  --rule: #3A4146;
+  --accent: #86AEEB;
+  --accent-ink: #0F1C30;
+  --halo: rgba(27, 30, 33, 0.9);
+  color-scheme: dark;
+}
+html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+*, *::before, *::after { box-sizing: inherit; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+.app {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 20px;
+  padding: 20px;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+header h1 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 2px;
+}
+header p { margin: 0 0 14px; color: var(--ink-soft); max-width: 70ch; }
+.stage { min-width: 0; }
+.canvas-wrap { position: relative; width: 100%; }
+canvas#view {
+  display: block;
+  width: 100%;
+  touch-action: pan-y;
+  cursor: crosshair;
+  border-top: 1px solid var(--rule);
+}
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.bar { display: flex; align-items: center; gap: 8px; }
+.bar .grad { width: 180px; height: 10px; border-radius: 2px; }
+.probe { font-variant-numeric: tabular-nums; min-height: 1.4em; }
+.readouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0;
+  margin-top: 14px;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+.readouts div { padding: 10px 12px 10px 0; }
+.readouts b {
+  display: block;
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+.readouts span { font-size: 13px; color: var(--ink-soft); }
+.notes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 6px 28px;
+  margin-top: 16px;
+  font-size: 13.5px;
+  color: var(--ink-soft);
+}
+.notes h2 { font-size: 14px; color: var(--ink); margin: 0 0 4px; font-weight: 600; }
+.notes p { margin: 0 0 8px; max-width: 62ch; }
+
+aside {
+  background: var(--panel);
+  border-left: 1px solid var(--rule);
+  padding: 16px 16px 24px;
+  align-self: start;
+  position: sticky;
+  top: env(safe-area-inset-top, 0px);
+  max-height: 100vh;
+  overflow-y: auto;
+}
+fieldset { border: 0; padding: 0; margin: 0 0 18px; min-width: 0; }
+legend { font-weight: 600; font-size: 14px; padding: 0; margin-bottom: 8px; }
+.row { display: grid; grid-template-columns: 92px 1fr 56px; align-items: center; gap: 8px; margin: 6px 0; font-size: 13.5px; }
+.row output { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+select {
+  font: inherit; font-size: 13.5px; color: var(--ink); background: var(--paper);
+  border: 1px solid var(--rule); border-radius: 4px; padding: 4px 6px; width: 100%;
+}
+.seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.seg button, .btn {
+  font: inherit; font-size: 13.5px; color: var(--ink); background: transparent;
+  border: 1px solid var(--rule); border-radius: 4px; padding: 5px 9px; cursor: pointer;
+}
+.seg button[aria-pressed="true"], .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btns { display: flex; gap: 6px; margin-bottom: 16px; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.checks { display: flex; gap: 16px; font-size: 13.5px; margin: 8px 0; }
+.checks label { display: flex; align-items: center; gap: 6px; }
+.win { border-top: 1px solid var(--rule); padding: 8px 0 4px; }
+.win-head { display: flex; justify-content: space-between; font-size: 13.5px; margin-bottom: 4px; }
+.win-head span { color: var(--ink-soft); }
+.win .row { grid-template-columns: 62px 1fr 52px; }
+.row.wide, .win .row.wide { grid-template-columns: 92px 1fr; }
+.win .row.wide { grid-template-columns: 62px 1fr; }
+.note { font-size: 12.5px; color: var(--ink-soft); margin: 2px 0 4px; }
+.status { font-size: 12.5px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; padding: 14px; }
+  aside { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--rule); }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <main class="stage">
+    <header>
+      <h1>Section airflow</h1>
+      <p>A 2D section through one room. Wind enters from one edge, warm air rises, and the grid solves for where the air goes. Hover over or tap the drawing to read values; change openings in the controls while it runs.</p>
+    </header>
+    <div class="canvas-wrap"><canvas id="view" aria-label="Animated building section showing airflow" role="img"></canvas></div>
+    <div class="legend">
+      <div class="bar"><span id="barMin">0</span><div class="grad" id="barGrad"></div><span id="barMax">1</span><span id="barUnit">m/s</span></div>
+      <div class="probe" id="probe">Hover over or tap the section to read speed, temperature and pressure.</div>
+    </div>
+    <div class="readouts">
+      <div><b id="rAch">–</b><span>air changes per hour</span></div>
+      <div><b id="rQin">–</b><span>inflow, L/s per m of facade</span></div>
+      <div><b id="rTin">–</b><span>mean indoor air, °C</span></div>
+      <div><b id="rBal">–</b><span>inflow ÷ outflow</span></div>
+      <div><b id="rTime">–</b><span>simulated time</span></div>
+    </div>
+    <div class="notes">
+      <div>
+        <h2>What’s being computed</h2>
+        <p>The section is split into square cells. Walls, the roof and window sashes become solid cells, so the sash angle physically changes the gap air passes through. Each step, air is carried along by its own motion (the semi-Lagrangian method behind Fast Fluid Dynamics), air warmer than outside is pushed upward (Boussinesq buoyancy), floor heat gains warm the air, and a pressure solve keeps the air from piling up or vanishing. Wind enters with a boundary-layer profile, speed at 10 m as set.</p>
+        <p>Labels at each opening show inflow and outflow through it. A single opening often carries both at once.</p>
+      </div>
+      <div>
+        <h2>What it can’t tell you</h2>
+        <p>A 2D section assumes the building is infinitely long, so air can’t go around the sides; facade pressures are overstated compared with a real building. There’s no turbulence model, and the coarse grid smooths the flow. Walls don’t store or lose heat. Treat patterns and directions as meaningful and speeds as approximate. Air change rates assume the section repeats along a 1 m depth.</p>
+      </div>
+    </div>
+  </main>
+
+  <aside aria-label="Controls">
+    <div class="btns">
+      <button class="btn primary" id="play">Pause</button>
+      <button class="btn" id="reset">Restart flow</button>
+    </div>
+
+    <fieldset>
+      <legend>Scenario</legend>
+      <div class="seg" id="presets">
+        <button data-p="cross" aria-pressed="true">Cross ventilation</button>
+        <button data-p="single" aria-pressed="false">Single-sided</button>
+        <button data-p="stack" aria-pressed="false">Stack</button>
+        <button data-p="opposed" aria-pressed="false">Wind against stack</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Climate</legend>
+      <div class="row"><label for="wind">Wind at 10 m</label><input type="range" id="wind" min="0" max="8" step="0.1"><output id="windO"></output></div>
+      <div class="row wide"><span>From</span><div class="seg" id="dir"><button data-d="1" aria-pressed="true">Left</button><button data-d="-1" aria-pressed="false">Right</button></div></div>
+      <div class="row"><label for="tout">Outdoor air</label><input type="range" id="tout" min="0" max="35" step="0.5"><output id="toutO"></output></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Room</legend>
+      <div class="row"><label for="W">Width</label><input type="range" id="W" min="5" max="14" step="0.5"><output id="WO"></output></div>
+      <div class="row"><label for="H">Height</label><input type="range" id="H" min="2.6" max="8" step="0.1"><output id="HO"></output></div>
+      <div class="row"><label for="q">Heat gains</label><input type="range" id="q" min="0" max="200" step="5"><output id="qO"></output></div>
+      <div class="row"><label for="tin">Start temp</label><input type="range" id="tin" min="15" max="35" step="0.5"><output id="tinO"></output></div>
+      <p class="note">Blue lines are window sashes; the solid cells behind them are what the solver sees. Heat gains are per m² of floor, added to the air just above it. Start temp applies when the flow restarts.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Openings</legend>
+      <div id="windows"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>View</legend>
+      <div class="seg" id="field">
+        <button data-f="speed" aria-pressed="true">Speed</button>
+        <button data-f="temp" aria-pressed="false">Temperature</button>
+        <button data-f="pressure" aria-pressed="false">Pressure</button>
+        <button data-f="none" aria-pressed="false">None</button>
+      </div>
+      <div class="row wide"><span>Frame</span><div class="seg" id="frame"><button data-v="building" aria-pressed="true">Building</button><button data-v="site" aria-pressed="false">Whole site</button></div></div>
+      <div class="checks">
+        <label><input type="checkbox" id="particles" checked> Particles</label>
+        <label><input type="checkbox" id="arrows"> Arrows</label>
+      </div>
+      <div class="row"><label for="opacity">Field opacity</label><input type="range" id="opacity" min="0.1" max="1" step="0.05"><output id="opacityO"></output></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Solver</legend>
+      <div class="row wide"><label for="res">Cell size</label>
+        <select id="res"><option value="0.2">20 cm (fast)</option><option value="0.15" selected>15 cm</option><option value="0.1">10 cm (detailed)</option></select></div>
+      <div class="row"><label for="speed">Steps per frame</label><input type="range" id="speed" min="1" max="4" step="1"><output id="speedO"></output></div>
+      <div class="row"><label for="vort">Eddy detail</label><input type="range" id="vort" min="0" max="3" step="0.25"><output id="vortO"></output></div>
+      <p class="note">Eddy detail re-injects small swirls that a coarse grid smears out (vorticity confinement). It’s a numerical correction, not measured turbulence; set it to 0 to see the raw solver.</p>
+      <p class="status" id="status"></p>
+    </fieldset>
+  </aside>
+</div>
+
+<script id="solver">
+"use strict";
+const RHO = 1.2, CPA = 1005, G = 9.81, BETA = 1 / 300;
+const LX = 36, LY = 16;
+function clamp(x, a, b) { return x < a ? a : x > b ? b : x; }
+function windProfile(y) { return Math.pow(Math.max(y, 0.25) / 10, 0.22); }
+
+class Sim {
+  constructor(dx) {
+    this.dx = dx;
+    const nx = this.nx = Math.round(LX / dx), ny = this.ny = Math.round(LY / dx);
+    this.Ly = ny * dx;
+    const N = this.N = nx * ny;
+    this.u = new Float32Array((nx + 1) * ny); this.un = new Float32Array((nx + 1) * ny);
+    this.v = new Float32Array(nx * (ny + 1)); this.vn = new Float32Array(nx * (ny + 1));
+    this.p = new Float32Array(N + 1); this.div = new Float32Array(N);
+    this.T = new Float32Array(N); this.Tn = new Float32Array(N);
+    this.solid = new Uint8Array(N); this.room = new Uint8Array(N);
+    this.w = new Float32Array(N); this.fx = new Float32Array(N); this.fy = new Float32Array(N);
+    this.edge = new Int32Array(0); this.heatCells = new Int32Array(0);
+    this.openings = []; this.geom = null; this.st = null;
+    this.t = 0; this.dt = 0.05;
+    this.leftOpen = false; this.rightOpen = true;
+  }
+
+  isSolidAt(x, y) {
+    if (x < 0 || y < 0 || x >= LX || y >= this.Ly) return true;
+    const i = (x / this.dx) | 0, j = (y / this.dx) | 0;
+    return this.solid[i + j * this.nx] === 1;
+  }
+
+  sU(x, y) {
+    const nx = this.nx, ny = this.ny, u = this.u;
+    let fx = x / this.dx, fy = y / this.dx - 0.5;
+    if (fx < 0) fx = 0; else if (fx > nx - 1e-4) fx = nx - 1e-4;
+    if (fy < 0) fy = 0; else if (fy > ny - 1 - 1e-4) fy = ny - 1 - 1e-4;
+    const i = fx | 0, j = fy | 0, a = fx - i, b = fy - j, k = i + j * (nx + 1);
+    return (1 - b) * ((1 - a) * u[k] + a * u[k + 1]) + b * ((1 - a) * u[k + nx + 1] + a * u[k + nx + 2]);
+  }
+  sV(x, y) {
+    const nx = this.nx, ny = this.ny, v = this.v;
+    let fx = x / this.dx - 0.5, fy = y / this.dx;
+    if (fx < 0) fx = 0; else if (fx > nx - 1 - 1e-4) fx = nx - 1 - 1e-4;
+    if (fy < 0) fy = 0; else if (fy > ny - 1e-4) fy = ny - 1e-4;
+    const i = fx | 0, j = fy | 0, a = fx - i, b = fy - j, k = i + j * nx;
+    return (1 - b) * ((1 - a) * v[k] + a * v[k + 1]) + b * ((1 - a) * v[k + nx] + a * v[k + nx + 1]);
+  }
+  sC(F, x, y) {
+    const nx = this.nx, ny = this.ny;
+    let fx = x / this.dx - 0.5, fy = y / this.dx - 0.5;
+    if (fx < 0) fx = 0; else if (fx > nx - 1 - 1e-4) fx = nx - 1 - 1e-4;
+    if (fy < 0) fy = 0; else if (fy > ny - 1 - 1e-4) fy = ny - 1 - 1e-4;
+    const i = fx | 0, j = fy | 0, a = fx - i, b = fy - j, k = i + j * nx;
+    return (1 - b) * ((1 - a) * F[k] + a * F[k + 1]) + b * ((1 - a) * F[k + nx] + a * F[k + nx + 1]);
+  }
+
+  // Rasterize the room, walls, roof and window sashes into solid cells.
+  build(b) {
+    const dx = this.dx, nx = this.nx, ny = this.ny, S = this.solid, R = this.room;
+    S.fill(0); R.fill(0); this.st = null;
+    const mark = (i, j, val) => { if (i >= 0 && i < nx && j >= 0 && j < ny) S[i + j * nx] = val; };
+    const x0 = (LX - b.W) / 2;
+    const iA = Math.round(x0 / dx), iB = Math.round((x0 + b.W) / dx);
+    const jr = Math.max(6, Math.round(b.H / dx));
+    for (let j = 0; j < jr + 2; j++) { mark(iA - 2, j, 1); mark(iA - 1, j, 1); mark(iB, j, 1); mark(iB + 1, j, 1); }
+    for (let i = iA - 2; i <= iB + 1; i++) { mark(i, jr, 1); mark(i, jr + 1, 1); }
+    for (let j = 0; j < jr; j++) for (let i = iA; i < iB; i++) R[i + j * nx] = 1;
+    this.geom = { x0, iA, iB, jr, W: (iB - iA) * dx, H: jr * dx };
+
+    const line = (xa, ya, xb, yb) => {
+      const L = Math.hypot(xb - xa, yb - ya), n = Math.max(2, Math.ceil(L / (dx * 0.25)));
+      let pi = -1, pj = -1;
+      for (let s = 0; s <= n; s++) {
+        const t = s / n, x = xa + (xb - xa) * t, y = ya + (yb - ya) * t;
+        const i = Math.floor(x / dx), j = Math.floor(y / dx);
+        mark(i, j, 1);
+        if (pi >= 0 && i !== pi && j !== pj) mark(pi, j, 1); // close diagonal leaks
+        pi = i; pj = j;
+      }
+    };
+
+    this.openings = [];
+    for (const w of b.windows) {
+      const f = clamp(w.open, 0, 1);
+      const o = { label: w.label, wall: w.wall, faces: [], kind: 'u', sign: 1, ax: 0, ay: 0, inE: 0, outE: 0, sash: null };
+      if (w.wall === 'roof') {
+        const cw = Math.max(1, Math.round(w.size / dx));
+        const c0 = clamp(iA + Math.round(w.pos / dx), iA, iB - cw);
+        const n = f > 0 ? Math.max(1, Math.round(cw * f)) : 0;
+        for (let c = c0; c < c0 + n; c++) { mark(c, jr, 0); mark(c, jr + 1, 0); }
+        o.kind = 'v'; o.sign = -1;
+        for (let c = c0; c < c0 + cw; c++) o.faces.push(c + (jr + 1) * nx);
+        o.ax = (c0 + cw / 2) * dx; o.ay = (jr + 2) * dx;
+      } else {
+        const left = w.wall === 'L';
+        const j0 = clamp(Math.round(w.sill / dx), 0, jr - 1);
+        const j1 = clamp(Math.round((w.sill + w.size) / dx), j0 + 1, jr);
+        const ca = left ? iA - 2 : iB;
+        const clearRows = (a, z) => { for (let j = a; j < z; j++) { mark(ca, j, 0); mark(ca + 1, j, 0); } };
+        const len = (j1 - j0) * dx;
+        if (w.type === 'awning') {
+          clearRows(j0, j1);
+          const th = f * 70 * Math.PI / 180, dir = left ? -1 : 1;
+          const xe = left ? (iA - 2.5) * dx : (iB + 2.5) * dx, yt = j1 * dx - 1e-3;
+          const xb = xe + dir * Math.sin(th) * len, yb = yt - Math.cos(th) * (len - 2e-3);
+          line(xe, yt, xb, yb); o.sash = [xe, yt, xb, yb];
+        } else if (w.type === 'hopper') {
+          clearRows(j0, j1);
+          const th = f * 35 * Math.PI / 180, dir = left ? 1 : -1;
+          const xi = left ? (iA + 0.5) * dx : (iB - 0.5) * dx, yb0 = j0 * dx + 1e-3;
+          const xb = xi + dir * Math.sin(th) * len, yb = yb0 + Math.cos(th) * (len - 2e-3);
+          line(xi, yb0, xb, yb); o.sash = [xi, yb0, xb, yb];
+        } else {
+          const n = f > 0 ? Math.max(1, Math.round((j1 - j0) * f)) : 0;
+          clearRows(j0, j0 + n);
+        }
+        o.kind = 'u'; o.sign = left ? 1 : -1;
+        // measure where the sash seals, so air circulating inside a closed reveal isn't counted
+        const fi = w.type === 'awning' ? (left ? iA - 2 : iB + 2) : w.type === 'hopper' ? (left ? iA : iB) : (left ? iA - 1 : iB + 1);
+        for (let j = j0; j < j1; j++) o.faces.push(fi + j * (nx + 1));
+        o.ax = left ? (iA - 2) * dx : (iB + 2) * dx; o.ay = (j0 + j1) / 2 * dx;
+      }
+      this.openings.push(o);
+    }
+
+    const edge = [], heat = [];
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const c = i + j * nx;
+      if (S[c]) {
+        if ((i > 0 && !S[c - 1]) || (i < nx - 1 && !S[c + 1]) || (j > 0 && !S[c - nx]) || (j < ny - 1 && !S[c + nx])) edge.push(c);
+      } else if (R[c] && j === 0) heat.push(c);
+    }
+    this.edge = Int32Array.from(edge); this.heatCells = Int32Array.from(heat);
+    this.zeroSolidFaces();
+  }
+
+  zeroSolidFaces() {
+    const nx = this.nx, ny = this.ny, u = this.u, v = this.v, S = this.solid;
+    for (let j = 0; j < ny; j++) for (let i = 0; i <= nx; i++) {
+      const l = i > 0 ? S[i - 1 + j * nx] : 0, r = i < nx ? S[i + j * nx] : 0;
+      if (l || r) u[i + j * (nx + 1)] = 0;
+    }
+    for (let j = 0; j <= ny; j++) for (let i = 0; i < nx; i++) {
+      const d = j > 0 ? S[i + (j - 1) * nx] : 0, t = j < ny ? S[i + j * nx] : 0;
+      if (d || t) v[i + j * nx] = 0;
+    }
+  }
+
+  pickDt(P) { return clamp(this.dx / Math.max(Math.abs(P.wind) * 1.3, 0.6), 0.02, 0.12); }
+
+  init(P) {
+    const nx = this.nx, ny = this.ny, dx = this.dx, u = this.u, g = this.geom;
+    for (let j = 0; j < ny; j++) {
+      const pr = P.wind * windProfile((j + 0.5) * dx);
+      for (let i = 0; i <= nx; i++) {
+        const inside = j < g.jr + 2 && i >= g.iA - 2 && i <= g.iB + 2;
+        u[i + j * (nx + 1)] = inside ? 0 : pr;
+      }
+    }
+    this.v.fill(0); this.p.fill(0);
+    for (let c = 0; c < this.N; c++) this.T[c] = this.room[c] ? P.Tin : P.Tout;
+    this.zeroSolidFaces();
+    this.t = 0; this.dt = this.pickDt(P);
+    this.applyBC(P);
+    for (let k = 0; k < 4; k++) this.project(80);
+    for (const o of this.openings) { o.inE = 0; o.outE = 0; }
+  }
+
+  applyBC(P) {
+    const nx = this.nx, ny = this.ny, dx = this.dx, u = this.u, v = this.v, S = this.solid, w = P.wind;
+    this.leftOpen = w <= 0; this.rightOpen = w >= 0;
+    const W1 = nx + 1;
+    for (let j = 0; j < ny; j++) {
+      const a = j * W1, b = nx + j * W1, y = (j + 0.5) * dx;
+      if (w > 0) { u[a] = w * windProfile(y); u[b] = u[b - 1]; }
+      else if (w < 0) { u[b] = w * windProfile(y); u[a] = u[a + 1]; }
+      else { u[a] = u[a + 1]; u[b] = u[b - 1]; }
+      if (S[j * nx]) u[a] = 0;
+      if (S[nx - 1 + j * nx]) u[b] = 0;
+    }
+    for (let i = 0; i < nx; i++) { v[i] = 0; v[i + ny * nx] = 0; }
+  }
+
+  applyTBC(P) {
+    const nx = this.nx, ny = this.ny, T = this.T;
+    for (let j = 0; j < ny; j++) {
+      if (P.wind >= 0) T[j * nx] = P.Tout;
+      if (P.wind <= 0) T[nx - 1 + j * nx] = P.Tout;
+    }
+  }
+
+  extrapT() {
+    const nx = this.nx, ny = this.ny, T = this.T, S = this.solid, E = this.edge;
+    for (let e = 0; e < E.length; e++) {
+      const c = E[e], i = c % nx, j = (c / nx) | 0;
+      let s = 0, n = 0;
+      if (i > 0 && !S[c - 1]) { s += T[c - 1]; n++; }
+      if (i < nx - 1 && !S[c + 1]) { s += T[c + 1]; n++; }
+      if (j > 0 && !S[c - nx]) { s += T[c - nx]; n++; }
+      if (j < ny - 1 && !S[c + nx]) { s += T[c + nx]; n++; }
+      if (n) T[c] = s / n;
+    }
+  }
+
+  advect(dt) {
+    const nx = this.nx, ny = this.ny, dx = this.dx, S = this.solid, W1 = nx + 1;
+    const u = this.u, v = this.v, un = this.un, vn = this.vn, T = this.T, Tn = this.Tn;
+    for (let j = 0; j < ny; j++) {
+      const y = (j + 0.5) * dx;
+      for (let i = 0; i <= nx; i++) {
+        const k = i + j * W1;
+        if (i === 0 || i === nx) { un[k] = u[k]; continue; }
+        if (S[i - 1 + j * nx] || S[i + j * nx]) { un[k] = 0; continue; }
+        const x = i * dx;
+        let uu = u[k];
+        let vv = 0.25 * (v[i - 1 + j * nx] + v[i + j * nx] + v[i - 1 + (j + 1) * nx] + v[i + (j + 1) * nx]);
+        const xm = x - 0.5 * dt * uu, ym = y - 0.5 * dt * vv;
+        uu = this.sU(xm, ym); vv = this.sV(xm, ym);
+        un[k] = this.sU(x - dt * uu, y - dt * vv);
+      }
+    }
+    for (let j = 0; j <= ny; j++) {
+      const y = j * dx;
+      for (let i = 0; i < nx; i++) {
+        const k = i + j * nx;
+        if (j === 0 || j === ny) { vn[k] = 0; continue; }
+        if (S[k - nx] || S[k]) { vn[k] = 0; continue; }
+        const x = (i + 0.5) * dx;
+        let vv = v[k];
+        let uu = 0.25 * (u[i + (j - 1) * W1] + u[i + 1 + (j - 1) * W1] + u[i + j * W1] + u[i + 1 + j * W1]);
+        const xm = x - 0.5 * dt * uu, ym = y - 0.5 * dt * vv;
+        uu = this.sU(xm, ym); vv = this.sV(xm, ym);
+        vn[k] = this.sV(x - dt * uu, y - dt * vv);
+      }
+    }
+    for (let j = 0; j < ny; j++) {
+      const y = (j + 0.5) * dx;
+      for (let i = 0; i < nx; i++) {
+        const c = i + j * nx;
+        if (S[c]) { Tn[c] = T[c]; continue; }
+        const x = (i + 0.5) * dx;
+        let uu = 0.5 * (u[i + j * W1] + u[i + 1 + j * W1]);
+        let vv = 0.5 * (v[c] + v[c + nx]);
+        const xm = x - 0.5 * dt * uu, ym = y - 0.5 * dt * vv;
+        uu = this.sU(xm, ym); vv = this.sV(xm, ym);
+        Tn[c] = this.sC(T, x - dt * uu, y - dt * vv);
+      }
+    }
+    this.u = un; this.un = u; this.v = vn; this.vn = v; this.T = Tn; this.Tn = T;
+  }
+
+  confine(eps, dt) {
+    const nx = this.nx, ny = this.ny, dx = this.dx, S = this.solid, W1 = nx + 1;
+    const u = this.u, v = this.v, w = this.w, fx = this.fx, fy = this.fy;
+    w.fill(0); fx.fill(0); fy.fill(0);
+    for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) {
+      const c = i + j * nx;
+      if (S[c] || S[c - 1] || S[c + 1] || S[c - nx] || S[c + nx]) continue;
+      const vR = 0.5 * (v[c + 1] + v[c + 1 + nx]), vL = 0.5 * (v[c - 1] + v[c - 1 + nx]);
+      const uT = 0.5 * (u[i + (j + 1) * W1] + u[i + 1 + (j + 1) * W1]), uB = 0.5 * (u[i + (j - 1) * W1] + u[i + 1 + (j - 1) * W1]);
+      w[c] = (vR - vL - uT + uB) / (2 * dx);
+    }
+    for (let j = 2; j < ny - 2; j++) for (let i = 2; i < nx - 2; i++) {
+      const c = i + j * nx, wc = w[c];
+      if (wc === 0) continue;
+      const gx = (Math.abs(w[c + 1]) - Math.abs(w[c - 1])) * 0.5 / dx;
+      const gy = (Math.abs(w[c + nx]) - Math.abs(w[c - nx])) * 0.5 / dx;
+      const m = Math.hypot(gx, gy) + 1e-6;
+      fx[c] = eps * dx * (gy / m) * wc;
+      fy[c] = -eps * dx * (gx / m) * wc;
+    }
+    for (let j = 0; j < ny; j++) for (let i = 1; i < nx; i++) {
+      const cl = i - 1 + j * nx;
+      if (S[cl] || S[cl + 1]) continue;
+      u[i + j * W1] += dt * 0.5 * (fx[cl] + fx[cl + 1]);
+    }
+    for (let j = 1; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const k = i + j * nx;
+      if (S[k] || S[k - nx]) continue;
+      v[k] += dt * 0.5 * (fy[k] + fy[k - nx]);
+    }
+  }
+
+  forces(P, dt) {
+    const nx = this.nx, ny = this.ny, dx = this.dx, S = this.solid, v = this.v, T = this.T;
+    const gb = G * BETA * dt, Tout = P.Tout;
+    for (let j = 1; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const k = i + j * nx, cd = k - nx;
+      if (S[k] || S[cd]) continue;
+      v[k] += gb * (0.5 * (T[k] + T[cd]) - Tout);
+    }
+    const dT = dt * P.q / (RHO * CPA * dx), H = this.heatCells;
+    for (let h = 0; h < H.length; h++) T[H[h]] += dT;
+    if (P.vort > 0) this.confine(P.vort, dt);
+    for (let c = 0; c < this.N; c++) { const t = T[c]; if (t > 90) T[c] = 90; else if (t < -30) T[c] = -30; }
+  }
+
+  // Neighbour lists for the pressure solve. Index N is a dummy cell whose pressure stays 0:
+  // walls point there and aren't counted (no flow through them); open domain edges point
+  // there and are counted (pressure fixed at 0 outside).
+  buildStencil(key) {
+    const nx = this.nx, ny = this.ny, S = this.solid, N = this.N, lo = this.leftOpen, ro = this.rightOpen;
+    let n = 0;
+    for (let c = 0; c < N; c++) if (!S[c]) n++;
+    const F = new Int32Array(n), L = new Int32Array(n), R = new Int32Array(n), D = new Int32Array(n), U = new Int32Array(n), inv = new Float32Array(n);
+    let m = 0;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const c = i + j * nx;
+      if (S[c]) continue;
+      let cnt = 0, l = N, r = N, d = N, u = N;
+      if (i > 0) { if (!S[c - 1]) { l = c - 1; cnt++; } } else if (lo) cnt++;
+      if (i < nx - 1) { if (!S[c + 1]) { r = c + 1; cnt++; } } else if (ro) cnt++;
+      if (j > 0 && !S[c - nx]) { d = c - nx; cnt++; }
+      if (j < ny - 1 && !S[c + nx]) { u = c + nx; cnt++; }
+      F[m] = c; L[m] = l; R[m] = r; D[m] = d; U[m] = u; inv[m] = cnt ? 1 / cnt : 0; m++;
+    }
+    this.st = { F, L, R, D, U, inv, key };
+  }
+
+  // Pressure solve (SOR, warm-started) and projection to a divergence-free field.
+  project(iters) {
+    const nx = this.nx, ny = this.ny, dx = this.dx, S = this.solid, u = this.u, v = this.v, p = this.p, div = this.div;
+    const W1 = nx + 1, dx2 = dx * dx, lo = this.leftOpen, ro = this.rightOpen;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const c = i + j * nx;
+      if (S[c]) { div[c] = 0; continue; }
+      div[c] = (u[i + 1 + j * W1] - u[i + j * W1] + v[c + nx] - v[c]) / dx;
+    }
+    const key = (lo ? 1 : 0) + (ro ? 2 : 0);
+    if (!this.st || this.st.key !== key) this.buildStencil(key);
+    const st = this.st, F = st.F, L = st.L, R = st.R, D = st.D, U = st.U, inv = st.inv, n = F.length;
+    const om = 1.7;
+    for (let it = 0; it < iters; it++) {
+      for (let m = 0; m < n; m++) {
+        const c = F[m];
+        p[c] += om * ((p[L[m]] + p[R[m]] + p[D[m]] + p[U[m]] - div[c] * dx2) * inv[m] - p[c]);
+      }
+    }
+    for (let j = 0; j < ny; j++) {
+      for (let i = 0; i <= nx; i++) {
+        const k = i + j * W1;
+        if (i === 0) { if (lo && !S[j * nx]) u[k] -= p[j * nx] / dx; continue; }
+        if (i === nx) { if (ro && !S[nx - 1 + j * nx]) u[k] += p[nx - 1 + j * nx] / dx; continue; }
+        const cl = i - 1 + j * nx, cr = cl + 1;
+        if (S[cl] || S[cr]) u[k] = 0; else u[k] -= (p[cr] - p[cl]) / dx;
+      }
+    }
+    for (let j = 1; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const k = i + j * nx, cd = k - nx;
+      if (S[cd] || S[k]) v[k] = 0; else v[k] -= (p[k] - p[cd]) / dx;
+    }
+  }
+
+  measure(dt) {
+    const a = dt / (4 + dt), dx = this.dx;
+    for (const o of this.openings) {
+      const arr = o.kind === 'u' ? this.u : this.v;
+      let qi = 0, qo = 0;
+      for (const k of o.faces) { const q = o.sign * arr[k] * dx; if (q > 0) qi += q; else qo -= q; }
+      o.inE += a * (qi - o.inE); o.outE += a * (qo - o.outE);
+    }
+  }
+
+  step(P) {
+    const dtNew = this.pickDt(P);
+    if (Math.abs(dtNew - this.dt) > 1e-7) {
+      const r = dtNew / this.dt, p = this.p;
+      for (let c = 0; c < this.N; c++) p[c] *= r; // keep warm start consistent (p is scaled by dt)
+      this.dt = dtNew;
+    }
+    const dt = this.dt;
+    this.extrapT();
+    this.advect(dt);
+    this.forces(P, dt);
+    this.applyBC(P);
+    this.project(P.iters || 40);
+    this.applyTBC(P);
+    this.measure(dt);
+    this.t += dt;
+  }
+
+  pressurePa(c) { return this.p[c] * RHO / this.dt; }
+}
+
+class Particles {
+  constructor(sim, n, H) {
+    this.sim = sim; this.n = n; this.H = H; this.view = null;
+    this.x = new Float32Array(n); this.y = new Float32Array(n); this.life = new Float32Array(n);
+    this.hx = new Float32Array(n * H); this.hy = new Float32Array(n * H); this.head = 0;
+    for (let k = 0; k < n; k++) this.spawn(k);
+  }
+  spawn(k) {
+    const s = this.sim, g = s.geom, H = this.H;
+    let x = 0, y = 0, t = 0;
+    do {
+      const r = Math.random(), v = this.view;
+      if (r < 0.45) { x = (g.iA + Math.random() * (g.iB - g.iA)) * s.dx; y = Math.random() * g.H; }
+      else if (v && r < 0.92) { x = v.x0 + Math.random() * (v.x1 - v.x0); y = Math.random() * v.y1; }
+      else { x = Math.random() * LX; y = Math.random() * s.Ly; }
+    } while (s.isSolidAt(x, y) && ++t < 30);
+    this.x[k] = x; this.y[k] = y; this.life[k] = 2 + Math.random() * 8;
+    for (let h = 0; h < H; h++) { this.hx[k * H + h] = x; this.hy[k * H + h] = y; }
+  }
+  step(dt) {
+    const s = this.sim, H = this.H;
+    this.head = (this.head + 1) % H;
+    for (let k = 0; k < this.n; k++) {
+      let x = this.x[k], y = this.y[k];
+      const xm = x + 0.5 * dt * s.sU(x, y), ym = y + 0.5 * dt * s.sV(x, y);
+      x += dt * s.sU(xm, ym); y += dt * s.sV(xm, ym);
+      this.life[k] -= dt;
+      if (this.life[k] < 0 || s.isSolidAt(x, y)) { this.spawn(k); continue; }
+      this.x[k] = x; this.y[k] = y;
+      this.hx[k * H + this.head] = x; this.hy[k * H + this.head] = y;
+    }
+  }
+}
+</script>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const GROUND = 1.2; // metres of earth shown below grade
+
+const BASE_WINDOWS_STACK = [
+  { label: 'W1', wall: 'L', sill: 0.4, size: 1.2, type: 'hopper', open: 0.8 },
+  { label: 'W2', wall: 'R', sill: 5.6, size: 1.0, type: 'awning', open: 0.8 },
+  { label: 'V1', wall: 'roof', pos: 5.6, size: 0.8, type: 'slot', open: 0 }
+];
+const PRESETS = {
+  cross: { W: 8, H: 3.2, wind: 3, dir: 1, Tout: 22, Tin: 26, q: 40, windows: [
+    { label: 'W1', wall: 'L', sill: 0.9, size: 1.3, type: 'awning', open: 0.6 },
+    { label: 'W2', wall: 'R', sill: 0.9, size: 1.3, type: 'awning', open: 0.6 }] },
+  single: { W: 6, H: 3.2, wind: 1.5, dir: 1, Tout: 20, Tin: 26, q: 60, windows: [
+    { label: 'W1', wall: 'L', sill: 0.2, size: 2.4, type: 'casement', open: 0.8 }] },
+  stack: { W: 8, H: 7, wind: 0.5, dir: 1, Tout: 20, Tin: 25, q: 70, windows: BASE_WINDOWS_STACK },
+  opposed: { W: 8, H: 7, wind: 3, dir: -1, Tout: 20, Tin: 25, q: 70, windows: BASE_WINDOWS_STACK }
+};
+const TYPES = [
+  ['awning', 'Awning, opens out'],
+  ['hopper', 'Hopper, opens in'],
+  ['casement', 'Casement or slider']
+];
+
+const state = {
+  preset: 'cross', W: 8, H: 3.2, wind: 3, dir: 1, Tout: 22, Tin: 26, q: 40, windows: [],
+  field: 'speed', particles: true, arrows: false, opacity: 0.75,
+  res: 0.15, speed: 2, vort: 1, frame: 'building', playing: !matchMedia('(prefers-reduced-motion: reduce)').matches
+};
+
+let sim = null, parts = null, geomDirty = false;
+let fieldCanvas, fieldCtx, fieldImg, pocheCanvas;
+const canvas = $('#view'), ctx = canvas.getContext('2d');
+let dpr = 1, cssW = 800, cssH = 400, scale = 20;
+const view = { x0: 0, w: 36, h: 16 };
+let colors = {};
+let tRange = 2, perfMs = 0, frame = 0, roomT = 0, probe = null;
+
+// ---------- colour maps ----------
+function turbo(t) {
+  const r = 0.13572138 + t * (4.61539260 + t * (-42.66032258 + t * (132.13108234 + t * (-152.94239396 + t * 59.28637943))));
+  const g = 0.09140261 + t * (2.19418839 + t * (4.84296658 + t * (-14.18503333 + t * (4.27729857 + t * 2.82956604))));
+  const b = 0.10667330 + t * (12.64194608 + t * (-60.58204836 + t * (110.36276771 + t * (-89.90310912 + t * 27.34824973))));
+  return [r, g, b].map((c) => Math.round(clamp(c, 0, 1) * 255));
+}
+function diverge(t) {
+  const stops = [[33, 92, 160], [118, 164, 206], [238, 238, 234], [228, 140, 104], [170, 40, 38]];
+  const x = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(x)), f = x - i;
+  return stops[i].map((c, k) => Math.round(c + (stops[i + 1][k] - c) * f));
+}
+function buildLUT(fn) {
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) { const c = fn(i / 255); lut[i * 3] = c[0]; lut[i * 3 + 1] = c[1]; lut[i * 3 + 2] = c[2]; }
+  return lut;
+}
+const LUT_TURBO = buildLUT(turbo), LUT_DIV = buildLUT(diverge);
+function gradientCSS(fn) {
+  const stops = [];
+  for (let i = 0; i <= 10; i++) { const c = fn(i / 10); stops.push(`rgb(${c[0]},${c[1]},${c[2]}) ${i * 10}%`); }
+  return `linear-gradient(90deg, ${stops.join(',')})`;
+}
+
+function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function hexToRgb(h) {
+  const m = h.replace('#', '');
+  const v = m.length === 3 ? m.split('').map((c) => c + c).join('') : m;
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+}
+function readColors() {
+  colors = { paper: cssVar('--paper'), ink: cssVar('--ink'), soft: cssVar('--ink-soft'), halo: cssVar('--halo'), accent: cssVar('--accent') };
+  if (sim) rebuildPoche();
+}
+
+// ---------- simulation setup ----------
+function params() {
+  return { wind: state.wind * state.dir, Tout: state.Tout, Tin: state.Tin, q: state.q, vort: state.vort, iters: 40 };
+}
+function building() { return { W: state.W, H: state.H, windows: state.windows }; }
+
+function newSim() {
+  sim = new Sim(state.res);
+  sim.build(building());
+  sim.init(params());
+  fieldCanvas = document.createElement('canvas');
+  fieldCanvas.width = sim.nx; fieldCanvas.height = sim.ny;
+  fieldCtx = fieldCanvas.getContext('2d');
+  fieldImg = fieldCtx.createImageData(sim.nx, sim.ny);
+  pocheCanvas = document.createElement('canvas');
+  pocheCanvas.width = sim.nx; pocheCanvas.height = sim.ny;
+  rebuildPoche();
+  newParticles();
+}
+function newParticles() {
+  parts = new Particles(sim, 3600, 8);
+  resize();
+  for (let k = 0; k < parts.n; k++) parts.spawn(k);
+}
+function restartFlow() {
+  sim.build(building());
+  sim.init(params());
+  rebuildPoche();
+  newParticles();
+}
+function softRebuild() {
+  // keep the running flow; only re-rasterize geometry
+  const old = sim.openings;
+  sim.build(building());
+  sim.openings.forEach((o, k) => { if (old[k]) { o.inE = old[k].inE; o.outE = old[k].outE; } });
+  rebuildPoche();
+}
+function rebuildPoche() {
+  const pc = pocheCanvas.getContext('2d'), img = pc.createImageData(sim.nx, sim.ny);
+  const [r, g, b] = hexToRgb(colors.ink || '#1D2124');
+  for (let j = 0; j < sim.ny; j++) for (let i = 0; i < sim.nx; i++) {
+    const c = i + j * sim.nx, o = ((sim.ny - 1 - j) * sim.nx + i) * 4;
+    if (sim.solid[c]) { img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = 255; }
+  }
+  pc.putImageData(img, 0, 0);
+}
+
+// ---------- drawing ----------
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cssW = canvas.parentElement.clientWidth;
+  const g = sim.geom, dx = sim.dx;
+  if (state.frame === 'site') { view.x0 = 0; view.w = LX; view.h = sim.Ly; }
+  else {
+    const narrow = cssW < 640, aspect = narrow ? 1.35 : 2.3;
+    view.h = clamp(Math.round(g.H * (narrow ? 1.9 : 2.3)), narrow ? 6 : 7, sim.Ly);
+    view.w = Math.min(LX, Math.max(g.W + (narrow ? 4 : 9), (view.h + GROUND) * aspect));
+    const cx = (g.iA + g.iB) / 2 * dx;
+    view.x0 = clamp(cx - view.w / 2, 0, LX - view.w);
+  }
+  parts && (parts.view = { x0: view.x0, x1: view.x0 + view.w, y1: view.h });
+  scale = cssW / view.w;
+  cssH = (view.h + GROUND) * scale;
+  canvas.style.height = cssH + 'px';
+  canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+}
+const W2S = (x, y) => [(x - view.x0) * scale, (view.h - y) * scale];
+
+function fieldRange() {
+  const w = Math.abs(state.wind * (state.windows.length ? 1 : 1));
+  if (state.field === 'speed') return { lo: 0, hi: Math.max(0.6, 1.4 * w), unit: 'm/s', lut: LUT_TURBO, fn: turbo };
+  if (state.field === 'temp') return { lo: state.Tout - tRange, hi: state.Tout + tRange, unit: '°C', lut: LUT_DIV, fn: diverge };
+  const half = Math.max(0.5, 0.4 * RHO * w * w, RHO * G * BETA * tRange * sim.geom.H);
+  return { lo: -half, hi: half, unit: 'Pa', lut: LUT_DIV, fn: diverge };
+}
+
+function updateField(rg) {
+  const s = sim, nx = s.nx, ny = s.ny, d = fieldImg.data, S = s.solid, W1 = nx + 1, lut = rg.lut;
+  const span = rg.hi - rg.lo, k = RHO / s.dt;
+  for (let j = 0; j < ny; j++) {
+    const row = (ny - 1 - j) * nx;
+    for (let i = 0; i < nx; i++) {
+      const c = i + j * nx, o = (row + i) * 4;
+      if (S[c]) { d[o + 3] = 0; continue; }
+      let val;
+      if (state.field === 'speed') {
+        const uc = 0.5 * (s.u[i + j * W1] + s.u[i + 1 + j * W1]), vc = 0.5 * (s.v[c] + s.v[c + nx]);
+        val = Math.sqrt(uc * uc + vc * vc);
+      } else if (state.field === 'temp') val = s.T[c];
+      else val = s.p[c] * k;
+      let t = (val - rg.lo) / span; t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const li = ((t * 255) | 0) * 3;
+      d[o] = lut[li]; d[o + 1] = lut[li + 1]; d[o + 2] = lut[li + 2]; d[o + 3] = 255;
+    }
+  }
+  fieldCtx.putImageData(fieldImg, 0, 0);
+}
+
+let lastBar = '';
+function updateBar(rg) {
+  const fmt = (v) => (Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1));
+  const key = state.field + fmt(rg.lo) + fmt(rg.hi);
+  if (key === lastBar) return;
+  lastBar = key;
+  const none = state.field === 'none';
+  $('#barGrad').style.background = none ? 'transparent' : gradientCSS(rg.fn);
+  $('#barMin').textContent = none ? '' : fmt(rg.lo);
+  $('#barMax').textContent = none ? '' : fmt(rg.hi);
+  $('#barUnit').textContent = none ? '' : rg.unit;
+}
+
+function drawGround() {
+  const y0 = view.h * scale, y1 = cssH;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, y0, cssW, y1 - y0); ctx.clip();
+  ctx.strokeStyle = colors.soft; ctx.globalAlpha = 0.55; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = -y1; x < cssW + y1; x += 9) { ctx.moveTo(x, y1); ctx.lineTo(x + (y1 - y0), y0); }
+  ctx.stroke();
+  ctx.restore();
+  ctx.strokeStyle = colors.ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, y0); ctx.lineTo(cssW, y0); ctx.stroke();
+  // scale bar, 5 m
+  const bx = 12, by = y0 + (y1 - y0) * 0.62, L = 5 * scale;
+  ctx.fillStyle = colors.paper; ctx.fillRect(bx - 4, by - 12, L + 52, 20);
+  ctx.strokeStyle = colors.ink; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + L, by);
+  for (let m = 0; m <= 5; m++) { ctx.moveTo(bx + m * scale, by - (m % 5 ? 3 : 6)); ctx.lineTo(bx + m * scale, by); }
+  ctx.stroke();
+  ctx.fillStyle = colors.ink; ctx.font = '500 12px Archivo, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('5 m', bx + L + 8, by - 1);
+}
+
+function drawParticles() {
+  const H = parts.H, hx = parts.hx, hy = parts.hy, head = parts.head, ly = view.h, ox = view.x0;
+  ctx.strokeStyle = colors.ink; ctx.globalAlpha = 0.6; ctx.lineWidth = 1;
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, cssW, view.h * scale); ctx.clip();
+  ctx.beginPath();
+  for (let k = 0; k < parts.n; k++) {
+    let h = head, b = k * H;
+    ctx.moveTo((hx[b + h] - ox) * scale, (ly - hy[b + h]) * scale);
+    for (let m = 1; m < H; m++) { h = (h - 1 + H) % H; ctx.lineTo((hx[b + h] - ox) * scale, (ly - hy[b + h]) * scale); }
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 0.85; ctx.fillStyle = colors.ink;
+  for (let k = 0; k < parts.n; k++) ctx.fillRect((parts.x[k] - ox) * scale - 0.8, (ly - parts.y[k]) * scale - 0.8, 1.6, 1.6);
+  ctx.restore(); ctx.globalAlpha = 1;
+}
+
+function drawArrows() {
+  const step = Math.max(3, Math.round(0.8 / sim.dx)), vmax = Math.max(0.6, 1.4 * Math.abs(state.wind));
+  const Lmax = step * sim.dx * scale * 0.9;
+  ctx.strokeStyle = colors.ink; ctx.lineWidth = 1.2; ctx.globalAlpha = 0.8;
+  ctx.beginPath();
+  for (let j = step >> 1; j < sim.ny; j += step) for (let i = step >> 1; i < sim.nx; i += step) {
+    if (sim.solid[i + j * sim.nx]) continue;
+    const x = (i + 0.5) * sim.dx, y = (j + 0.5) * sim.dx;
+    if (x < view.x0 || x > view.x0 + view.w || y > view.h) continue;
+    const u = sim.sU(x, y), v = sim.sV(x, y), sp = Math.hypot(u, v);
+    if (sp < 0.02) continue;
+    const L = Math.min(1, sp / vmax) * Lmax, ux = u / sp, uy = -v / sp;
+    const [sx, sy] = W2S(x, y), ex = sx + ux * L, ey = sy + uy * L;
+    ctx.moveTo(sx, sy); ctx.lineTo(ex, ey);
+    const hl = Math.min(5, L * 0.4);
+    ctx.moveTo(ex, ey); ctx.lineTo(ex - hl * (ux * 0.85 - uy * 0.5), ey - hl * (uy * 0.85 + ux * 0.5));
+    ctx.moveTo(ex, ey); ctx.lineTo(ex - hl * (ux * 0.85 + uy * 0.5), ey - hl * (uy * 0.85 - ux * 0.5));
+  }
+  ctx.stroke(); ctx.globalAlpha = 1;
+}
+
+const FONT_B = '600 12.5px Archivo, "Helvetica Neue", Arial, sans-serif', FONT_R = '400 12px Archivo, "Helvetica Neue", Arial, sans-serif';
+function label(lines, x, y, align, boxed = true) {
+  ctx.textBaseline = 'middle';
+  let wmax = 0;
+  lines.forEach((t, k) => { ctx.font = k ? FONT_R : FONT_B; wmax = Math.max(wmax, ctx.measureText(t).width); });
+  const lh = 15, padX = 6, h = lines.length * lh + 6;
+  let left = align === 'left' ? x : align === 'right' ? x - wmax : x - wmax / 2;
+  left = clamp(left, padX + 2, cssW - wmax - padX - 2);
+  if (boxed) {
+    ctx.fillStyle = colors.halo;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(left - padX, y - h / 2, wmax + padX * 2, h, 3); else ctx.rect(left - padX, y - h / 2, wmax + padX * 2, h);
+    ctx.fill();
+  }
+  ctx.textAlign = 'left'; ctx.fillStyle = colors.ink;
+  lines.forEach((t, k) => {
+    ctx.font = k ? FONT_R : FONT_B;
+    ctx.fillText(t, left, y + (k - (lines.length - 1) / 2) * lh);
+  });
+}
+
+function drawLabels() {
+  for (const o of sim.openings) {
+    const [sx, sy] = W2S(o.ax, o.ay);
+    const lin = Math.round(o.inE * 1000), lout = Math.round(o.outE * 1000);
+    const shut = o.faces.every((k) => (o.kind === 'u' ? sim.u[k] : sim.v[k]) === 0) && lin + lout === 0;
+    const lines = shut ? [o.label, 'closed'] : [o.label, `in ${lin}  out ${lout} L/s`];
+    // keep the tag clear of an outward-opening sash
+    let ex = o.ax;
+    if (o.sash) ex = o.wall === 'L' ? Math.min(ex, o.sash[0], o.sash[2]) : Math.max(ex, o.sash[0], o.sash[2]);
+    const gx = W2S(ex, 0)[0];
+    if (o.wall === 'L') label(lines, gx - 12, sy, 'right');
+    else if (o.wall === 'R') label(lines, gx + 12, sy, 'left');
+    else label(lines, sx, sy - 22, 'center');
+  }
+  // wind marker on the upwind edge
+  const w = state.wind * state.dir;
+  const ty = W2S(0, Math.min(10.6, view.h - 1.4))[1];
+  if (Math.abs(w) < 0.05) { label(['Still air', 'no wind at the boundary'], 10, ty, 'left', false); return; }
+  const left = w > 0, x0 = left ? 10 : cssW - 10, L = 2.4 * scale * (left ? 1 : -1);
+  ctx.strokeStyle = colors.ink; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x0, ty + 26); ctx.lineTo(x0 + L, ty + 26);
+  const s = left ? 1 : -1;
+  ctx.moveTo(x0 + L, ty + 26); ctx.lineTo(x0 + L - 7 * s, ty + 21);
+  ctx.moveTo(x0 + L, ty + 26); ctx.lineTo(x0 + L - 7 * s, ty + 31);
+  ctx.stroke();
+  label([`Wind ${Math.abs(w).toFixed(1)} m/s`, 'measured at 10 m'], x0, ty, left ? 'left' : 'right', false);
+}
+
+function drawSashes() {
+  ctx.strokeStyle = colors.accent; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (const o of sim.openings) {
+    if (!o.sash) continue;
+    const [ax, ay] = W2S(o.sash[0], o.sash[1]), [bx, by] = W2S(o.sash[2], o.sash[3]);
+    ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+  }
+  ctx.stroke(); ctx.lineCap = 'butt';
+}
+
+function drawProbe() {
+  if (!probe) return;
+  const [sx, sy] = W2S(probe.x, probe.y);
+  ctx.strokeStyle = colors.accent; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+  ctx.moveTo(sx - 11, sy); ctx.lineTo(sx - 7, sy); ctx.moveTo(sx + 7, sy); ctx.lineTo(sx + 11, sy);
+  ctx.moveTo(sx, sy - 11); ctx.lineTo(sx, sy - 7); ctx.moveTo(sx, sy + 7); ctx.lineTo(sx, sy + 11);
+  ctx.stroke();
+}
+
+function drawCropped(img) {
+  const dx = sim.dx;
+  ctx.drawImage(img, view.x0 / dx, (sim.Ly - view.h) / dx, view.w / dx, view.h / dx, 0, 0, view.w * scale, view.h * scale);
+}
+
+function render() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = colors.paper; ctx.fillRect(0, 0, cssW, cssH);
+  const rg = fieldRange();
+  if (state.field !== 'none') {
+    updateField(rg);
+    ctx.imageSmoothingEnabled = true; ctx.globalAlpha = state.opacity;
+    drawCropped(fieldCanvas);
+    ctx.globalAlpha = 1;
+  }
+  updateBar(rg);
+  if (state.arrows) drawArrows();
+  if (state.particles) drawParticles();
+  ctx.imageSmoothingEnabled = false;
+  drawCropped(pocheCanvas);
+  drawSashes();
+  drawGround();
+  drawLabels();
+  drawProbe();
+}
+
+// ---------- readouts ----------
+function updateReadouts() {
+  const g = sim.geom;
+  let s = 0, s2 = 0, n = 0;
+  for (let c = 0; c < sim.N; c++) if (sim.room[c] && !sim.solid[c]) { const d = sim.T[c] - state.Tout; s += d; s2 += d * d; n++; }
+  const mean = n ? s / n : 0, sd = n ? Math.sqrt(Math.max(0, s2 / n - mean * mean)) : 0;
+  roomT = state.Tout + mean;
+  tRange += (Math.max(1.5, Math.abs(mean) + 2.5 * sd) - tRange) * 0.25;
+  let qin = 0, qout = 0;
+  for (const o of sim.openings) { qin += o.inE; qout += o.outE; }
+  const ach = qin * 3600 / (g.W * g.H);
+  $('#rAch').textContent = ach < 10 ? ach.toFixed(1) : ach.toFixed(0);
+  $('#rQin').textContent = Math.round(qin * 1000);
+  $('#rTin').textContent = roomT.toFixed(1);
+  $('#rBal').textContent = qout > 1e-4 ? (qin / qout).toFixed(2) : '–';
+  $('#rTime').textContent = sim.t < 120 ? `${sim.t.toFixed(0)} s` : `${(sim.t / 60).toFixed(1)} min`;
+  $('#status').textContent = `${sim.nx} × ${sim.ny} cells, ${perfMs.toFixed(1)} ms per step, time step ${(sim.dt * 1000).toFixed(0)} ms`;
+  updateProbeText();
+}
+function updateProbeText() {
+  if (!probe) return;
+  const u = sim.sU(probe.x, probe.y), v = sim.sV(probe.x, probe.y);
+  const T = sim.sC(sim.T, probe.x, probe.y), P = sim.sC(sim.p, probe.x, probe.y) * RHO / sim.dt;
+  $('#probe').textContent = sim.isSolidAt(probe.x, probe.y)
+    ? `Solid at x ${probe.x.toFixed(1)} m, height ${probe.y.toFixed(1)} m`
+    : `${Math.hypot(u, v).toFixed(2)} m/s   ${T.toFixed(1)} °C   ${P >= 0 ? '+' : ''}${P.toFixed(2)} Pa   at x ${probe.x.toFixed(1)} m, height ${probe.y.toFixed(1)} m`;
+}
+
+// ---------- loop ----------
+function tick() {
+  if (geomDirty) { softRebuild(); geomDirty = false; }
+  if (state.playing) {
+    const P = params(), t0 = performance.now();
+    for (let k = 0; k < state.speed; k++) { sim.step(P); if (state.particles) parts.step(sim.dt); }
+    perfMs += ((performance.now() - t0) / state.speed - perfMs) * 0.1;
+  }
+  render();
+  if (frame++ % 8 === 0) updateReadouts();
+  requestAnimationFrame(tick);
+}
+
+// ---------- controls ----------
+function setPressed(group, attr, val) {
+  document.querySelectorAll(`${group} button`).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset[attr] === String(val))));
+}
+const fmts = {
+  wind: (v) => `${(+v).toFixed(1)} m/s`, tout: (v) => `${(+v).toFixed(1)} °C`, tin: (v) => `${(+v).toFixed(1)} °C`,
+  W: (v) => `${(+v).toFixed(1)} m`, H: (v) => `${(+v).toFixed(1)} m`, q: (v) => `${v} W/m²`,
+  opacity: (v) => `${Math.round(v * 100)}%`, speed: (v) => `${v}×`, vort: (v) => (+v === 0 ? 'off' : (+v).toFixed(2))
+};
+const keyFor = { wind: 'wind', tout: 'Tout', tin: 'Tin', W: 'W', H: 'H', q: 'q', opacity: 'opacity', speed: 'speed', vort: 'vort' };
+function syncControls() {
+  for (const id in keyFor) { const el = $('#' + id); el.value = state[keyFor[id]]; $('#' + id + 'O').textContent = fmts[id](el.value); }
+  setPressed('#dir', 'd', state.dir);
+  setPressed('#presets', 'p', state.preset);
+  setPressed('#field', 'f', state.field);
+  $('#play').textContent = state.playing ? 'Pause' : 'Play';
+  buildWindowUI();
+}
+for (const id in keyFor) {
+  $('#' + id).addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    state[keyFor[id]] = v;
+    $('#' + id + 'O').textContent = fmts[id](e.target.value);
+    if (id === 'W' || id === 'H') { fitWindows(); buildWindowUI(); restartFlow(); }
+  });
+}
+function fitWindows() {
+  for (const w of state.windows) {
+    if (w.wall === 'roof') { w.size = Math.min(w.size, state.W - 0.5); w.pos = clamp(w.pos, 0, state.W - w.size); }
+    else { w.size = Math.min(w.size, state.H - 0.3); w.sill = clamp(w.sill, 0, state.H - w.size - 0.15); }
+  }
+}
+
+function buildWindowUI() {
+  const host = $('#windows');
+  host.innerHTML = '';
+  state.windows.forEach((w, k) => {
+    const roof = w.wall === 'roof';
+    const wallName = w.wall === 'L' ? 'Left wall' : w.wall === 'R' ? 'Right wall' : 'Roof';
+    const posMax = roof ? state.W - w.size : Math.max(0, state.H - w.size - 0.15);
+    const sizeMax = roof ? 2 : Math.max(0.4, state.H - 0.3);
+    const div = document.createElement('div');
+    div.className = 'win';
+    div.innerHTML = `
+      <div class="win-head"><strong>${w.label}</strong><span>${wallName}</span></div>
+      ${roof ? '<p class="note">Roof vent, modelled as a plain gap</p>'
+        : `<div class="row wide"><label for="t${k}">Type</label><select id="t${k}" data-k="${k}" data-f="type">${TYPES.map(([v, n]) => `<option value="${v}"${v === w.type ? ' selected' : ''}>${n}</option>`).join('')}</select></div>`}
+      <div class="row"><label for="o${k}">Open</label><input type="range" id="o${k}" data-k="${k}" data-f="open" min="0" max="1" step="0.05" value="${w.open}"><output>${Math.round(w.open * 100)}%</output></div>
+      <div class="row"><label for="p${k}">${roof ? 'Position' : 'Sill'}</label><input type="range" id="p${k}" data-k="${k}" data-f="${roof ? 'pos' : 'sill'}" min="0" max="${posMax.toFixed(2)}" step="0.05" value="${roof ? w.pos : w.sill}"><output>${(roof ? w.pos : w.sill).toFixed(2)} m</output></div>
+      <div class="row"><label for="s${k}">${roof ? 'Width' : 'Height'}</label><input type="range" id="s${k}" data-k="${k}" data-f="size" min="0.3" max="${sizeMax.toFixed(2)}" step="0.05" value="${w.size}"><output>${w.size.toFixed(2)} m</output></div>`;
+    host.appendChild(div);
+  });
+}
+$('#windows').addEventListener('input', (e) => {
+  const el = e.target, k = +el.dataset.k, f = el.dataset.f;
+  if (!f) return;
+  const w = state.windows[k];
+  if (f === 'type') w.type = el.value;
+  else {
+    w[f] = parseFloat(el.value);
+    const out = el.parentElement.querySelector('output');
+    if (out) out.textContent = f === 'open' ? `${Math.round(w.open * 100)}%` : `${w[f].toFixed(2)} m`;
+  }
+  geomDirty = true;
+});
+$('#windows').addEventListener('change', (e) => {
+  if (e.target.dataset.f === 'size') { fitWindows(); buildWindowUI(); geomDirty = true; }
+});
+
+$('#presets').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  loadPreset(b.dataset.p);
+});
+function loadPreset(name) {
+  const p = PRESETS[name];
+  Object.assign(state, { preset: name, W: p.W, H: p.H, wind: p.wind, dir: p.dir, Tout: p.Tout, Tin: p.Tin, q: p.q });
+  state.windows = p.windows.map((w) => ({ ...w }));
+  syncControls();
+  restartFlow();
+}
+$('#dir').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.dir = +b.dataset.d; setPressed('#dir', 'd', state.dir);
+});
+$('#field').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.field = b.dataset.f; setPressed('#field', 'f', state.field);
+});
+$('#frame').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.frame = b.dataset.v; setPressed('#frame', 'v', state.frame); newParticles();
+});
+$('#particles').addEventListener('change', (e) => { state.particles = e.target.checked; });
+$('#arrows').addEventListener('change', (e) => { state.arrows = e.target.checked; });
+$('#res').addEventListener('change', (e) => { state.res = parseFloat(e.target.value); newSim(); });
+$('#play').addEventListener('click', () => { state.playing = !state.playing; $('#play').textContent = state.playing ? 'Pause' : 'Play'; });
+$('#reset').addEventListener('click', () => restartFlow());
+
+const onPoint = (e) => {
+  const r = canvas.getBoundingClientRect();
+  const x = view.x0 + (e.clientX - r.left) / scale, y = view.h - (e.clientY - r.top) / scale;
+  if (x < 0 || x > LX || y < 0 || y > sim.Ly) { probe = null; return; }
+  probe = { x, y }; updateProbeText();
+};
+canvas.addEventListener('pointermove', onPoint);
+canvas.addEventListener('pointerdown', onPoint);
+canvas.addEventListener('pointerleave', (e) => {
+  if (e.pointerType === 'touch') return; probe = null; $('#probe').textContent = 'Hover over or tap the section to read speed, temperature and pressure.'; });
+window.addEventListener('resize', () => resize());
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readColors);
+
+// ---------- start ----------
+readColors();
+state.windows = PRESETS.cross.windows.map((w) => ({ ...w }));
+newSim();
+syncControls();
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { lastBar = ''; });
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
