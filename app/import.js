@@ -6,6 +6,7 @@ import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor } from './particles.js';
+import { dateOf, outdoorAt, parseEPW } from '../src/model/weather.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -27,16 +28,21 @@ $('version').textContent = MODEL_VERSION;
 const view = new View3D($('viewer'), { onSelect: showInfo });
 const air = new AirflowParticles(view);
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
+let weather = null, weatherHour = null; // the weather file and the hour picked from it
 
 // Solves the network for the conditions in the Airflow controls and hands the flows to the particles.
 function solveAir() {
   if (!model || !net) return;
-  const loc = Object.values(model.epjson['Site:Location'] || {})[0] || {};
+  // The site comes from the weather file when there is one, else from the model, else sea level.
+  const loc = weather?.location || Object.values(model.epjson['Site:Location'] || {})[0] || {};
   const site = { elevation: loc.elevation ?? 0, latitude: loc.latitude ?? 45 };
   const open = $('windows-open').checked, tIn = Number($('t-in').value);
   const conditions = {
     site,
-    outdoor: { t: Number($('t-out').value), w: 0.008, pressure: standardPressure(site.elevation), windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value) },
+    outdoor: {
+      t: Number($('t-out').value), w: weatherHour?.w ?? 0.008, pressure: weatherHour?.pressure ?? standardPressure(site.elevation),
+      windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
+    },
     zones: Object.fromEntries(net.zones.map((z) => [z, { t: tIn, w: 0.008 }])),
     open: Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, open ? l.openFactor : 0])),
   };
@@ -52,11 +58,59 @@ function solveAir() {
 for (const id of ['t-out', 't-in', 'wind', 'wind-dir', 'windows-open']) $(id).addEventListener('input', () => { solveAir(); if (model) showInfo(view.find(selected)); });
 $('show-air').addEventListener('change', (e) => {
   air.setVisible(e.target.checked);
-  if (e.target.checked) air.play(); else { air.stop(); air.clear(); }
+  if (e.target.checked) { solveAir(); air.play(); } else { air.stop(); air.clear(); }
   legend();
 });
 $('air-speed').addEventListener('input', (e) => { air.speed = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
 let selected = null;
+
+// Weather: picking a day and hour fills in the outdoor conditions, which can still be edited.
+function setWeather(w) {
+  weather = w;
+  weatherHour = null;
+  for (const id of ['day', 'hour']) $(id).disabled = !w;
+  applyHour();
+}
+function applyHour() {
+  if (!weather) { $('when').textContent = ''; solveAir(); return; }
+  const day = Number($('day').value), hour = Number($('hour').value);
+  weatherHour = outdoorAt(weather, day, hour);
+  $('t-out').value = weatherHour.t;
+  $('wind').value = weatherHour.windSpeed;
+  $('wind-dir').value = weatherHour.windDirection;
+  const hh = (h) => `${String(h).padStart(2, '0')}:00`;
+  $('when').textContent = `${dateOf(day).label}, ${hh(hour - 1)}–${hh(hour)}`;
+  $('when').title = `${weather.location.name}, ${weather.fileName || 'weather file'}: ${weatherHour.t} °C, wind ${weatherHour.windSpeed} m/s from ${weatherHour.windDirection}°, ${(weatherHour.w * 1000).toFixed(1)} g/kg humidity`;
+  solveAir();
+  if (model) showInfo(view.find(selected));
+}
+async function loadWeather(name, read) {
+  try { setWeather(parseEPW(await read(), { fileName: name })); } catch (err) {
+    setWeather(null);
+    $('when').innerHTML = `<span class="error-text">Could not read ${esc(name)}: ${esc(err.message)}</span>`;
+  }
+}
+for (const id of ['day', 'hour']) $(id).addEventListener('input', applyHour);
+$('weather-file').addEventListener('change', (e) => {
+  const name = e.target.value;
+  if (!name) return setWeather(null);
+  const local = e.target.selectedOptions[0].file;
+  loadWeather(name, local ? () => local.text() : () => fetch(`/weather/${encodeURIComponent(name)}`).then((r) => r.text()));
+});
+$('weather-load').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const option = new Option(file.name, file.name, true, true);
+  option.file = file;
+  $('weather-file').add(option);
+  loadWeather(file.name, () => file.text());
+});
+// The dev server offers the course weather files; the one ClimateStudio's runs used is picked first.
+fetch('/weather/').then((r) => (r.ok ? r.json() : [])).then((files) => {
+  for (const f of files) $('weather-file').add(new Option(f, f));
+  const first = files.find((f) => f.includes('TDY-CWEC2020v2')) || null;
+  if (first) { $('weather-file').value = first; $('weather-file').dispatchEvent(new Event('change')); }
+}).catch(() => {});
 
 const load = (file) => loadText(file.name, () => file.text());
 

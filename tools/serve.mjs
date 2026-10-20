@@ -5,7 +5,7 @@
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,8 +21,22 @@ const EXAMPLES = [
   { id: 'example01', label: 'Example 01', file: path.join(A2, 'Example 01', 'CS Results', 'Willem_Girard_CS_V3.epJSON') },
 ];
 
+// Weather files in A2's Weather Files folder, offered the same way.
+const WEATHER = path.join(A2, 'Weather Files');
+const weatherFiles = () => (existsSync(WEATHER) ? readdirSync(WEATHER).filter((f) => f.toLowerCase().endsWith('.epw')) : []);
+
 createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/weather/') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(weatherFiles()));
+  }
+  if (url.pathname.startsWith('/weather/')) {
+    const name = decodeURIComponent(url.pathname.slice('/weather/'.length));
+    if (!weatherFiles().includes(name)) { res.writeHead(404); return res.end('Not found'); }
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+    return res.end(await readFile(path.join(WEATHER, name)));
+  }
   if (url.pathname === '/examples/') {
     const found = EXAMPLES.filter((e) => existsSync(e.file)).map((e) => ({ label: e.label, file: path.basename(e.file), url: `/examples/${e.id}.epJSON` }));
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });

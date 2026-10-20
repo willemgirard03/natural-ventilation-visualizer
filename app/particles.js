@@ -6,7 +6,8 @@
 import * as THREE from 'three';
 import { area, bounds, triangulate, unitNormal } from '../src/model/geometry.js';
 
-const CAPACITY = 6000;
+const CAPACITY = 8000;
+const TARGET = 3000; // particles in view under the first conditions shown
 const MAX_HOPS = 8;
 const RHO = 1.2;
 
@@ -52,7 +53,8 @@ export class AirflowParticles {
     view.scene.add(this.points);
     this.live = [];
     this.speed = 5; // display time runs this many times faster than real time
-    this.density = 400; // particles per (kg/s) of outdoor air, per display second at speed 1
+    // Particles released per kg of outdoor air; set once per model so more flow shows more particles.
+    this.density = null;
     this.spawnDebt = 0;
     this.flows = null;
   }
@@ -62,6 +64,7 @@ export class AirflowParticles {
     this.net = net;
     this.live = [];
     this.flows = null;
+    this.density = null;
     this.linkTris = net.links.map((l) => {
       const list = triangulate(l.vertices).map((t) => { const p = t.map((i) => l.vertices[i]); return { p, a: area(p) }; });
       return { list, total: list.reduce((s, x) => s + x.a, 0), normal: unitNormal(l.vertices) };
@@ -74,6 +77,39 @@ export class AirflowParticles {
   setFlows(flows, conditions) {
     this.flows = flows;
     this.conditions = conditions;
+    if (!flows.outdoorIn) return;
+    // Particles in the building = release rate x time spent inside, averaged over sample routes.
+    const sample = Array.from({ length: 200 }, () => this.route(this.pickEntry()).duration);
+    const time = sample.reduce((s, x) => s + x, 0) / sample.length;
+    if (this.density === null) this.density = TARGET / (flows.outdoorIn * time); // TARGET under these first conditions
+    if (!this.live.length) {
+      // Start with air already on its way, spread along the routes, rather than one packet at the windows.
+      const n = Math.min(CAPACITY, Math.round(this.density * flows.outdoorIn * time));
+      for (let k = 0; k < n; k++) {
+        const q = this.route(this.pickEntry());
+        if (this.advance(q, Math.random() * q.duration)) this.live.push(q);
+      }
+    }
+  }
+
+  // An entry stream, chosen in proportion to its flow.
+  pickEntry() {
+    const entries = this.flows.entries;
+    let r = Math.random() * this.flows.outdoorIn;
+    for (const x of entries) { if ((r -= x.rate) <= 0) return x; }
+    return entries[entries.length - 1];
+  }
+
+  // Moves a particle t seconds (real time) along its route; false once it has left the building.
+  advance(q, t) {
+    q.d += q.speeds[q.leg] * t;
+    let len;
+    while (q.leg < q.speeds.length && q.d >= (len = Math.hypot(...q.pts[q.leg + 1].map((x, i) => x - q.pts[q.leg][i])))) {
+      q.d -= len; q.leg++;
+      if (q.leg < q.speeds.length) q.d *= q.speeds[q.leg] / q.speeds[q.leg - 1];
+    }
+    q.len = len;
+    return q.leg < q.speeds.length;
   }
 
   // A particle's route from an entry stream: waypoints (model coordinates), the speed along each leg
@@ -112,36 +148,25 @@ export class AirflowParticles {
       if (next.to < 0) { pts.push(move(exit, along(next), 1)); temps.push(zoneT(z)); speeds.push(through(next)); }
       s = next; p = exit;
     }
-    return { pts, speeds, temps, leg: 0, d: 0 };
+    let duration = 0;
+    for (let i = 0; i < speeds.length; i++) duration += Math.hypot(...pts[i + 1].map((x, k) => x - pts[i][k])) / speeds[i];
+    return { pts, speeds, temps, leg: 0, d: 0, duration };
   }
 
   // Advances the particles by dt seconds of display time.
   tick(dt) {
     if (!this.flows) return;
     const sim = Math.min(dt, 0.1) * this.speed;
-    // Spawn in proportion to each entry's flow; the overall rate adapts to keep about 3,000 in view.
-    const target = 3000, live = this.live.length;
-    this.density *= Math.min(1.05, Math.max(0.95, (target / Math.max(live, 50)) ** 0.1));
-    this.spawnDebt += this.density * this.flows.outdoorIn * sim;
-    const entries = this.flows.entries, total = this.flows.outdoorIn;
-    while (this.spawnDebt >= 1 && this.live.length < CAPACITY && total > 0) {
-      this.spawnDebt -= 1;
-      let r = Math.random() * total, e = entries[0];
-      for (const x of entries) { if ((r -= x.rate) <= 0) { e = x; break; } }
-      this.live.push(this.route(e));
+    // A steady release in proportion to each entry's flow; when full, new particles are skipped, not saved up.
+    if (this.density && this.flows.outdoorIn > 0) {
+      this.spawnDebt += this.density * this.flows.outdoorIn * sim;
+      for (; this.spawnDebt >= 1; this.spawnDebt--) if (this.live.length < CAPACITY) this.live.push(this.route(this.pickEntry()));
     }
-    this.spawnDebt = Math.min(this.spawnDebt, 50);
     const o = this.view.origin, col = new THREE.Color();
     let n = 0;
     for (const q of this.live) {
-      q.d += q.speeds[q.leg] * sim;
-      let len;
-      while (q.leg < q.speeds.length && q.d >= (len = Math.hypot(...q.pts[q.leg + 1].map((x, i) => x - q.pts[q.leg][i])))) {
-        q.d -= len; q.leg++;
-        if (q.leg < q.speeds.length) q.d *= q.speeds[q.leg] / q.speeds[q.leg - 1];
-      }
-      if (q.leg >= q.speeds.length) continue; // reached the end of its route
-      const a = q.pts[q.leg], b = q.pts[q.leg + 1], f = len > 0 ? q.d / len : 0;
+      if (!this.advance(q, sim)) continue; // reached the end of its route
+      const a = q.pts[q.leg], b = q.pts[q.leg + 1], f = q.len > 0 ? q.d / q.len : 0;
       for (let i = 0; i < 3; i++) this.positions[n * 3 + i] = a[i] + f * (b[i] - a[i]) - o[i];
       temperatureColor(q.temps[q.leg] + f * (q.temps[q.leg + 1] - q.temps[q.leg]), col);
       this.colors[n * 3] = col.r; this.colors[n * 3 + 1] = col.g; this.colors[n * 3 + 2] = col.b;

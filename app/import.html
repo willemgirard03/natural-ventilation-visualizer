@@ -102,7 +102,8 @@ button.quiet { background: transparent; color: var(--accent); }
 .view-tools select, .view-tools output { font: inherit; color: var(--ink); }
 .view-tools output { min-width: 4.5em; font-variant-numeric: tabular-nums; }
 .view-tools input[type=number] { width: 4.2em; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 2px 4px; }
-#air-total { color: var(--ink); }
+#air-total, #when { color: var(--ink); }
+.quiet-button { color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .viewer { position: relative; height: min(64vh, 620px); min-height: 320px; border-radius: 8px; overflow: hidden; background: var(--panel); }
 .viewer canvas { display: block; width: 100%; height: 100%; }
 .pick-info {
@@ -144,6 +145,13 @@ footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
       <label title="Surrounding buildings and other shading surfaces"><input type="checkbox" id="show-shading" checked> Shading</label>
       <button id="fit" class="quiet" title="Fit the whole building in view">Fit</button>
       <span title="Left click: select a surface or window · Right drag: orbit · Middle drag: pan · Wheel: zoom">Mouse controls</span>
+    </div>
+    <div class="view-tools">
+      <label title="Hourly weather file (.epw) for the site: picking a day and hour fills in the outdoor conditions">Weather <select id="weather-file"><option value="">none</option></select></label>
+      <label class="quiet-button" title="Load a weather file from this computer">Load .epw<input type="file" id="weather-load" accept=".epw"></label>
+      <label title="Day of the year">Day <input type="range" id="day" min="1" max="365" value="196" disabled></label>
+      <label title="Hour of the day: the weather file's hour ending at this time">Hour <input type="range" id="hour" min="1" max="24" value="15" disabled></label>
+      <output id="when"></output>
     </div>
     <div class="view-tools">
       <label title="Particles follow the airflow network: where outdoor air enters, which rooms it passes through and where it leaves. They do not show the pattern of air inside each room."><input type="checkbox" id="show-air" checked> Airflow</label>
