@@ -168,3 +168,20 @@ for (const key of Object.keys(EXAMPLES)) {
     }
   });
 }
+
+test('example02: interior doors join rooms, circulation and the stairwell on both floors', { skip: skip02 }, async () => {
+  const { interiorDoors } = await import('../src/model/interior-doors.js');
+  const { toAirflowNetwork } = await import('../src/model/airflow-network.js');
+  const { model } = load('example02');
+  const doors = interiorDoors(model);
+  assert.equal(doors.length, 17);
+  for (const d of doors) {
+    const wall = model.surfaces[d.surface], other = model.surfaces[d.partnerSurface];
+    assert.ok(dot(unitNormal(d.vertices), unitNormal(wall.vertices)) > 0.9999, `${d.name} faces like its wall`);
+    assert.ok(dot(unitNormal(d.partnerVertices), unitNormal(other.vertices)) > 0.9999, `${d.partnerName} faces like its wall`);
+  }
+  const stair = doors.filter((d) => [d.zone, d.partnerZone].includes('GF_Stairwell_6'));
+  assert.deepEqual([...new Set(stair.map((d) => Math.round(d.vertices[1][2])))].sort(), [0, 4]); // a door on each floor
+  const ep = toAirflowNetwork(model);
+  assert.equal(Object.values(ep['FenestrationSurface:Detailed']).filter((f) => f.surface_type === 'Door').length, 34);
+});

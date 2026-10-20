@@ -129,3 +129,27 @@ export function triangulate(points) {
   if (Math.abs(cross(ring[0], ring[1], ring[2])) > eps) triangles.push(ring);
   return triangles;
 }
+
+// Converts building coordinates back to a zone's relative coordinates (the inverse of toBuilding).
+export function fromBuilding(points, zone = {}) {
+  const ox = zone.x_origin || 0, oy = zone.y_origin || 0, oz = zone.z_origin || 0;
+  const r = ((zone.direction_of_relative_north || 0) * Math.PI) / 180;
+  if (!ox && !oy && !oz && !r) return points;
+  const c = Math.cos(r), s = Math.sin(r);
+  return points.map(([x, y, z]) => {
+    const dx = x - ox, dy = y - oy;
+    return [dx * c - dy * s, dx * s + dy * c, z - oz];
+  });
+}
+
+export const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+// Whether a point (2D) lies inside a polygon (2D), by ray crossing.
+export function insidePolygon([x, y], poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}

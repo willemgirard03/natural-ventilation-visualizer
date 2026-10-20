@@ -271,6 +271,27 @@ EnergyPlus is the reference engine: the tool's data follows EnergyPlus's own inp
 
 Step 2: the same comparison for an input file written by the tool itself rather than by ClimateStudio. **First part passed (20 Oct):** Example\_02 imported into the project model and exported by `tools/export_epjson.mjs` gives EnergyPlus results bit-identical to the original file's (`run_alignment.py example02 --input runs/roundtrip/example02.epJSON`). This proves the import–export path loses nothing. Still to do: the same test once export writes objects from the model's own values (overrides, the airflow-network variant), where any difference would come from the tool.
 
+**Airflow network reference (20 Oct).** `src/model/airflow-network.js` writes the network variant of an imported model, and `node tools/export_epjson.mjs <in> <out> --network` saves it. Settings:
+
+- **Windows:** ClimateStudio's values, as simple openings (discharge coefficient 0.6, open over the operable fraction).
+- **Window control:** open above 25 °C when warmer than outdoors, within ClimateStudio's hourly availability schedule.
+- **Wind pressure:** EnergyPlus's surface-averaged coefficients, with the long axis and width ratio measured from the footprint.
+- **Leakage:** cracks in every exterior and interzone surface at 1 m³/h per m² at 50 Pa, and along closed windows at 0.5 m³/h per m, replacing the constant infiltration. These figures are the tool's choice, not ClimateStudio's.
+- **Doors:** the interior doors the tool adds (Data model), always open.
+
+Results on Example\_02 (EnergyPlus 23.1, full year, no severe errors in the annual run):
+
+| Variant | Mean flow through windows | Between zones | Zone temperature vs ClimateStudio's simple mode |
+| --- | --- | --- | --- |
+| Network, cracks only | 13,745 m³/h | 122 m³/h through cracks, under 1% | mean difference 0.31 °C, 92% of zone-hours within 0.5 °C |
+| Network with the 17 added doors | 14,012 m³/h | 6,962 m³/h through the doors (230–532 m³/h each, median 454); 24 m³/h through cracks | mean difference 0.55 °C, 50% within 0.5 °C; circulation zones differ most (0.7 °C) |
+
+- **Without interior openings the network is twelve separate rooms.** That is why the doors were added.
+- **With doors, the stairwell works as a stack.** Over the year, about 210 m³/h enters it through its ground-floor doors and 205 m³/h leaves through its upper-floor doors; in July and August about twice that. This is the kind of path the network solver must reproduce.
+- **Sizing warmup does not converge with doors.** EnergyPlus reports 12 severe errors, all in the extreme-summer sizing period for the ideal-loads equipment, which is switched off; the annual run converges. Worth removing later, for example by skipping zone sizing in the network variant.
+
+These runs are the reference for the tool's network solver: hourly flow through every opening and crack (`AFN Linkage` outputs) and node pressures.
+
 **Case study choice.** Example\_02 is the lighter validation case: 12 zones, the same ClimateStudio conventions, and it requested CO2 output, so its results include hourly CO2 for every zone to check the tool's CO2 calculation against.
 
 ## Architecture
@@ -306,6 +327,8 @@ Every setting carries its source, so the tool can show where a value came from a
 | Material | ClimateStudio library CSV or manual | Conductivity, density, specific heat |
 
 Each zone holds one construction per surface type, as in ClimateStudio; a surface takes its construction from its zone and type, and can be overridden like any other value.
+
+**Interior doors added by the tool (decided 20 Oct).** ClimateStudio models often have no interior openings (Example\_02 has none), which leaves the airflow network with no paths between zones. The tool adds one open door, 0.9 × 2.1 m, between each room and each circulation zone it shares a wall with, and between adjoining circulation zones. It sits on their largest shared wall, centred at the floor. Circulation is recognised by zone name (circulation, corridor, hall, lobby, stair, vestibule, foyer, atrium); elevator shafts get none. Example\_02 gets 17 doors, Example\_01 63. They show in the 3D view as added by the tool, and are written only into the network variant. Students will later move, resize, close or delete them, and draw their own.
 
 Sash type and hinge side are the new fields: ClimateStudio has no equivalent, so they default to casement, the closest match to how ClimateStudio treats windows. Awning is the stress test: when open it leaves gaps at the sides, so its free-area calculation differs. Sash type is set and saved in the tool and also written back to the Rhino window objects as user text (lower priority).
 

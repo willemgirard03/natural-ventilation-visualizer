@@ -23,6 +23,7 @@ export const TYPE_COLORS = {
   'Adiabatic Roof': '#9584AE',
   Unknown: '#E0559A',
   Glazing: '#5AA6E0',
+  Door: '#9A5B34',
   Shading: '#9AA3A8',
 };
 const INSIDE_SHADE = 0x9a9a9a; // inside faces (the side a surface does not face) are drawn this much darker
@@ -139,9 +140,11 @@ export class View3D {
     this.highlight = null;
   }
 
-  setModel(model) {
+  // doors: openings the tool adds (interior-doors.js), drawn on both sides of their wall.
+  setModel(model, { doors = [] } = {}) {
     this.clear();
     this.model = model;
+    this.doors = doors;
     this.surfaces = Object.values(model.surfaces);
     this.windows = Object.values(model.windows);
     this.zoneIndex = Object.fromEntries(Object.keys(model.zones).map((z, i) => [z, i]));
@@ -168,10 +171,14 @@ export class View3D {
     this.shading.userData = { kind: 'shading', items: model.shading };
     this.shading.renderOrder = 1;
 
-    this.edges = new THREE.LineSegments(edgeGeometry([...this.surfaces, ...this.windows], this.origin),
+    const doorMat = new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Door, side: THREE.DoubleSide, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+    this.doorMesh = new THREE.Mesh(polygonGeometry(doors, this.origin, null), doorMat);
+    this.doorMesh.userData = { kind: 'door', items: doors };
+
+    this.edges = new THREE.LineSegments(edgeGeometry([...this.surfaces, ...this.windows, ...doors], this.origin),
       new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
 
-    this.group.add(this.front, this.back, this.glass, this.shading, this.edges, this.problemLayer());
+    this.group.add(this.front, this.back, this.glass, this.doorMesh, this.shading, this.edges, this.problemLayer());
     this.setCut(null);
     this.frame();
   }
@@ -226,6 +233,8 @@ export class View3D {
     const m = this.model;
     if (m.surfaces[name]) return { kind: 'surface', item: m.surfaces[name], polys: [m.surfaces[name]] };
     if (m.windows[name]) return { kind: 'window', item: m.windows[name], polys: [m.windows[name]] };
+    const door = this.doors.find((d) => d.name === name);
+    if (door) return { kind: 'door', item: door, polys: [door] };
     if (m.zones[name]) return { kind: 'zone', item: m.zones[name], polys: m.zones[name].surfaces.map((n) => m.surfaces[n]) };
     return null;
   }
@@ -257,7 +266,7 @@ export class View3D {
     const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, this.camera);
-    const targets = [this.front, this.back, this.glass, ...(this.shading.visible ? [this.shading] : [])];
+    const targets = [this.front, this.back, this.glass, this.doorMesh, ...(this.shading.visible ? [this.shading] : [])];
     // Shading is drawn see-through, so the building behind it wins; shading is picked only on its own.
     const hits = ray.intersectObjects(targets, false).filter((h) => this.cutPlane.distanceToPoint(h.point) >= 0);
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];

@@ -5,6 +5,8 @@ import { area, azimuth, enclosedVolume, tilt, triangulate } from '../src/model/g
 import { classifySurface, importEpJSON } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
 import { hourlyValues } from '../src/model/schedules.js';
+import { coefficient, footprintAxis, toAirflowNetwork } from '../src/model/airflow-network.js';
+import { doorOnWall, isCirculation } from '../src/model/interior-doors.js';
 
 const near = (a, b, tol = 1e-9) => assert.ok(Math.abs(a - b) <= tol, `${a} is not within ${tol} of ${b}`);
 const v = (x, y, z) => ({ vertex_x_coordinate: x, vertex_y_coordinate: y, vertex_z_coordinate: z });
@@ -157,4 +159,41 @@ test('triangulation covers concave and collinear outlines and keeps their facing
   assert.ok(Math.abs(triArea - area(L)) < 1e-9, `triangles cover ${triArea} m2 of ${area(L)} m2`);
   for (const t of tris) assert.equal(Math.round(azimuth(t.map((i) => L[i]))), 180);
   assert.deepEqual(triangulate([[0, 0, 0], [1, 0, 0], [0, 1, 0]]), [[0, 1, 2]]);
+});
+
+test('airflow network variant: one opening per window, cracks sized by area, simple airflow removed', () => {
+  const m = importEpJSON(boxModel());
+  const ep = toAirflowNetwork(m);
+  assert.equal(ep['ZoneVentilation:WindandStackOpenArea'], undefined);
+  assert.equal(ep['ZoneInfiltration:DesignFlowRate'], undefined);
+  assert.equal(m.epjson['ZoneVentilation:WindandStackOpenArea'] !== undefined, true, 'the imported model is left unchanged');
+  const zone = ep['AirflowNetwork:MultiZone:Zone']['AFN Zone Room'];
+  assert.equal(zone.ventilation_control_mode, 'Temperature');
+  assert.equal(zone.venting_availability_schedule_name, 'Always');
+  const surfaces = ep['AirflowNetwork:MultiZone:Surface'];
+  // Five exterior surfaces (the ground floor has no crack) and the window.
+  assert.equal(Object.keys(surfaces).length, 6);
+  const win = surfaces['AFN Surface Room:south:w0'];
+  near(win.window_door_opening_factor_or_crack_factor, 0.5); // 1.5 m2 opening / 3 m2 window
+  assert.equal(ep['AirflowNetwork:MultiZone:Component:SimpleOpening'][win.leakage_component_name].discharge_coefficient, 0.6);
+  // 1 m3/h per m2 at 50 Pa: the 15 m2 south wall leaks 15 m3/h at 50 Pa.
+  const crack = ep['AirflowNetwork:MultiZone:Surface:Crack']['AFN Crack Room:south'];
+  near(crack.air_mass_flow_coefficient_at_reference_conditions * 50 ** 0.65 * 3600 / 1.2041, 15, 1e-9);
+  near(coefficient(15, 0.65), crack.air_mass_flow_coefficient_at_reference_conditions);
+  // The 5 x 4 m footprint runs east-west, so its long axis is at 90 degrees from north.
+  const axis = footprintAxis(m);
+  near(axis.azimuth, 90);
+  near(axis.ratio, 0.8);
+});
+
+test('interior door: centred at the foot of a wall, facing the same way, or none if it does not fit', () => {
+  const door = doorOnWall(BOX.south); // 5 m wide, 3 m tall, facing south
+  near(area(door), 0.9 * 2.1);
+  near(azimuth(door), 180);
+  near(Math.min(...door.map((p) => p[2])), 0.02);
+  near((Math.min(...door.map((p) => p[0])) + Math.max(...door.map((p) => p[0]))) / 2, 2.5);
+  assert.ok(door.every((p) => Math.abs(p[1]) < 1e-12), 'in the plane of the wall');
+  assert.equal(doorOnWall([[0, 0, 2], [0, 0, 0], [0.8, 0, 0], [0.8, 0, 2]]), null); // too narrow and too low
+  assert.equal(doorOnWall(BOX.floor), null);
+  assert.ok(isCirculation('GF_Circ_1_4') && isCirculation('3F_Stair_2') && !isCirculation('Elevator_Stair_Core') && !isCirculation('Office'));
 });

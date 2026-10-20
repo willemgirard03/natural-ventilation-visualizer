@@ -1,6 +1,7 @@
 import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
 import { View3D, TYPE_COLORS, PROBLEM, zoneColor } from './view3d.js';
+import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -67,6 +68,9 @@ function showInfo(found) {
     rows.push(`<b>${esc(item.name)}</b>`, `Window of zone ${esc(item.zone)}, on ${esc(item.parent)}`,
       `${fmt(item.area, 2)} m² · faces ${deg(item.azimuth)} from north · ${fmt(item.height, 2)} m tall`,
       item.operableFraction ? `Operable fraction ${fmt(item.operableFraction.value, 2)}` : 'Not operable');
+  } else if (kind === 'door') {
+    rows.push(`<b>Door between ${esc(item.zone)} and ${esc(item.partnerZone)}</b>`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m, open`,
+      '<span class="muted">Added by the tool for the airflow network; the model has no interior openings here.</span>');
   } else if (kind === 'zone') {
     rows.push(`<b>Zone ${esc(item.name)}</b>`, `${fmt(item.floorArea.value, 1)} m² floor · ${fmt(item.volume.value, 0)} m³ · ${fmt(item.height, 2)} m high`);
   } else {
@@ -90,6 +94,7 @@ function legend() {
     for (const [t, c] of Object.entries(TYPE_COLORS)) if (types.has(t)) items.push(chip(c, t));
   }
   if (Object.keys(model.windows).length) items.push(chip(TYPE_COLORS.Glazing, 'Glazing'));
+  if (view.doors.length) items.push(chip(TYPE_COLORS.Door, `Door, added (${view.doors.length})`, `The tool adds an open ${DOOR.width} × ${DOOR.height} m door between each room and the circulation zones it shares a wall with, and between adjoining circulation zones, so air can move through the building. Circulation is recognised by zone name (circulation, corridor, hall, lobby, stair, vestibule, foyer, atrium).`));
   if (model.shading.length) items.push(chip(TYPE_COLORS.Shading, 'Shading'));
   if (view.problems.length) items.push(chip(PROBLEM, 'Named by a model check', 'The arrow shows the way EnergyPlus takes as outward, from the order of the corner points.'));
   $('legend').innerHTML = items.join('');
@@ -174,7 +179,7 @@ function render(m) {
 
   $('results').hidden = false;
   view.resize();
-  view.setModel(m);
+  view.setModel(m, { doors: interiorDoors(m) });
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);
   view.select(null);
