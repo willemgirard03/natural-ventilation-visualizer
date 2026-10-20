@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model import</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #E7EBE9;
+  --panel: #F3F5F4;
+  --ink: #1D2124;
+  --ink-soft: #586065;
+  --rule: #C4CBC8;
+  --accent: #2356A3;
+  --accent-ink: #FFFFFF;
+  --error: #B3261E;
+  --warning: #8A5A00;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #1B1E21;
+    --panel: #23272B;
+    --ink: #E3E7E5;
+    --ink-soft: #9AA3A8;
+    --rule: #3A4146;
+    --accent: #86AEEB;
+    --accent-ink: #0F1C30;
+    --error: #F2B8B5;
+    --warning: #E8C26B;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #1B1E21;
+  --panel: #23272B;
+  --ink: #E3E7E5;
+  --ink-soft: #9AA3A8;
+  --rule: #3A4146;
+  --accent: #86AEEB;
+  --accent-ink: #0F1C30;
+  --error: #F2B8B5;
+  --warning: #E8C26B;
+  color-scheme: dark;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+h2 { font-size: 16px; font-weight: 600; margin: 28px 0 8px; }
+p.lede { color: var(--ink-soft); margin: 0 0 16px; max-width: 70ch; }
+.drop {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  padding: 20px; border: 1.5px dashed var(--rule); border-radius: 8px; background: var(--panel);
+}
+.drop.over { border-color: var(--accent); }
+.drop span { color: var(--ink-soft); }
+button, label.button {
+  font: inherit; font-weight: 500; cursor: pointer;
+  padding: 7px 14px; border-radius: 6px; border: 1px solid var(--accent);
+  background: var(--accent); color: var(--accent-ink);
+}
+button:disabled { opacity: 0.4; cursor: default; }
+input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.summary { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 16px 0 0; color: var(--ink-soft); }
+.summary b { color: var(--ink); font-weight: 600; }
+.checks { list-style: none; padding: 0; margin: 0; }
+.checks li { padding: 6px 0; border-bottom: 1px solid var(--rule); }
+.checks .level { display: inline-block; min-width: 68px; font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; }
+.checks .error .level { color: var(--error); }
+.checks .warning .level { color: var(--warning); }
+.checks .info .level { color: var(--ink-soft); }
+.scroll { overflow-x: auto; background: var(--panel); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--rule); }
+th { font-weight: 600; color: var(--ink-soft); font-size: 12px; vertical-align: bottom; }
+th:first-child, td:first-child, #surfaces th:last-child, #surfaces td:last-child { text-align: left; }
+#surfaces td:last-child { white-space: normal; }
+tr:last-child td { border-bottom: none; }
+td[title] { text-decoration: underline dotted var(--ink-soft); text-underline-offset: 3px; cursor: help; }
+.muted { color: var(--ink-soft); }
+.error-text { color: var(--error); }
+footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Model import</h1>
+  <p class="lede">Reads an EnergyPlus <code>.epJSON</code> file, such as the one in every ClimateStudio results folder, into the tool's project model. The file stays on this computer. Underlined values come from the file; hover to see the EnergyPlus object and field.</p>
+
+  <div class="drop" id="drop">
+    <label class="button" for="file">Choose .epJSON</label>
+    <input type="file" id="file" accept=".epJSON,.epjson,.json">
+    <span id="status">or drop a file here</span>
+    <button id="export" disabled>Export .epJSON</button>
+  </div>
+  <div class="summary" id="summary"></div>
+
+  <div id="results" hidden>
+    <h2>Model checks</h2>
+    <ul class="checks" id="checks"></ul>
+
+    <h2>Zones</h2>
+    <div class="scroll"><table id="zones"></table></div>
+
+    <h2>Surfaces by type</h2>
+    <div class="scroll"><table id="surfaces"></table></div>
+
+    <h2>Constructions</h2>
+    <div class="scroll"><table id="constructions"></table></div>
+  </div>
+  <footer>Natural Ventilation Visualizer · importer, model version <span id="version"></span></footer>
+</main>
+<script type="module" src="import.js"></script>
+</body>
+</html>

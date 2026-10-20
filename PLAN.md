@@ -94,11 +94,11 @@ The results folder for a version of the shared model (`Willem_Girard_CS_V3`) con
 | Setting | Value |
 | --- | --- |
 | EnergyPlus version | 23.1 |
-| Timesteps | 3 per hour (the research report said 4) |
+| Timesteps | 6 per hour in the `.epJSON` that produced the results (confirmed by EnergyPlus's `.eio`); the later `.idf` has 3, the research report said 4. Corrected 20 Oct. |
 | Run period | Full year, hourly outputs |
 | Wind | Terrain "Suburbs": profile exponent 0.22, boundary layer 370 m, sensor at 10 m |
 | HVAC | Ideal loads with heating and cooling off; mechanical outdoor air capped at zero; so free-running |
-| Infiltration | 0.025 air changes per hour, constant |
+| Infiltration | Constant, 0.000168 m³/s per m² of exterior surface (0.03–0.38 air changes per hour depending on the zone) in the `.epJSON`; the later `.idf` and Example\_02 use 0.025 air changes per hour. Corrected 20 Oct. |
 | Zones | 46, of which 31 have natural ventilation |
 | Windows | 92, all exterior; no interior windows in this run |
 | Airflow between zones | None: no airflow network and no zone mixing objects |
@@ -106,7 +106,7 @@ The results folder for a version of the shared model (`Willem_Girard_CS_V3`) con
 **How simple airflow is written.** For each ventilated zone, ClimateStudio writes:
 
 - **One stack object** (name ends `_Buoy`) with the zone's total opening area, the wind term switched off (opening effectiveness 0), discharge coefficient 0.6, and height difference equal to a quarter of the window height (0.8 m for 3.2 m windows).
-- **One wind object per facade direction** (`_Wind0`, `_Wind1`, …) with that direction's opening area, effective angle set to the facade's compass direction, effectiveness calculated by EnergyPlus, and the stack term switched off (discharge coefficient 0).
+- **One wind object per facade direction** (`_Wind0`, `_Wind1`, …) with that direction's opening area, effective angle set to the facade's compass direction, effectiveness calculated by EnergyPlus, and the stack term switched off (discharge coefficient 0). Example\_02 instead writes **one wind object per window** (30 for the 30 windows of `2F_Office_8`), each with that window's opening area and compass direction; the importer handles both by working from zone totals.
 - **Opening area = glazing area × operable fraction** (0.8 in this model), split by facade direction. The wind areas sum exactly to the stack area.
 - **Controls on every object:** minimum indoor temperature 25 °C, indoor at least 1 K warmer than outdoor, outdoor between 10 and 26 °C, maximum wind 40 m/s.
 - **An hourly on/off availability schedule** per zone, open 47% of the year here. It appears to pre-apply the outdoor temperature and humidity limits hour by hour.
@@ -212,7 +212,7 @@ The tool's manual setup should mirror these inputs so a student who has built co
 
 - **Window placement:** windows must be planar, 3–4 corners, fully inside one parent surface and not touching its edges (an EnergyPlus constraint). Model checks should flag edge contact, and a window crossing a split line between two zones' surfaces must be split or flagged.
 - **Infiltration:** constant design flow per zone (coefficients 1, 0, 0, 0), with the rate taken from each zone's template ([Thermal Zone Settings](https://climatestudiodocs.com/docs/thermalZoneSettings.html)).
-- **Simulation defaults:** 3 timesteps per hour in the run we have (the report said 4), hourly results, full year.
+- **Simulation defaults:** 6 timesteps per hour in both runs we have (the report said 4), hourly results, full year.
 - **Wind:** weather-file wind is corrected for terrain and sensor height; the tool should apply the same correction so wind speeds line up.
 - **Results:** saved as binary `.CSR` files beside the Rhino file; tables can be exported to CSV from the interface, which is the practical route for comparisons.
 
@@ -267,7 +267,7 @@ EnergyPlus is the reference engine: the tool's data follows EnergyPlus's own inp
 - **Example\_02's sensitivity is a property of the model.** Small changes in window timing produce hour-to-hour differences of several degrees in its naturally ventilated offices. The tool should show this on/off sensitivity rather than hide it.
 - **EnergyPlus cannot run from the project drive.** The drive is formatted exFAT, and EnergyPlus 23.1 crashes at startup (Windows error 0xC0000409 in `ucrtbase.dll`) when started from it; the same files run normally from C:, with or without spaces in the path. See Workflow and constraints for how each computer gets its copy.
 
-Step 2, still to do: the same comparison for an input file written by the tool itself rather than by ClimateStudio.
+Step 2: the same comparison for an input file written by the tool itself rather than by ClimateStudio. **First part passed (20 Oct):** Example\_02 imported into the project model and exported by `tools/export_epjson.mjs` gives EnergyPlus results bit-identical to the original file's (`run_alignment.py example02 --input runs/roundtrip/example02.epJSON`). This proves the import–export path loses nothing. Still to do: the same test once export writes objects from the model's own values (overrides, the airflow-network variant), where any difference would come from the tool.
 
 **Case study choice.** Example\_02 is the lighter validation case: 12 zones, the same ClimateStudio conventions, and it requested CO2 output, so its results include hourly CO2 for every zone to check the tool's CO2 calculation against.
 
@@ -318,6 +318,15 @@ Sash type and hinge side are the new fields: ClimateStudio has no equivalent, so
 | Local | Plain value, tool icon | Set in the tool with no ClimateStudio source (manual setup, sash type) |
 
 Overrides are stored by object ID, so they follow the object through re-imports and geometry edits.
+
+**Importer (built 20 Oct).** `src/model/import-epjson.js` reads any `.epJSON` into the project model; `app/import.html` shows it. Plain JavaScript modules with no build step, so it runs in any browser.
+
+- **Lossless.** Every EnergyPlus object is kept exactly as read; the model's views (zones, classified surfaces, windows, constructions, ventilation, gains, schedules) sit on top. Export currently writes the objects back unchanged; overrides will be applied to that copy.
+- **Sources.** Every setting read from the file is an inherited value that names its EnergyPlus object and field; values the tool computes or sets itself (computed volume, sash type) are local. Operable fraction is derived as opening area ÷ glazing area and says so.
+- **Surface types** come from EnergyPlus's surface type and outside boundary condition, mapped to ClimateStudio's seven types plus adiabatic variants. This is not yet CS Intersector's geometric splitting, which a model built without ClimateStudio will need.
+- **Model checks** so far: zones that do not close (naming the reversed surface), floors facing up and roofs facing down, interzone pairs that do not face opposite ways, missing partners, constructions, materials and schedules, default constructions, windows off their wall's plane, volume mismatches, natural ventilation without windows.
+- **Tested** (`npm test`, 14 tests) against EnergyPlus's own reading of both examples (its `.eio` report): every zone's extents, volume, floor area, window area, infiltration flow, people, lighting and equipment density agree. Example\_02 imports with no problems. Example\_01 has two geometry defects, which EnergyPlus also warns about: floor `3F_Workspace_2_25:f8` faces up, and wall `GF_Circ_5:f9` faces into its zone and is 1.79 m longer than the zone. Constructions match the table above exactly.
+- **Not read yet:** zone lists and spaces, `Schedule:Compact` and `Schedule:File`, window U-values for layered glazing (only the simple glazing system's), airflow network objects.
 
 ## Thermal gains
 
@@ -432,7 +441,7 @@ The results folders replaced the licensed desktop session: ClimateStudio's Energ
 
 | Dates | Work | Ends with |
 | --- | --- | --- |
-| 17–26 Oct | Repository setup; Example\_02 `.epJSON` importer; EnergyPlus runner and the alignment test on your own computer (GPU, so exact shading; done 20 Oct); 3D view of the imported zones | — |
+| 17–26 Oct | Repository setup; Example\_02 `.epJSON` importer (done 20 Oct); EnergyPlus runner and the alignment test on your own computer (GPU, so exact shading; done 20 Oct); 3D view of the imported zones | — |
 | 27 Oct – 11 Nov | Network solver for the whole building, following EnergyPlus's airflow network method; the tool writes an airflow-network `.epJSON` and runs EnergyPlus to check it; window interpretation (casement default, awning stress test); first whole-building particle view from network flows | User review 1 (12 Nov): Example\_02 imported, EnergyPlus alignment shown, airflow paths through the building |
 | 12–26 Nov | 3D grid solver for the big moves (double-height office, stairwell) with particles; plan and section slices; heat gains from people, lights and equipment; CO2 checked against Example\_02 | User review 2 (27 Nov) |
 | 27 Nov – 2 Dec | Comfort readouts in rooms; model checks; atrium variant of Example\_02 checked against EnergyPlus; fixes from reviews | User review 3 (3 Dec) |

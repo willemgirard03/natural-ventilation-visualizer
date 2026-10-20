@@ -52,6 +52,12 @@ __pycache__/
 .venv/
 venv/
 
+# Node.js
+node_modules/
+
+# Personal Claude Code settings (launch.json is shared)
+.claude/settings.local.json
+
 # Editors and operating systems
 .vscode/
 .idea/

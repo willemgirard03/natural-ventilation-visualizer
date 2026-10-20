@@ -6,6 +6,8 @@ with the weather file ClimateStudio used, then compares every hourly output with
 
     python tools/run_alignment.py example02
     python tools/run_alignment.py example02 --repeat     # also check two local runs are identical
+    python tools/run_alignment.py example02 --input runs/roundtrip/example02.epJSON
+                                                         # a file written by the tool (tools/export_epjson.mjs)
 
 EnergyPlus must run from an internal drive: it crashes at startup when started from the exFAT
 project drive. If the EnergyPlus folder is missing, the files needed for a run are copied from
@@ -125,17 +127,22 @@ def main():
                    help="EnergyPlus folder to copy from if --energyplus is missing (default %(default)s)")
     p.add_argument("--repeat", action="store_true", help="run twice and check the runs are identical")
     p.add_argument("--keep-shading", action="store_true", help="keep the ~1 GB shading CSV")
+    p.add_argument("--input", type=Path,
+                   help="run this .epJSON instead of ClimateStudio's (e.g. one written by the tool); "
+                        "it is also checked against the original's run1, if present")
     args = p.parse_args()
 
-    epjson = CASES[args.case]
-    ref_eso = epjson.with_name(epjson.stem + "out.eso")
+    original = CASES[args.case]
+    epjson = args.input.resolve() if args.input else original
+    ref_eso = original.with_name(original.stem + "out.eso")
     for f in (epjson, ref_eso, WEATHER):
         if not f.exists():
             sys.exit("Missing input: %s" % f)
 
     exe = ensure_energyplus(args.energyplus, args.source)
     out = REPO / "runs" / args.case
-    new_eso = run_energyplus(exe, epjson, out / "run1", args.keep_shading)
+    run_dir = out / ("input-" + epjson.stem if args.input else "run1")
+    new_eso = run_energyplus(exe, epjson, run_dir, args.keep_shading)
 
     lines = []
     def log(s):
@@ -147,8 +154,17 @@ def main():
         eso2 = run_energyplus(exe, epjson, out / "run2", args.keep_shading)
         same = identical(new_eso, eso2)
         log("Repeat run identical to first: %s" % ("yes" if same else "NO"))
-    (out / "report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print("Report saved to %s" % (out / "report.txt"))
+    if args.input:
+        original_eso = out / "run1" / (original.stem + ".eso")
+        if original_eso.exists():
+            same = identical(original_eso, new_eso)
+            log("Identical to the run of the original file (%s): %s" % (original_eso, "yes" if same else "NO"))
+            passed = passed and same
+        else:
+            log("No run of the original file to compare with; run without --input first.")
+    report_file = run_dir / "report.txt" if args.input else out / "report.txt"
+    report_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("Report saved to %s" % report_file)
     sys.exit(0 if passed else 1)
 
 
