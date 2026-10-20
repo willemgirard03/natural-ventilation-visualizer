@@ -34,3 +34,8 @@ Open Claude Code in `E:\ARCH 540\natural-ventilation-visualizer` and paste:
 ## Keeping context between sessions
 
 Claude Code does not remember earlier sessions. Keep `PLAN.md` current: when a decision is made or a task finished, ask Claude Code to update it and commit. A new session on either computer then starts by reading it.
+
+When moving the drive between computers, use the two files in `E:\ARCH 540\A2` (kept outside the repository):
+
+- Before leaving: *Read E:\ARCH 540\A2\SWITCH_MACHINE.md and follow it.* It commits and pushes, stops running programs and records the handoff state.
+- On arrival: *Read E:\ARCH 540\A2\SESSION_CHECK.md and follow it.* It checks Git, GitHub, Node.js, Python and EnergyPlus on that computer, fixes what is missing with your approval, and picks up the next task.
