@@ -143,6 +143,7 @@ footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
       <label title="Hide everything above this height to see inside the building">Cut at
         <input type="range" id="cut" min="0" max="1" step="0.1"> <output id="cut-value">none</output></label>
       <label title="Surrounding buildings and other shading surfaces"><input type="checkbox" id="show-shading" checked> Shading</label>
+      <label title="Wind rose on the ground for the month picked in the weather file, with this hour's wind as an arrow"><input type="checkbox" id="show-rose" checked> Wind rose</label>
       <button id="fit" class="quiet" title="Fit the whole building in view">Fit</button>
       <span title="Left click: select a surface or window · Right drag: orbit · Middle drag: pan · Wheel: zoom">Mouse controls</span>
     </div>
@@ -154,12 +155,18 @@ footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
       <output id="when"></output>
     </div>
     <div class="view-tools">
+      <label title="Zone temperatures and ventilation, hour by hour, from an EnergyPlus results file (.eso), such as the one in a ClimateStudio results folder">Results <select id="results-file"><option value="">none</option></select></label>
+      <label class="quiet-button" title="Load a results file (.eso) from this computer">Load .eso<input type="file" id="results-load" accept=".eso"></label>
+      <output id="results-status"></output>
+    </div>
+    <div class="view-tools">
       <label title="Particles follow the airflow network: where outdoor air enters, which rooms it passes through and where it leaves. They do not show the pattern of air inside each room."><input type="checkbox" id="show-air" checked> Airflow</label>
       <label title="Outdoor air temperature">Outdoor <input type="number" id="t-out" value="18" step="1"> °C</label>
-      <label title="Indoor air temperature, the same in every zone for now">Indoor <input type="number" id="t-in" value="26" step="1"> °C</label>
+      <label id="t-in-label" title="Indoor air temperature, the same in every zone. With a results file, each zone takes its own.">Indoor <input type="number" id="t-in" value="26" step="1"> °C</label>
       <label title="Wind speed at the weather station">Wind <input type="number" id="wind" value="3" min="0" step="0.5"> m/s</label>
       <label title="Direction the wind comes from, in degrees clockwise from north (270 = west)">from <input type="number" id="wind-dir" value="270" min="0" max="359" step="15">°</label>
-      <label title="Open every operable window as far as its operable fraction allows"><input type="checkbox" id="windows-open" checked> Windows open</label>
+      <label title="Operable windows: all open as far as their operable fraction allows, all closed, or open in the zones whose natural ventilation ran in that hour of the results">Windows <select id="windows"><option value="open">All open</option><option value="closed">All closed</option><option value="results" disabled>As in results</option></select></label>
+      <label title="How many particles to show for the same flow">Particles <input type="range" id="air-density" min="-2" max="2" step="0.5" value="0"> <output id="air-density-value">×1</output></label>
       <label title="How much faster than real time the particles move">Speed <input type="range" id="air-speed" min="1" max="30" value="5"> <output id="air-speed-value">×5</output></label>
       <output id="air-total"></output>
     </div>

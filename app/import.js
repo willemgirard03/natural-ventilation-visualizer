@@ -6,7 +6,9 @@ import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor } from './particles.js';
-import { dateOf, outdoorAt, parseEPW } from '../src/model/weather.js';
+import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
+import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
+import { readZoneResultsStream, zoneAt } from '../src/model/results.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -29,6 +31,7 @@ const view = new View3D($('viewer'), { onSelect: showInfo });
 const air = new AirflowParticles(view);
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
 let weather = null, weatherHour = null; // the weather file and the hour picked from it
+let results = null; // zone conditions hour by hour from a results file, for the loaded model
 
 // Solves the network for the conditions in the Airflow controls and hands the flows to the particles.
 function solveAir() {
@@ -36,15 +39,19 @@ function solveAir() {
   // The site comes from the weather file when there is one, else from the model, else sea level.
   const loc = weather?.location || Object.values(model.epjson['Site:Location'] || {})[0] || {};
   const site = { elevation: loc.elevation ?? 0, latitude: loc.latitude ?? 45 };
-  const open = $('windows-open').checked, tIn = Number($('t-in').value);
+  const tIn = Number($('t-in').value), mode = $('windows').value;
+  const hourAt = hourIndex(Number($('day').value), Number($('hour').value));
+  const pressure = weatherHour?.pressure ?? standardPressure(site.elevation);
+  const inside = (z) => (results && zoneAt(results, z, hourAt, pressure)) || { t: tIn, w: 0.008, vent: null };
   const conditions = {
     site,
     outdoor: {
       t: Number($('t-out').value), w: weatherHour?.w ?? 0.008, pressure: weatherHour?.pressure ?? standardPressure(site.elevation),
       windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
     },
-    zones: Object.fromEntries(net.zones.map((z) => [z, { t: tIn, w: 0.008 }])),
-    open: Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, open ? l.openFactor : 0])),
+    zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
+    open: Object.fromEntries(net.links.filter((l) => l.control === 'zone')
+      .map((l) => [l.name, mode === 'open' || (mode === 'results' && inside(l.from).vent) ? l.openFactor : 0])),
   };
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
@@ -55,7 +62,29 @@ function solveAir() {
   $('air-total').textContent = `Outdoor air ${fmt(m3h, 0)} m³/h · ${fmt(m3h / volume, m3h / volume < 1 ? 2 : 1)} air changes/h`;
   $('air-total').title = 'Outdoor air entering the building through windows, doors and leaks, from the airflow network. Air changes per hour: that flow divided by the volume of all zones.';
 }
-for (const id of ['t-out', 't-in', 'wind', 'wind-dir', 'windows-open']) $(id).addEventListener('input', () => { solveAir(); if (model) showInfo(view.find(selected)); });
+for (const id of ['t-out', 't-in', 'wind', 'wind-dir', 'windows']) $(id).addEventListener('input', () => { solveAir(); drawRose(); if (model) showInfo(view.find(selected)); });
+$('air-density').addEventListener('input', (e) => {
+  const k = 2 ** Number(e.target.value);
+  $('air-density-value').textContent = `×${k < 1 ? k.toFixed(2).replace(/0$/, '') : k}`;
+  air.densityScale = k;
+  air.clear();
+  solveAir(); // refills the view at the new density
+});
+
+// The wind rose for the month of the day picked, and this hour's wind as an arrow.
+function drawRose() {
+  if (!model) return;
+  if (!weather || !$('show-rose').checked) { view.setGroundOverlay(null); legend(); return; }
+  const month = dateOf(Number($('day').value)).month;
+  const data = windRoseData(weather.hours.filter((h) => h.month === month));
+  const ink = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#1D2124';
+  view.setGroundOverlay(windRoseGroup(data, {
+    radius: view.footprintRadius() * 1.05, northAxis: model.site.northAxis, ink,
+    wind: { direction: Number($('wind-dir').value), speed: Number($('wind').value) },
+  }));
+  legend();
+}
+$('show-rose').addEventListener('change', drawRose);
 $('show-air').addEventListener('change', (e) => {
   air.setVisible(e.target.checked);
   if (e.target.checked) { solveAir(); air.play(); } else { air.stop(); air.clear(); }
@@ -68,20 +97,27 @@ let selected = null;
 function setWeather(w) {
   weather = w;
   weatherHour = null;
-  for (const id of ['day', 'hour']) $(id).disabled = !w;
   applyHour();
 }
 function applyHour() {
-  if (!weather) { $('when').textContent = ''; solveAir(); return; }
+  for (const id of ['day', 'hour']) $(id).disabled = !weather && !results;
   const day = Number($('day').value), hour = Number($('hour').value);
+  const hh = (h) => `${String(h).padStart(2, '0')}:00`;
+  if (!weather) {
+    $('when').textContent = results ? `${dateOf(day).label}, ${hh(hour - 1)}–${hh(hour)}` : '';
+    $('when').title = '';
+    solveAir();
+    if (model) showInfo(view.find(selected));
+    return;
+  }
   weatherHour = outdoorAt(weather, day, hour);
   $('t-out').value = weatherHour.t;
   $('wind').value = weatherHour.windSpeed;
   $('wind-dir').value = weatherHour.windDirection;
-  const hh = (h) => `${String(h).padStart(2, '0')}:00`;
   $('when').textContent = `${dateOf(day).label}, ${hh(hour - 1)}–${hh(hour)}`;
   $('when').title = `${weather.location.name}, ${weather.fileName || 'weather file'}: ${weatherHour.t} °C, wind ${weatherHour.windSpeed} m/s from ${weatherHour.windDirection}°, ${(weatherHour.w * 1000).toFixed(1)} g/kg humidity`;
   solveAir();
+  drawRose();
   if (model) showInfo(view.find(selected));
 }
 async function loadWeather(name, read) {
@@ -90,6 +126,62 @@ async function loadWeather(name, read) {
     $('when').innerHTML = `<span class="error-text">Could not read ${esc(name)}: ${esc(err.message)}</span>`;
   }
 }
+// Results: each zone's temperature, humidity and ventilation for the hour picked.
+function setResults(r, name = '') {
+  results = r;
+  const option = $('windows').querySelector('option[value=results]');
+  option.disabled = !r;
+  if (r) $('windows').value = 'results';
+  else if ($('windows').value === 'results') $('windows').value = 'open';
+  $('t-in').disabled = !!r;
+  $('t-in-label').style.opacity = r ? 0.5 : 1;
+  const missing = r?.missing.length ? ` (no temperatures for ${r.missing.length} zones: ${r.missing.slice(0, 3).join(', ')}${r.missing.length > 3 ? '…' : ''})` : '';
+  $('results-status').textContent = r ? `Zone temperatures from ${name}${missing}` : '';
+  applyHour();
+}
+async function loadResults(name, stream, size) {
+  if (!model) { $('results-status').textContent = 'Load a model first.'; return; }
+  const forModel = model;
+  $('results-status').textContent = `Reading ${name}…`;
+  try {
+    const r = await readZoneResultsStream(stream, forModel, (bytes) => {
+      $('results-status').textContent = `Reading ${name}… ${size ? Math.round((100 * bytes) / size) + '%' : (bytes / 1e6).toFixed(0) + ' MB'}`;
+    });
+    if (model !== forModel) return; // another model was loaded meanwhile
+    if (!Object.keys(r.zones).length) throw new Error('it has no zone temperatures for this model');
+    setResults(r, name);
+  } catch (err) {
+    setResults(null);
+    $('results-status').innerHTML = `<span class="error-text">Could not use ${esc(name)}: ${esc(err.message)}</span>`;
+  }
+}
+let resultFiles = [];
+fetch('/results/').then((r) => (r.ok ? r.json() : [])).then((list) => {
+  resultFiles = list;
+  for (const f of list) $('results-file').add(new Option(`${f.label}: ${f.file}`, f.url));
+}).catch(() => {});
+// After an example loads, its own ClimateStudio results are read too.
+function offerResults(id) {
+  const f = resultFiles.find((x) => x.id === id);
+  if (!f) return;
+  $('results-file').value = f.url;
+  $('results-file').dispatchEvent(new Event('change'));
+}
+$('results-file').addEventListener('change', async (e) => {
+  const opt = e.target.selectedOptions[0];
+  if (!e.target.value) return setResults(null);
+  if (opt.file) return loadResults(opt.file.name, opt.file.stream(), opt.file.size);
+  const res = await fetch(e.target.value);
+  loadResults(opt.textContent, res.body, Number(res.headers.get('content-length')) || 0);
+});
+$('results-load').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const option = new Option(file.name, `local:${file.name}`, true, true);
+  option.file = file;
+  $('results-file').add(option);
+  loadResults(file.name, file.stream(), file.size);
+});
 for (const id of ['day', 'hour']) $(id).addEventListener('input', applyHour);
 $('weather-file').addEventListener('change', (e) => {
   const name = e.target.value;
@@ -138,7 +230,7 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
   $('examples').innerHTML = list.map((e, i) => `<button class="quiet" data-i="${i}" title="${esc(e.file)}">${esc(e.label)}</button>`).join(' ');
   $('examples').addEventListener('click', (ev) => {
     const e = list[ev.target.dataset?.i];
-    if (e) loadText(e.file, () => fetch(e.url).then((r) => r.text()));
+    if (e) loadText(e.file, () => fetch(e.url).then((r) => r.text())).then(() => offerResults(e.id));
   });
 }).catch(() => {});
 
@@ -181,7 +273,8 @@ function airLines(kind, item) {
   const m3h = (kg) => fmt((kg / 1.2) * 3600, 0);
   if (kind === 'zone') {
     const q = (airflow.flows.throughflow[net.zones.indexOf(item.name)] / 1.2) * 3600;
-    return [`Air through the zone: ${fmt(q, 0)} m³/h, ${fmt(q / item.volume.value, 1)} air changes/h`];
+    const c = airflow.conditions.zones[item.name];
+    return [`Air at ${fmt(c.t, 1)} °C${results ? ' (from results)' : ''}; ${fmt(q, 0)} m³/h through the zone, ${fmt(q / item.volume.value, 1)} air changes/h`];
   }
   const i = net.links.findIndex((l) => l.name === item.name);
   if (i < 0) return [];
@@ -202,6 +295,12 @@ function legend() {
   if (Object.keys(model.windows).length) items.push(chip(TYPE_COLORS.Glazing, 'Glazing'));
   if (view.doors.length) items.push(chip(TYPE_COLORS.Door, `Door, added (${view.doors.length})`, `The tool adds an open ${DOOR.width} × ${DOOR.height} m door between each room and the circulation zones it shares a wall with, and between adjoining circulation zones, so air can move through the building. Circulation is recognised by zone name (circulation, corridor, hall, lobby, stair, vestibule, foyer, atrium).`));
   if (model.shading.length) items.push(chip(TYPE_COLORS.Shading, 'Shading'));
+  if (view.overlay) {
+    const month = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][dateOf(Number($('day').value)).month - 1];
+    items.push(`<span title="Petal length: how often the wind blows from that direction in ${month} (rings every 5% of hours). Shading: wind speed at the weather station.">Wind rose, ${month}:</span>`);
+    SPEED_BANDS.forEach((b, i) => items.push(chip(BAND_COLORS[i], b === Infinity ? `over ${SPEED_BANDS[i - 1]} m/s` : `${i ? SPEED_BANDS[i - 1] : 0}–${b} m/s`)));
+    items.push(chip('#E0401F', 'This hour', 'The arrow points the way the wind blows; its length grows with speed.'));
+  }
   if ($('show-air').checked) items.push(`<span title="Particle colour: the temperature of the air they carry"><i style="background:linear-gradient(90deg,#${temperatureColor(14).getHexString()},#${temperatureColor(22).getHexString()},#${temperatureColor(30).getHexString()});width:36px"></i>Air 14–30 °C</span>`);
   if (view.problems.length) items.push(chip(PROBLEM, 'Named by a model check', 'The arrow shows the way EnergyPlus takes as outward, from the order of the corner points.'));
   $('legend').innerHTML = items.join('');
@@ -289,7 +388,8 @@ function render(m) {
   view.setModel(m, { doors: interiorDoors(m) });
   net = buildNetwork(m);
   air.setNetwork(net, m);
-  solveAir();
+  $('results-file').value = '';
+  setResults(null); // results belong to the previous model; this also solves the network
   if ($('show-air').checked) air.play();
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);

@@ -55,6 +55,7 @@ export class AirflowParticles {
     this.speed = 5; // display time runs this many times faster than real time
     // Particles released per kg of outdoor air; set once per model so more flow shows more particles.
     this.density = null;
+    this.densityScale = 1; // the Particles slider
     this.spawnDebt = 0;
     this.flows = null;
   }
@@ -84,7 +85,7 @@ export class AirflowParticles {
     if (this.density === null) this.density = TARGET / (flows.outdoorIn * time); // TARGET under these first conditions
     if (!this.live.length) {
       // Start with air already on its way, spread along the routes, rather than one packet at the windows.
-      const n = Math.min(CAPACITY, Math.round(this.density * flows.outdoorIn * time));
+      const n = Math.min(CAPACITY, Math.round(this.density * this.densityScale * flows.outdoorIn * time));
       for (let k = 0; k < n; k++) {
         const q = this.route(this.pickEntry());
         if (this.advance(q, Math.random() * q.duration)) this.live.push(q);
@@ -159,7 +160,7 @@ export class AirflowParticles {
     const sim = Math.min(dt, 0.1) * this.speed;
     // A steady release in proportion to each entry's flow; when full, new particles are skipped, not saved up.
     if (this.density && this.flows.outdoorIn > 0) {
-      this.spawnDebt += this.density * this.flows.outdoorIn * sim;
+      this.spawnDebt += this.density * this.densityScale * this.flows.outdoorIn * sim;
       for (; this.spawnDebt >= 1; this.spawnDebt--) if (this.live.length < CAPACITY) this.live.push(this.route(this.pickEntry()));
     }
     const o = this.view.origin, col = new THREE.Color();

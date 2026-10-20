@@ -40,3 +40,23 @@ test('outdoor conditions match what EnergyPlus used for 1-7 July', { skip: exist
     }
   }
 });
+
+const RESULTS02 = path.join(REPO, '..', 'Example 02', 'Results', '2226_Emmenweidout.eso');
+const MODEL02 = path.join(REPO, '..', 'Example 02', 'Results', '2226_Emmenweid.epJSON');
+test('zone results from ClimateStudio: every zone, every hour, streamed like the browser does', { skip: existsSync(RESULTS02) ? false : 'Example 02 results not here' }, async () => {
+  const { createReadStream } = await import('node:fs');
+  const { Readable } = await import('node:stream');
+  const { importEpJSON } = await import('../src/model/import-epjson.js');
+  const { readZoneResultsStream, zoneAt } = await import('../src/model/results.js');
+  const model = importEpJSON(JSON.parse(readFileSync(MODEL02, 'utf8')));
+  const r = await readZoneResultsStream(Readable.toWeb(createReadStream(RESULTS02)), model);
+  assert.deepEqual(r.missing, []);
+  assert.equal(r.zones['2F_Office_8'].t.length, 8760);
+  // Ventilation runs only in the five naturally ventilated zones, for part of the year.
+  const ventilated = Object.entries(r.zones).filter(([, z]) => z.vent?.some(Boolean)).map(([n]) => n).sort();
+  assert.deepEqual(ventilated, Object.values(model.zones).filter((z) => z.ventilation).map((z) => z.name).sort());
+  const share = r.zones['2F_Office_8'].vent.filter(Boolean).length / 8760;
+  assert.ok(share > 0.02 && share < 0.6, `windows open ${share}`);
+  const z = zoneAt(r, '2F_Office_8', 196 * 24 + 14);
+  assert.ok(z.t > 10 && z.t < 40 && z.w > 0.002 && z.w < 0.02);
+});

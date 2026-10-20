@@ -5,7 +5,7 @@
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { existsSync, readdirSync } from 'node:fs';
+import { createReadStream, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,6 +27,20 @@ const weatherFiles = () => (existsSync(WEATHER) ? readdirSync(WEATHER).filter((f
 
 createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  // ClimateStudio's results for each example (zone temperatures), streamed: they run to 150 MB.
+  if (url.pathname === '/results/') {
+    const found = EXAMPLES.map((e) => ({ ...e, results: e.file.replace(/\.epJSON$/, 'out.eso') })).filter((e) => existsSync(e.results))
+      .map((e) => ({ id: e.id, label: e.label, file: path.basename(e.results), url: `/results/${e.id}.eso` }));
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(found));
+  }
+  const results = EXAMPLES.find((e) => url.pathname === `/results/${e.id}.eso`);
+  if (results) {
+    const file = results.file.replace(/\.epJSON$/, 'out.eso');
+    if (!existsSync(file)) { res.writeHead(404); return res.end('Not found'); }
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+    return createReadStream(file).pipe(res);
+  }
   if (url.pathname === '/weather/') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     return res.end(JSON.stringify(weatherFiles()));
@@ -38,7 +52,7 @@ createServer(async (req, res) => {
     return res.end(await readFile(path.join(WEATHER, name)));
   }
   if (url.pathname === '/examples/') {
-    const found = EXAMPLES.filter((e) => existsSync(e.file)).map((e) => ({ label: e.label, file: path.basename(e.file), url: `/examples/${e.id}.epJSON` }));
+    const found = EXAMPLES.filter((e) => existsSync(e.file)).map((e) => ({ id: e.id, label: e.label, file: path.basename(e.file), url: `/examples/${e.id}.epJSON` }));
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     return res.end(JSON.stringify(found));
   }

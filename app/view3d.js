@@ -229,6 +229,23 @@ export class View3D {
 
   setShadingVisible(on) { if (this.shading) { this.shading.visible = on; this.render(); } }
 
+  // Half the diagonal of the zones' footprint (m), for drawings placed around the building.
+  footprintRadius() {
+    const b = bounds(this.surfaces.flatMap((s) => s.vertices));
+    return Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1]) / 2;
+  }
+
+  // Something drawn on the ground around the building (the wind rose); null removes it.
+  setGroundOverlay(obj) {
+    if (this.overlay) {
+      this.overlay.traverse((o) => { o.geometry?.dispose(); o.material?.map?.dispose(); o.material?.dispose?.(); });
+      this.scene.remove(this.overlay);
+    }
+    this.overlay = obj;
+    if (obj) this.scene.add(obj);
+    this.render();
+  }
+
   find(name) {
     const m = this.model;
     if (m.surfaces[name]) return { kind: 'surface', item: m.surfaces[name], polys: [m.surfaces[name]] };
@@ -292,10 +309,19 @@ export class View3D {
   }
 
   // Points the camera at a set of polygons (the whole building by default), from the south-west.
+  // The whole building also takes in what is drawn on the ground around it (the wind rose).
   frame(polys = this.surfaces, from = new THREE.Vector3(-0.55, -1, 0.75)) {
     const b = bounds(polys.flatMap((p) => p.vertices));
     const centre = new THREE.Vector3(...[0, 1, 2].map((i) => (b.min[i] + b.max[i]) / 2 - this.origin[i]));
-    const radius = Math.max(1, Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2);
+    let radius = Math.max(1, Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2);
+    if (polys === this.surfaces && this.overlay) {
+      const box = new THREE.Box3().setFromObject(this.overlay);
+      if (!box.isEmpty()) {
+        box.expandByPoint(centre);
+        box.getCenter(centre);
+        radius = Math.max(radius, box.getSize(new THREE.Vector3()).length() / 2);
+      }
+    }
     const dist = (radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.05;
     const dir = from.clone().normalize();
     this.camera.position.copy(centre).addScaledVector(dir, dist);
