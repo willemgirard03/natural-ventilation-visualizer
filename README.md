@@ -16,7 +16,8 @@ Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findi
 | --- | --- |
 | `prototype/section-airflow.html` | Phase 1 2D section prototype. Open it in any browser. |
 | `src/model/` | Project model: `.epJSON` importer and exporter, geometry, constructions, schedules. Plain JavaScript modules, no build step. |
-| `app/import.html` | Model import page: load an `.epJSON`, see zones, windows, constructions and model checks, export it again. |
+| `app/import.html` | Model import page: load an `.epJSON`, see it in 3D, see zones, windows, constructions and model checks, export it again. |
+| `app/view3d.js` | 3D view of the model (three.js): surfaces by type or zone, windows, shading, a horizontal cut, selection, model-check problems in red. |
 | `tests/` | Automated tests (`npm test`), including checks against EnergyPlus's own reading of the two example models. |
 | `tools/run_alignment.py` | EnergyPlus alignment test: re-runs a ClimateStudio model and compares with ClimateStudio's results. |
 | `tools/compare_eso.py` | Compares two EnergyPlus `.eso` result files output by output; used by the alignment test. |
@@ -30,7 +31,7 @@ Needs [Node.js](https://nodejs.org) 22 or later (development only; the tool itse
 
 ```
 npm test        # run the tests; the example-model tests are skipped if E:\ARCH 540\A2 is not present
-npm run serve   # serve the repository at http://localhost:8000 and open the import page
+npm run serve   # serve the repository at http://localhost:8000 and open the import page; offers the two course examples when A2 is present
 ```
 
 Browsers load JavaScript modules only over http, so open the pages through `npm run serve` rather than by double-clicking them.

@@ -1,7 +1,7 @@
 // Self-contained tests: a 5 x 4 x 3 m box zone with one south window, built in code.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { area, azimuth, enclosedVolume, tilt } from '../src/model/geometry.js';
+import { area, azimuth, enclosedVolume, tilt, triangulate } from '../src/model/geometry.js';
 import { classifySurface, importEpJSON } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
 import { hourlyValues } from '../src/model/schedules.js';
@@ -147,4 +147,14 @@ test('export returns the imported objects unchanged and separate from the model'
   out.Zone.Room.x_origin = 99;
   assert.equal(m.epjson.Zone.Room.x_origin, 0);
   assert.deepEqual(JSON.parse(serializeEpJSON(exportEpJSON(m))), ep);
+});
+
+test('triangulation covers concave and collinear outlines and keeps their facing', () => {
+  // L-shaped wall facing south (-y), with an extra vertex along its bottom edge.
+  const L = [[0, 0, 0], [2, 0, 0], [4, 0, 0], [4, 0, 1], [1, 0, 1], [1, 0, 3], [0, 0, 3]];
+  const tris = triangulate(L);
+  const triArea = tris.reduce((s, t) => s + area(t.map((i) => L[i])), 0);
+  assert.ok(Math.abs(triArea - area(L)) < 1e-9, `triangles cover ${triArea} m2 of ${area(L)} m2`);
+  for (const t of tris) assert.equal(Math.round(azimuth(t.map((i) => L[i]))), 180);
+  assert.deepEqual(triangulate([[0, 0, 0], [1, 0, 0], [0, 1, 0]]), [[0, 1, 2]]);
 });

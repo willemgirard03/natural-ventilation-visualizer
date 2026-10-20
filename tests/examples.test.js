@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { importEpJSON } from '../src/model/import-epjson.js';
+import { area, dot, triangulate, unitNormal } from '../src/model/geometry.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
 import { hourlyValues } from '../src/model/schedules.js';
 
@@ -152,3 +153,18 @@ test('example01: facts recorded in PLAN.md', { skip: skip01 }, () => {
   const avail = hourlyValues(epjson, maker.ventilation.schedule);
   near(avail.reduce((a, b) => a + b) / 8760, 0.47, 0.01, 'window availability');
 });
+
+for (const key of Object.keys(EXAMPLES)) {
+  const skip = existsSync(EXAMPLES[key] + '.epJSON') ? false : `${key} files not found in ${A2}`;
+  test(`${key}: every polygon triangulates for the 3D view, area and facing kept`, { skip }, () => {
+    const { model } = load(key);
+    const polys = [...Object.values(model.surfaces), ...Object.values(model.windows), ...model.shading];
+    for (const s of polys) {
+      const tris = triangulate(s.vertices).map((t) => t.map((i) => s.vertices[i]));
+      const covered = tris.reduce((a, t) => a + area(t), 0);
+      near(covered, area(s.vertices), 1e-6 * Math.max(1, area(s.vertices)), `${s.name} triangle area`);
+      const n = unitNormal(s.vertices);
+      for (const t of tris) assert.ok(dot(unitNormal(t), n) > 0.999, `${s.name} triangle faces the wrong way`);
+    }
+  });
+}

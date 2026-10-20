@@ -7,6 +7,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
 <style>
 :root {
   --paper: #E7EBE9;
@@ -90,6 +96,25 @@ tr:last-child td { border-bottom: none; }
 td[title] { text-decoration: underline dotted var(--ink-soft); text-underline-offset: 3px; cursor: help; }
 .muted { color: var(--ink-soft); }
 .error-text { color: var(--error); }
+button.quiet { background: transparent; color: var(--accent); }
+.view-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin: 0 0 8px; color: var(--ink-soft); }
+.view-tools label { display: inline-flex; align-items: center; gap: 6px; }
+.view-tools select, .view-tools output { font: inherit; color: var(--ink); }
+.view-tools output { min-width: 4.5em; font-variant-numeric: tabular-nums; }
+.viewer { position: relative; height: min(64vh, 620px); min-height: 320px; border-radius: 8px; overflow: hidden; background: var(--panel); }
+.viewer canvas { display: block; width: 100%; height: 100%; }
+.pick-info {
+  position: absolute; left: 10px; bottom: 10px; max-width: min(420px, calc(100% - 20px));
+  padding: 8px 12px; border-radius: 6px; background: var(--paper); border: 1px solid var(--rule);
+  font-size: 13px; line-height: 1.4; box-shadow: 0 2px 8px rgb(0 0 0 / 0.12);
+}
+.pick-info b { font-weight: 600; }
+.pick-info div + div { margin-top: 4px; }
+.warning-text { color: var(--warning); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; font-size: 13px; color: var(--ink-soft); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+.checks button.object { font: inherit; padding: 0; border: none; background: none; color: var(--accent); text-decoration: underline; cursor: pointer; }
 footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
 </style>
 </head>
@@ -102,11 +127,27 @@ footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
     <label class="button" for="file">Choose .epJSON</label>
     <input type="file" id="file" accept=".epJSON,.epjson,.json">
     <span id="status">or drop a file here</span>
+    <span id="examples" hidden></span>
     <button id="export" disabled>Export .epJSON</button>
   </div>
   <div class="summary" id="summary"></div>
 
   <div id="results" hidden>
+    <h2>3D view</h2>
+    <div class="view-tools">
+      <label title="Colour each surface by its ClimateStudio surface type, or by the zone it belongs to. Each surface is lighter on the side it faces (out of its zone) and darker on the inside.">Colour by
+        <select id="color-by"><option value="type">Surface type</option><option value="zone">Zone</option></select></label>
+      <label title="Hide everything above this height to see inside the building">Cut at
+        <input type="range" id="cut" min="0" max="1" step="0.1"> <output id="cut-value">none</output></label>
+      <label title="Surrounding buildings and other shading surfaces"><input type="checkbox" id="show-shading" checked> Shading</label>
+      <button id="fit" class="quiet" title="Fit the whole building in view">Fit</button>
+      <span title="Left click: select a surface or window · Right drag: orbit · Middle drag: pan · Wheel: zoom">Mouse controls</span>
+    </div>
+    <div class="viewer" id="viewer">
+      <div class="pick-info" id="info" hidden></div>
+    </div>
+    <div class="legend" id="legend"></div>
+
     <h2>Model checks</h2>
     <ul class="checks" id="checks"></ul>
 

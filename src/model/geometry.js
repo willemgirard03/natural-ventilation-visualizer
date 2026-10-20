@@ -88,3 +88,44 @@ export function verticesOf(obj) {
   }
   return pts;
 }
+
+// Splits a planar polygon into triangles by ear clipping in its own plane. Returns index triples
+// into the points, in the polygon's own winding, so each triangle faces the same way as the polygon.
+// Handles concave outlines and collinear vertices (EnergyPlus surfaces often have both).
+export function triangulate(points) {
+  const n = points.length;
+  if (n < 3) return [];
+  if (n === 3) return [[0, 1, 2]];
+  // Project onto the axis plane the polygon faces most; swap axes where needed so it runs counterclockwise.
+  const [nx, ny, nz] = unitNormal(points);
+  const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+  const [u, v, sign] = az >= ax && az >= ay ? [0, 1, nz] : ax >= ay ? [1, 2, nx] : [2, 0, ny];
+  const p = points.map((q) => (sign >= 0 ? [q[u], q[v]] : [q[v], q[u]]));
+  const { min, max } = bounds(points);
+  const eps = 1e-10 * ((max[0] - min[0]) ** 2 + (max[1] - min[1]) ** 2 + (max[2] - min[2]) ** 2);
+  const cross = (a, b, c) => (p[b][0] - p[a][0]) * (p[c][1] - p[a][1]) - (p[b][1] - p[a][1]) * (p[c][0] - p[a][0]);
+  const inside = (a, b, c, q) => cross(a, b, q) >= -eps && cross(b, c, q) >= -eps && cross(c, a, q) >= -eps;
+
+  const ring = [...Array(n).keys()];
+  const triangles = [];
+  while (ring.length > 3) {
+    let clipped = false;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[(i + ring.length - 1) % ring.length], b = ring[i], c = ring[(i + 1) % ring.length];
+      const turn = cross(a, b, c);
+      if (Math.abs(turn) <= eps) { ring.splice(i, 1); clipped = true; break; } // collinear: drop the vertex
+      if (turn < 0) continue; // reflex corner
+      if (ring.some((q) => q !== a && q !== b && q !== c && inside(a, b, c, q))) continue;
+      triangles.push([a, b, c]);
+      ring.splice(i, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) { // not a simple polygon: fan the rest rather than fail
+      for (let i = 1; i < ring.length - 1; i++) triangles.push([ring[0], ring[i], ring[i + 1]]);
+      return triangles;
+    }
+  }
+  if (Math.abs(cross(ring[0], ring[1], ring[2])) > eps) triangles.push(ring);
+  return triangles;
+}
