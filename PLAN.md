@@ -379,14 +379,14 @@ No ClimateStudio license is available, so validation works only from the two run
 | Constraint | Consequence |
 | --- | --- |
 | No ClimateStudio license | Validate only against Example\_01 and Example\_02 and their files. ClimateStudio's Grasshopper components can be inspected but their settings cannot be changed or re-run. The licensed capture experiments planned earlier (component dump, network-mode run, Intersector test set) are dropped unless a license becomes available. |
-| Project on a removable drive | Everything lives under `E:\ARCH 540`. Files shared in this chat are in `E:\ARCH 540\A2`; treat that folder as read-only reference data. |
+| Project on a removable drive | Everything lives under `E:\ARCH 540`. Files shared in this chat are in `E:\ARCH 540\A2`; treat that folder as read-only reference data, except the repository folder `A2\natural-ventilation-visualizer`. |
 | Several computers | The code repository sits on the drive and is pushed to GitHub, so any computer can continue. |
 | Context does not travel | This plan is exported to `PLAN.md` in the repository; Claude Code reads it at the start of each session. Decisions made later are added to it. |
 | EnergyPlus is the reference engine | EnergyPlus 23.1 (free) must be available on whichever computer runs the alignment tests. With a GPU, pixel-counting shading reproduces ClimateStudio exactly. |
 
 **Machines and accounts.** Two Windows computers with Rhino 8 and Claude Code: a desktop with an NVIDIA GTX 1080 Ti and a laptop with a GTX 1660 Ti Max-Q. Both GPUs allow EnergyPlus's pixel-counting shading (so ClimateStudio's runs can be reproduced exactly) and browser GPU computing. GitHub user `willemgirard03`; the repository will be public, suggested name `natural-ventilation-visualizer`. Because it is public, course-provided models and results stay out of it: the code refers to files in `A2` by path. A permissive code license such as MIT suits a public tool; choose it during setup. No Carbonfly (LGPL) code is copied, only published values.
 
-**First Claude Code task: set up the repository.** New to GitHub, so step by step:
+**First Claude Code task: set up the repository (done 20 Oct).** The repository is `E:\ARCH 540\A2\natural-ventilation-visualizer`, inside `A2` rather than beside it; only this folder is published, and the rest of `A2` stays local and read-only. It is public at https://github.com/willemgirard03/natural-ventilation-visualizer under the MIT license, with a `.gitignore` that excludes EnergyPlus results, Rhino/Grasshopper models and archives. Commits use the GitHub noreply email. The drive records no file ownership, so each computer needs `git config --global --add safe.directory "E:/ARCH 540/A2/natural-ventilation-visualizer"` once (adjust the drive letter), plus `gh auth login`. Still to do: check the repository on the laptop. The original steps:
 
 1. Install Git and create a GitHub account (or sign in).
 2. Create the repository folder on the drive, e.g. `E:\ARCH 540\natural-ventilation-visualizer`, separate from `A2`.
@@ -428,7 +428,7 @@ The results folders replaced the licensed desktop session: ClimateStudio's Energ
 - [x] What should the tool answer first? Whole-building strategies (atria, stacks) and their effect on room comfort.
 - [x] Primary validation case? Example\_02, with Example\_01 as the advanced check.
 - [x] Who is it for? Architecture students anywhere; a January ClimateStudio course is a likely first audience.
-- [ ] Code license for the public repository (MIT suggested); decide during setup.
+- [x] Code license for the public repository? MIT, copyright Willem Girard (chosen 20 Oct at repository setup).
 - [ ] Where EnergyPlus runs for other students (local install or a server); decide after review 1.
 - [ ] Target student laptops: measure solver speed on the GTX 1660 Ti laptop before choosing grid resolution defaults.
 

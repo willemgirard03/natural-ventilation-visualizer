@@ -13,7 +13,7 @@ Everything built in the planning chat, ready to become the first commit of the r
 ## Before starting Claude Code
 
 1. **Get the plan as `PLAN.md`.** Open the plan document (Natural Ventilation Visualizer — Project Plan) and download it as Markdown. Save it in this folder as `PLAN.md`. The two diagrams become placeholders in Markdown; the text carries everything Claude Code needs.
-2. **Copy this folder to the drive** as `E:\ARCH 540\natural-ventilation-visualizer`. Leave `E:\ARCH 540\A2` untouched; it is read-only reference data.
+2. **Copy this folder to the drive.** It ended up at `E:\ARCH 540\A2\natural-ventilation-visualizer` (decided 20 Oct). Apart from this folder, leave `E:\ARCH 540\A2` untouched; it is read-only reference data.
 3. **Put EnergyPlus 23.1 on the drive, outside the repository.** Download the portable zip, the exact build ClimateStudio used, and unzip it to `E:\ARCH 540\tools\EnergyPlus-23.1.0`. It then works on either computer without installing:
    https://github.com/NREL/EnergyPlus/releases/download/v23.1.0/EnergyPlus-23.1.0-87ed9199d4-Windows-x86_64.zip
 
