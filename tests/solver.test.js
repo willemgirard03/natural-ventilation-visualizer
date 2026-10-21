@@ -168,3 +168,27 @@ test('tracer: parcels stay inside their zone, glide along walls rather than stic
     assert.ok(air < 0.01 || moved > 0.3, `parcel stuck at ${q.p.map((x) => x.toFixed(2))} where the air moves ${air.toFixed(3)} m/s`);
   }
 });
+
+test('grid solver: warm air rises above a heated floor, a warm layer forms, and air is conserved in every cell', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { voxelize, prepareRoomFlow, cellCentre } = await import('../src/solver/roomflow.js');
+  const { GridFlow } = await import('../src/solver/grid.js');
+  const model = twoRooms();
+  const g = voxelize(model, { cell: 0.25 }), net = buildNetwork(model, { doors: false });
+  const cond = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0, 'Hall:s:w': 0 }, zones: { Room: { t: 22, w: 0.008 }, Hall: { t: 22, w: 0.008 } }, outdoor: { t: 22, w: 0.008, pressure: 101325, windSpeed: 0, windDirection: 0 } };
+  const grid = new GridFlow(prepareRoomFlow(g, net), model);
+  grid.projectTolerance = 1e-6;
+  grid.setConditions(flowStreams(net, solveNetwork(net, cond), cond), cond);
+  // 500 W into a 1 x 1 m patch of Room's floor; no other gains.
+  const hot = [...grid.fluid].filter((c) => { const [x, y, z] = cellCentre(g, c); return x > 1.5 && x < 2.5 && y > 1.5 && y < 2.5 && z < 0.3; });
+  grid.sources = grid.sources.map((s, i) => ({ ...s, occupied: i === 0 ? Int32Array.from(hot) : s.occupied, lower: i === 0 ? 500 : 0, upper: 0 }));
+  for (let t = 0; t < 60;) t += grid.step(Math.min(0.5, grid.stableDt()));
+  assert.ok(grid.velocityAt([2, 2, 1.5])[2] > 0.3, 'a plume rises above the heat');
+  assert.ok(grid.temperatureAt(2, 2, 2.6) > grid.temperatureAt(0.5, 3.5, 0.3) + 2, 'warmer under the ceiling than at the floor');
+  let mean = 0;
+  for (const c of grid.sources[0].cells) mean += grid.T[c];
+  near(mean / grid.sources[0].cells.length, 22, 1, 'the room mean is held near its known temperature'); // 500 W against a 30 s hold leaves it a little above
+  let worst = 0;
+  for (const c of grid.fluid) worst = Math.max(worst, Math.abs(grid.divergence(c)));
+  assert.ok(worst < 1e-6, `largest cell imbalance ${worst}`);
+});

@@ -23,6 +23,7 @@ export class Tracer {
 
   // Velocity (m/s) through face d of cell c, along the axis's positive direction, as seen from zone z.
   faceVelocity(c, d, z) {
+    if (this.field.faceVelocityAt) return this.field.faceVelocityAt(c, d, z); // the grid solver's own faces
     const g = this.g, f = this.field, h = g.h, sgn = DIRS[d][(d / 2) | 0];
     if (c >= 0 && g.zone[c] === z) {
       const out = f.out.get(c * 6 + d);
@@ -114,6 +115,11 @@ export class Tracer {
   cross(q, c0, next, v) {
     if (c0 < 0) return false;
     const g = this.g, d = this.crossing(q.p, next);
+    // Through an open face of the grid solver (an open door) into the next zone.
+    if (this.field.isOpenFace?.(c0, d)) {
+      const nb = neighbour(g, c0, d);
+      if (nb >= 0 && g.zone[nb] >= 0) { q.zone = g.zone[nb]; q.p = next; return true; }
+    }
     const flowOut = this.field.out.get(c0 * 6 + d) || 0;
     if (flowOut <= 0) return false;
     const nb = neighbour(g, c0, d);

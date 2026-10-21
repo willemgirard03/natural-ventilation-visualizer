@@ -151,16 +151,14 @@ export function prepareRoomFlow(g, net) {
   return { g, net, cellsOf, faces, zonesCSR, zIndex };
 }
 
-// The flow field for one network solution (flowStreams output). Returns cell-centre velocities
-// (m/s, 3 per cell), the volume flow out of the cell through each opening face (key = cell * 6 +
-// direction, m3/s; negative: in), and the faces where outdoor air enters, for releasing particles.
-// previous: an earlier result for the same model, whose potential starts the solve.
-// open: { [opening name]: open fraction } as solved (conditions.open), so partly open openings narrow.
-export function roomFlow(prep, flows, { previous = null, open = null, tolerance = 1e-4, maxIterations = 3000 } = {}) {
-  const { g, net, faces, zonesCSR, zIndex } = prep;
-  const N = g.zone.length;
+// The volume flow out of each cell face that carries an opening's air (key = cell * 6 + direction,
+// m3/s; negative: in), from the network's streams, and the faces where outdoor air enters (for
+// releasing particles). skip(link): links left out (the grid solver solves flow through open doors).
+export function boundaryFluxes(prep, flows, { open = null, skip = () => false } = {}) {
+  const { g, net, faces, zIndex } = prep;
   const out = new Map(), entries = [];
   for (const s of flows.streams) {
+    if (skip(net.links[s.link])) continue;
     const l = net.links[s.link], zmin = Math.min(...l.vertices.map((p) => p[2])), H = l.height || 1;
     for (const [zone, sign] of [[s.from, 1], [s.to, -1]]) {
       if (zone < 0) continue;
@@ -179,6 +177,18 @@ export function roomFlow(prep, flows, { previous = null, open = null, tolerance 
       }
     }
   }
+  return { out, entries };
+}
+
+// The flow field for one network solution (flowStreams output). Returns cell-centre velocities
+// (m/s, 3 per cell), the volume flow out of the cell through each opening face (key = cell * 6 +
+// direction, m3/s; negative: in), and the faces where outdoor air enters, for releasing particles.
+// previous: an earlier result for the same model, whose potential starts the solve.
+// open: { [opening name]: open fraction } as solved (conditions.open), so partly open openings narrow.
+export function roomFlow(prep, flows, { previous = null, open = null, tolerance = 1e-4, maxIterations = 3000 } = {}) {
+  const { g, net, faces, zonesCSR, zIndex } = prep;
+  const N = g.zone.length;
+  const { out, entries } = boundaryFluxes(prep, flows, { open });
   // Ideal flow in each zone: potential phi with sum over neighbours (phi_c - phi_n) = -(outflow at c) / h.
   const h = g.h, phi = previous ? Float64Array.from(previous.phi) : new Float64Array(N), velocity = new Float32Array(N * 3);
   let iterations = 0;
