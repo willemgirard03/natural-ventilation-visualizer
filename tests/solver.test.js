@@ -106,3 +106,30 @@ test('flow streams: two-way windows bring cold air in at the bottom, and every z
   assert.ok(inflow.band[1] <= outflow.band[0] + 1e-12 && inflow.band[0] === 0, 'outdoor air enters through the bottom band');
   net.zones.forEach((z, i) => near(f.outlets[i].reduce((s, x) => s + x.rate, 0), f.throughflow[i], 1e-9, `${z} sends on its inflow`));
 });
+
+test('room flow: cells fill the zones, and air is conserved in every cell, entering and leaving only at openings', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { voxelize, prepareRoomFlow, roomFlow, neighbour } = await import('../src/solver/roomflow.js');
+  const model = twoRooms();
+  const g = voxelize(model, { cell: 0.25 });
+  for (const [i, z] of g.zones.entries()) near(g.zone.filter((x) => x === i).length * g.h ** 3, 48, 0.5, `${z} volume`);
+  const net = buildNetwork(model, { doors: false });
+  const conditions = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0.5, 'Hall:s:w': 0.5 }, zones: { Room: { t: 26, w: 0.008 }, Hall: { t: 26, w: 0.008 } }, outdoor: { t: 16, w: 0.007, pressure: 101325, windSpeed: 3, windDirection: 200 } };
+  const flows = flowStreams(net, solveNetwork(net, conditions), conditions);
+  const f = roomFlow(prepareRoomFlow(g, net), flows, { tolerance: 1e-9 });
+  assert.ok(f.entries.length > 0);
+  // Net outflow of each cell, through faces to cells of its zone (from the potential) and through openings.
+  let worst = 0, scale = 0;
+  for (let c = 0; c < g.zone.length; c++) {
+    if (g.zone[c] < 0) continue;
+    let net0 = 0;
+    for (let d = 0; d < 6; d++) {
+      const nb = neighbour(g, c, d), key = c * 6 + d;
+      if (f.out.has(key)) { net0 += f.out.get(key); scale = Math.max(scale, Math.abs(f.out.get(key))); } else if (nb >= 0 && g.zone[nb] === g.zone[c]) net0 += (f.phi[c] - f.phi[nb]) * g.h;
+    }
+    worst = Math.max(worst, Math.abs(net0));
+  }
+  assert.ok(worst < 1e-6 * Math.max(scale, 1e-9) * 100, `largest imbalance ${worst} m3/s against face flows up to ${scale}`);
+  // What enters through the windows equals what the network says comes in from outdoors.
+  near(f.entries.reduce((s, e) => s + e.q, 0) * 1.2, flows.outdoorIn, 1e-9 * Math.max(1, flows.outdoorIn), 'entering flow');
+});

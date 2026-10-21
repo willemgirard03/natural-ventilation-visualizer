@@ -16,10 +16,11 @@ Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findi
 | --- | --- |
 | `prototype/section-airflow.html` | Phase 1 2D section prototype. Open it in any browser. |
 | `src/model/` | Project model: `.epJSON` importer and exporter, airflow network export, tool-added interior doors, geometry, constructions, schedules. Plain JavaScript modules, no build step. |
-| `src/solver/` | Airflow network solver: zone pressures and flows through every crack, window and door at one moment, matching EnergyPlus's airflow network. |
+| `src/solver/` | Airflow network solver (zone pressures and flows through every crack, window and door, matching EnergyPlus), flow streams, and ideal flow inside rooms on a grid of cells. |
 | `app/import.html` | Model import page: load an `.epJSON`, see it in 3D, see zones, windows, constructions and model checks, export it again. |
 | `app/view3d.js` | 3D view of the model (three.js): surfaces by type or zone, windows, shading, a horizontal cut, selection, model-check problems in red. |
-| `app/particles.js` | Airflow particles in the 3D view, following the network solver's flows. |
+| `app/particles.js` | Airflow particles in the 3D view, carried by the room flow field. |
+| `app/windrose.js` | Wind rose on the ground around the building, from the weather file. |
 | `tests/` | Automated tests (`npm test`), including checks against EnergyPlus's own reading of the two example models. |
 | `tools/run_alignment.py` | EnergyPlus alignment test: re-runs a ClimateStudio model and compares with ClimateStudio's results. |
 | `tools/run_energyplus.py` | Runs EnergyPlus 23.1 on any `.epJSON` with the examples' weather file. |

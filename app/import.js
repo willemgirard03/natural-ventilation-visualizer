@@ -4,6 +4,7 @@ import { View3D, TYPE_COLORS, PROBLEM, zoneColor } from './view3d.js';
 import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
+import { voxelize, prepareRoomFlow, roomFlow } from '../src/solver/roomflow.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor } from './particles.js';
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
@@ -30,6 +31,7 @@ $('version').textContent = MODEL_VERSION;
 const view = new View3D($('viewer'), { onSelect: showInfo });
 const air = new AirflowParticles(view);
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
+let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room flow, and its latest field
 let weather = null, weatherHour = null; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
 
@@ -56,7 +58,13 @@ function solveAir() {
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   airflow = { solution, flows, conditions };
-  air.setFlows(flows, conditions);
+  // The room flow takes a few hundred milliseconds, so it follows once the controls settle.
+  clearTimeout(fieldTimer);
+  fieldTimer = setTimeout(() => {
+    if (!rooms || airflow?.flows !== flows) return;
+    field = roomFlow(rooms, flows, { previous: field });
+    air.setField(field, flows, conditions);
+  }, 120);
   const volume = Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0);
   const m3h = (flows.outdoorIn / 1.2) * 3600;
   $('air-total').textContent = `Outdoor air ${fmt(m3h, 0)} m³/h · ${fmt(m3h / volume, m3h / volume < 1 ? 2 : 1)} air changes/h`;
@@ -387,7 +395,9 @@ function render(m) {
   view.resize();
   view.setModel(m, { doors: interiorDoors(m) });
   net = buildNetwork(m);
-  air.setNetwork(net, m);
+  rooms = prepareRoomFlow(voxelize(m), net);
+  field = null;
+  air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   $('results-file').value = '';
   setResults(null); // results belong to the previous model; this also solves the network
   if ($('show-air').checked) air.play();
