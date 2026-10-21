@@ -11,6 +11,7 @@ import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './p
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { readZoneResultsStream, zoneAt, windowAt, mergeResults } from '../src/model/results.js';
+import { SASH_TYPES, sashAngle } from '../src/model/sash.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -36,6 +37,11 @@ let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room 
 let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour solved
 // Windows opened or closed one by one (by window name) or room by room (by zone), over the Windows setting.
 const windowSet = new Map(), roomSet = new Map();
+// Sashes set window by window ({ type, hinge }), over the Sashes setting.
+const sashSet = new Map();
+const sashOf = (name) => ({ type: $('sash-type').value, hinge: 'left', ...sashSet.get(name) });
+// How a window's sash opens to give `fraction` of its rough opening: { angle, fraction, reachable, maxFraction }.
+const sashFor = (l, fraction) => sashAngle(sashOf(l.name).type, l.width, l.height, fraction);
 let weather = null, weatherHour = null; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
 
@@ -59,17 +65,22 @@ function solveAir() {
     open: Object.fromEntries(net.links.filter((l) => l.control === 'zone' || l.door).map((l) => {
       if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : $('doors').value === 'open') ? l.openFactor : 0];
       // As in results: an airflow network run gives each window's opening; otherwise the zone's ventilation.
+      // Each window opens as far as its sash allows towards the fraction asked of it.
       const reported = mode === 'results' && results ? windowAt(results, l.name, hourAt) : null;
-      if (reported !== null && !windowSet.has(l.name) && !roomSet.has(l.from)) return [l.name, reported];
+      if (reported !== null && !windowSet.has(l.name) && !roomSet.has(l.from)) return [l.name, reported > 0 ? sashFor(l, reported).fraction : 0];
       const base = mode === 'open' || (mode === 'results' && !!inside(l.from).vent);
       const open = windowSet.has(l.name) ? windowSet.get(l.name) : roomSet.has(l.from) ? roomSet.get(l.from) : base;
-      return [l.name, open ? l.openFactor : 0];
+      return [l.name, open ? sashFor(l, l.openFactor).fraction : 0];
     })),
   };
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   airflow = { solution, flows, conditions };
-  view.setOpenWindows(new Set(Object.entries(conditions.open).filter(([, f]) => f > 0).map(([n]) => n)));
+  const openNow = Object.entries(conditions.open).filter(([n, f]) => f > 0 && !n.endsWith(':door')).map(([n]) => n);
+  view.setOpenWindows(new Set(openNow), new Map(openNow.map((n) => {
+    const l = net.links.find((x) => x.name === n);
+    return [n, { ...sashOf(n), angle: sashFor(l, conditions.open[n]).angle }];
+  })));
   $('windows-reset').hidden = !windowSet.size && !roomSet.size;
   // With a results file, temperatures belong to the results' own window states.
   const differs = results && (mode !== 'results' || [...windowSet.keys()].some((n) => !n.endsWith(':door')) || roomSet.size);
@@ -167,7 +178,9 @@ async function rerun() {
   }
   const [a, b] = rerunWeek(), da = dateOf(a), db = dateOf(b);
   const forModel = model, label = `${da.label}–${db.label}`;
-  const epjson = toAirflowNetwork(model, { states: linkStates(), runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true });
+  // Windows open as far as their sashes allow; EnergyPlus's control then opens them up to that.
+  const openFactors = Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, sashFor(l, l.openFactor).fraction]));
+  const epjson = toAirflowNetwork(model, { states: linkStates(), openFactors, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true });
   rerunning = true;
   const t0 = Date.now();
   const tick = setInterval(() => { $('stale').textContent = `Running EnergyPlus for ${label}… ${Math.round((Date.now() - t0) / 1000)} s`; }, 500);
@@ -206,6 +219,22 @@ $('info').addEventListener('click', (e) => {
   showInfo(view.find(selected));
   legend();
 });
+// Sashes: one window's type or hinge from its details, or all of them from the Sashes setting.
+$('info').addEventListener('change', (e) => {
+  if (e.target.dataset?.act !== 'sash') return;
+  sashSet.set(e.target.dataset.name, { ...sashSet.get(e.target.dataset.name), type: e.target.value });
+  solveAir();
+  showInfo(view.find(selected));
+});
+$('info').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act=hinge]');
+  if (!b) return;
+  const s = sashOf(b.dataset.name);
+  sashSet.set(b.dataset.name, { ...sashSet.get(b.dataset.name), hinge: s.hinge === 'left' ? 'right' : 'left' });
+  solveAir();
+  showInfo(view.find(selected));
+});
+$('sash-type').addEventListener('change', () => { sashSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); });
 $('windows-reset').addEventListener('click', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
 for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
 
@@ -391,7 +420,7 @@ function showInfo(found) {
   } else {
     rows.push(`<b>${esc(item.name)}</b>`, 'Shading surface');
   }
-  if (airflow && $('show-air').checked) {
+  if (airflow) {
     rows.push(...airLines(kind, item));
     if (kind === 'zone') rows.push(...roomButton(item.name));
     if (kind === 'surface') rows.push(...roomButton(item.zone));
@@ -419,6 +448,17 @@ function airLines(kind, item) {
   const r = airflow.solution.links[i], l = net.links[i], other = l.to ?? 'outdoors';
   const what = l.type === 'crack' ? 'Leakage' : 'Air';
   const lines = [`${what}: ${m3h(r.forward)} m³/h ${esc(l.from)} → ${esc(other)}, ${m3h(r.backward)} m³/h ${esc(other)} → ${esc(l.from)}`];
+  if (l.control === 'zone') {
+    // The sash: its type, hinge and the angle it opens to; a note when it cannot give what is asked.
+    const s = sashOf(l.name), now = airflow.conditions.open[l.name], need = sashFor(l, l.openFactor);
+    const types = Object.entries(SASH_TYPES).map(([k, t]) => `<option value="${k}"${k === s.type ? ' selected' : ''}>${t.label}</option>`).join('');
+    lines.push(`Sash <select data-act="sash" data-name="${esc(l.name)}" title="${esc(Object.values(SASH_TYPES).map((t) => `${t.label}: ${t.help}, up to ${t.maxAngle}°`).join('. '))}">${types}</select>`
+      + (s.type === 'casement' ? ` <button class="quiet" data-act="hinge" data-name="${esc(l.name)}">hinged ${s.hinge}</button>` : ''));
+    lines.push(now > 0 ? `Open ${fmt(sashFor(l, now).angle, 0)}°, ${fmt(100 * now, 0)}% of the opening free` : 'Closed');
+    if (!need.reachable) {
+      lines.push(`<span class="warning-text">At its ${SASH_TYPES[s.type].maxAngle}° limit this sash frees ${fmt(100 * need.maxFraction, 0)}% of the opening, not the ${fmt(100 * l.openFactor, 0)}% the model asks for; the airflow uses ${fmt(100 * need.maxFraction, 0)}%.</span>`);
+    }
+  }
   if (l.control === 'zone' || l.door) {
     const open = airflow.conditions.open[l.name] > 0, what = l.door ? 'door' : 'window';
     if (l.door) lines.push(open ? 'Open' : `Closed: leaks like a 1 cm gap under it`);
@@ -558,7 +598,7 @@ function render(m) {
   field = null;
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   $('results-file').value = '';
-  windowSet.clear(); roomSet.clear();
+  windowSet.clear(); roomSet.clear(); sashSet.clear();
   $('section').value = '';
   applySection();
   setResults(null); // results belong to the previous model; this also solves the network

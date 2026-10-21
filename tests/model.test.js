@@ -197,3 +197,19 @@ test('interior door: centred at the foot of a wall, facing the same way, or none
   assert.equal(doorOnWall(BOX.floor), null);
   assert.ok(isCirculation('GF_Circ_1_4') && isCirculation('3F_Stair_2') && !isCirculation('Elevator_Stair_Core') && !isCirculation('Office'));
 });
+
+test('sashes: free area grows with the angle, awnings open through their side triangles, limits are reported', async () => {
+  const { freeFraction, sashAngle } = await import('../src/model/sash.js');
+  // A 1 x 1 m casement at 90 degrees: edge gap 1 x 2 sin 45 = 1.41 m2 plus a 0.5 m2 triangle: fully free.
+  near(freeFraction('casement', 1, 1, 90), 1);
+  near(freeFraction('casement', 1, 1, 10), Math.min(1, 2 * Math.sin((5 * Math.PI) / 180) + Math.sin((10 * Math.PI) / 180)), 1e-12);
+  // The same tall window (1.3 x 2.4 m) needs a smaller angle as an awning than as a casement for 80%.
+  const casement = sashAngle('casement', 1.3, 2.4, 0.8), awning = sashAngle('awning', 1.3, 2.4, 0.8);
+  near(freeFraction('casement', 1.3, 2.4, casement.angle), 0.8, 1e-9);
+  assert.ok(awning.angle < casement.angle, `awning ${awning.angle} vs casement ${casement.angle}`);
+  // A short, wide hopper limited to 35 degrees cannot reach 80%.
+  const hopper = sashAngle('hopper', 2, 0.5, 0.8);
+  assert.equal(hopper.reachable, false);
+  assert.equal(hopper.angle, 35);
+  near(hopper.fraction, freeFraction('hopper', 2, 0.5, 35), 1e-12);
+});

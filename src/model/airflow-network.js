@@ -58,6 +58,7 @@ export function footprintAxis(model) {
 //   opening: a window or door; open over openFactor of its width, or a crack along its edges when closed.
 //            control: 'zone' (follows the zone's venting control), 'open' (always) or 'closed' (never).
 // options.states: { [opening name]: true (open) | false (closed) } overrides an opening's control.
+// options.openFactors: { [window name]: fraction } overrides how far a window opens (its sash's limit).
 export function networkElements(model, options = {}) {
   const o = { ...NETWORK_DEFAULTS, ...options };
   const links = [];
@@ -84,6 +85,7 @@ export function networkElements(model, options = {}) {
     links.push(opening({ name: d.name, from: d.zone, to: d.partnerZone, vertices: d.vertices, openFactor: 1, control: 'open', door: d, closedCoefficient: coefficient(o.doorLeakage50, o.flowExponent) }));
   }
   if (o.states) for (const l of links) if (l.type === 'opening' && l.name in o.states) l.control = o.states[l.name] ? 'open' : 'closed';
+  if (o.openFactors) for (const l of links) if (l.type === 'opening' && l.name in o.openFactors) l.openFactor = o.openFactors[l.name];
   return { zones: Object.keys(model.zones), links, doors, options: o };
 }
 

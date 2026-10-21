@@ -79,6 +79,31 @@ function edgeGeometry(polys, origin) {
 
 const centroid = (pts) => pts.reduce((s, p) => [s[0] + p[0] / pts.length, s[1] + p[1] / pts.length, s[2] + p[2] / pts.length], [0, 0, 0]);
 
+// The sash of a window swung open: the rough opening's rectangle turned about its hinge edge by the
+// angle, outwards for casements and awnings, inwards for hoppers. null for windows that are not
+// upright rectangles (skylights), which stay drawn in place.
+function sashPanel(w, sash) {
+  if (!w || !sash) return null;
+  const n = unitNormal(w.vertices);
+  if (Math.abs(n[2]) > 0.05) return null;
+  const h = Math.hypot(n[0], n[1]), out = [n[0] / h, n[1] / h, 0];
+  const right = [-out[1], out[0], 0]; // to the right, seen from outside
+  const along = w.vertices.map((p) => p[0] * right[0] + p[1] * right[1]);
+  const s0 = Math.min(...along), s1 = Math.max(...along);
+  const z0 = Math.min(...w.vertices.map((p) => p[2])), z1 = Math.max(...w.vertices.map((p) => p[2]));
+  const plane = w.vertices[0][0] * out[0] + w.vertices[0][1] * out[1];
+  const at = (s, z, o = 0) => [right[0] * s + out[0] * (plane + o), right[1] * s + out[1] * (plane + o), z];
+  const a = (sash.angle * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
+  const W = s1 - s0, H = z1 - z0;
+  if (sash.type === 'casement') {
+    const [hs, dir] = sash.hinge === 'right' ? [s1, -1] : [s0, 1];
+    return [at(hs, z0), at(hs + dir * W * c, z0, W * sn), at(hs + dir * W * c, z1, W * sn), at(hs, z1)];
+  }
+  if (sash.type === 'awning') return [at(s0, z1), at(s1, z1), at(s1, z1 - H * c, H * sn), at(s0, z1 - H * c, H * sn)];
+  if (sash.type === 'hopper') return [at(s0, z0), at(s1, z0), at(s1, z0 + H * c, -H * sn), at(s0, z0 + H * c, -H * sn)];
+  return null;
+}
+
 export class View3D {
   constructor(container, { onSelect = () => {} } = {}) {
     this.container = container;
@@ -161,6 +186,9 @@ export class View3D {
     this.clear();
     this.model = model;
     this.doors = doors;
+    this.swung = null;
+    this.sashMesh = null;
+    this.openingPick = null;
     this.surfaces = Object.values(model.surfaces);
     this.windows = Object.values(model.windows);
     this.zoneIndex = Object.fromEntries(Object.keys(model.zones).map((z, i) => [z, i]));
@@ -249,14 +277,47 @@ export class View3D {
 
   // Hides everything above a height in model coordinates (metres); null shows the whole building.
   // Shows which windows are open (by name) in their own colour; null shows all as plain glazing.
-  setOpenWindows(open) {
+  // Shows which windows are open, and how: open is a Set of window names, sashes a Map from window
+  // name to { type: 'casement' | 'awning' | 'hopper', hinge: 'left' | 'right', angle (degrees) }.
+  // An open window with a sash is drawn as its sash swung to that angle on its hinge, in the open
+  // colour, with the rough opening left as an outline; other open windows are tinted in place.
+  setOpenWindows(open, sashes = new Map()) {
     if (!this.glass) return;
-    const g = this.glass.geometry, owner = g.userData.owner, col = g.getAttribute('color'), c = new THREE.Color();
-    owner.forEach((k, t) => {
-      c.set(open?.has(this.windows[k].name) ? OPEN_WINDOW : TYPE_COLORS.Glazing);
-      for (let j = 0; j < 3; j++) col.setXYZ(t * 3 + j, c.r, c.g, c.b);
+    const swung = new Set([...(open || [])].filter((n) => sashes.get(n)?.angle > 0 && sashPanel(this.model.windows[n], sashes.get(n))));
+    const c = new THREE.Color();
+    // Swung windows leave the in-place glazing, which is rebuilt without them.
+    if (this.swung?.size || swung.size) {
+      this.glass.geometry.dispose();
+      this.glass.geometry = polygonGeometry(this.windows.filter((w) => !swung.has(w.name)), this.origin, () => TYPE_COLORS.Glazing, 0.02);
+      this.glass.userData.items = this.windows.filter((w) => !swung.has(w.name));
+    }
+    this.swung = swung;
+    const g2 = this.glass.geometry, own2 = g2.userData.owner, col2 = g2.getAttribute('color'), items = this.glass.userData.items;
+    own2.forEach((k, t) => {
+      c.set(open?.has(items[k].name) ? OPEN_WINDOW : TYPE_COLORS.Glazing);
+      for (let j = 0; j < 3; j++) col2.setXYZ(t * 3 + j, c.r, c.g, c.b);
     });
-    col.needsUpdate = true;
+    col2.needsUpdate = true;
+    // The sashes themselves.
+    if (this.sashGroup) {
+      this.sashGroup.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); });
+      this.group.remove(this.sashGroup);
+    }
+    this.sashGroup = new THREE.Group();
+    const panels = [...swung].map((n) => ({ name: n, vertices: sashPanel(this.model.windows[n], sashes.get(n)) }));
+    if (panels.length) {
+      const mat = new THREE.MeshLambertMaterial({ color: OPEN_WINDOW, transparent: true, opacity: 0.6, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping });
+      const mesh = new THREE.Mesh(polygonGeometry(panels, this.origin, null), mat);
+      mesh.userData = { kind: 'window', items: panels.map((p) => this.model.windows[p.name]) };
+      // The rough openings stay clickable, unseen, so an inward-opening sash can be picked from outside.
+      const openings = [...swung].map((n) => this.model.windows[n]);
+      const pick = new THREE.Mesh(polygonGeometry(openings, this.origin, null, 0.02), new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }));
+      pick.userData = { kind: 'window', items: openings };
+      this.sashMesh = mesh;
+      this.openingPick = pick;
+      this.sashGroup.add(mesh, pick, new THREE.LineSegments(edgeGeometry(panels, this.origin), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.6, clippingPlanes: this.clipping })));
+    } else { this.sashMesh = null; this.openingPick = null; }
+    this.group.add(this.sashGroup);
     this.render();
   }
 
@@ -339,7 +400,7 @@ export class View3D {
     const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, this.camera);
-    const targets = [this.front, this.back, this.glass, this.doorMesh, ...(this.shading.visible ? [this.shading] : [])];
+    const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.shading.visible ? [this.shading] : [])];
     // Shading is drawn see-through, so the building behind it wins; shading is picked only on its own.
     const hits = ray.intersectObjects(targets, false).filter((h) => this.clipping.every((pl) => pl.distanceToPoint(h.point) >= 0));
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];
