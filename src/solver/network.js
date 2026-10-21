@@ -170,7 +170,8 @@ const climb = (p0, rho, h, g) => -p0 * (1 - Math.exp((-h * rho * g) / p0));
 // Solves the network at one moment.
 //   conditions.outdoor: { t, w, pressure (Pa), windSpeed (m/s at the weather station), windDirection (deg) }
 //   conditions.zones:   { [zone]: { t, w } }
-//   conditions.open:    { [link name]: venting open factor 0-1 } for windows under zone control
+//   conditions.open:    { [link name]: open factor 0-1 } for windows under zone control, or to open or
+//                       close any other window or door for this moment (doors are otherwise open)
 //   conditions.site:    { elevation, latitude }
 // Returns zone pressures (Pa, relative to outdoors at ground level) and each link's flow both ways (kg/s).
 export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations = 100 } = {}) {
@@ -195,7 +196,7 @@ export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations
     const rhoB = l.m < 0 ? rhoOutdoorClimb : density(outdoor.pressure, b.t, b.w);
     const stack = climb(outdoor.pressure, rhoA, l.z, g) - climb(outdoor.pressure, rhoB, l.z, g);
     let open = 1;
-    if (l.type === 'opening') open = l.control === 'open' ? l.openFactor : l.control === 'closed' ? 0 : (conditions.open?.[l.name] ?? 0);
+    if (l.type === 'opening') open = conditions.open?.[l.name] ?? (l.control === 'open' ? l.openFactor : 0);
     return { l, a, b, pOut, stack, open };
   });
 

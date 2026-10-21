@@ -115,6 +115,7 @@ button.quiet { background: transparent; color: var(--accent); }
 .pick-info div + div { margin-top: 4px; }
 .warning-text { color: var(--warning); }
 .pick-info button { margin-top: 6px; padding: 3px 10px; font-size: 13px; }
+.stale { margin: 0 0 8px; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--warning); color: var(--ink); font-size: 14px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; font-size: 13px; color: var(--ink-soft); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
@@ -172,11 +173,13 @@ footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
       <label title="Direction the wind comes from, in degrees clockwise from north (270 = west)">from <input type="number" id="wind-dir" value="270" min="0" max="359" step="15">°</label>
       <label title="Operable windows: all open as far as their operable fraction allows, all closed, or open in the zones whose natural ventilation ran in that hour of the results">Windows <select id="windows"><option value="open">All open</option><option value="closed">All closed</option><option value="results" disabled>As in results</option></select></label>
       <label title="Colour the particles by the temperature of the air they carry, or by its speed">Colour <select id="air-color"><option value="temperature">Temperature</option><option value="speed">Speed</option></select></label>
-      <button id="windows-reset" class="quiet" hidden title="Undo the windows opened or closed one by one, back to the Windows setting">Reset windows</button>
+      <label title="The interior doors the tool adds: all open, or all closed (a closed door still leaks, like a 1 cm gap under it)">Doors <select id="doors"><option value="open">Open</option><option value="closed">Closed</option></select></label>
+      <button id="windows-reset" class="quiet" hidden title="Undo the windows and doors opened or closed one by one, back to the Windows and Doors settings">Reset windows</button>
       <label title="How many particles to show for the same flow">Particles <input type="range" id="air-density" min="-2" max="2" step="0.5" value="0"> <output id="air-density-value">×1</output></label>
       <label title="How much faster than real time the particles move">Speed <input type="range" id="air-speed" min="1" max="30" value="5"> <output id="air-speed-value">×5</output></label>
       <output id="air-total"></output>
     </div>
+    <p class="stale" id="stale" hidden></p>
     <div class="viewer" id="viewer">
       <div class="pick-info" id="info" hidden></div>
     </div>

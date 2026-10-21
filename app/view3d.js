@@ -101,6 +101,9 @@ export class View3D {
     this.controls.zoomToCursor = true;
     this.controls.addEventListener('change', () => this.render());
     this.renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+    // A middle click would also start the browser's autoscroll, fighting the pan.
+    this.renderer.domElement.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+    this.renderer.domElement.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
     // Horizontal cut (hides what is above) and vertical section (hides one side); either can be off.
     this.cutPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), Infinity);

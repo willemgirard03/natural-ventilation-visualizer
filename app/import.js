@@ -56,7 +56,8 @@ function solveAir() {
       windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
     },
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
-    open: Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => {
+    open: Object.fromEntries(net.links.filter((l) => l.control === 'zone' || l.door).map((l) => {
+      if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : $('doors').value === 'open') ? l.openFactor : 0];
       const base = mode === 'open' || (mode === 'results' && !!inside(l.from).vent);
       const open = windowSet.has(l.name) ? windowSet.get(l.name) : roomSet.has(l.from) ? roomSet.get(l.from) : base;
       return [l.name, open ? l.openFactor : 0];
@@ -67,6 +68,12 @@ function solveAir() {
   airflow = { solution, flows, conditions };
   view.setOpenWindows(new Set(Object.entries(conditions.open).filter(([, f]) => f > 0).map(([n]) => n)));
   $('windows-reset').hidden = !windowSet.size && !roomSet.size;
+  // With a results file, temperatures belong to the results' own window states.
+  const differs = results && (mode !== 'results' || [...windowSet.keys()].some((n) => !n.endsWith(':door')) || roomSet.size);
+  $('stale').hidden = !differs;
+  if (differs) {
+    $('stale').textContent = `Windows differ from ${results.name}. Room temperatures are still the ones it recorded with its own windows, so the stack effect and two-way flows use temperatures that these windows would change over the following hours. A new EnergyPlus run would update them.`;
+  }
   // Pressure difference across every surface with a crack, seen from its own zone (its partner's is opposite).
   const dps = {};
   solution.links.forEach((r, i) => {
@@ -89,7 +96,7 @@ function solveAir() {
   const volume = Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0);
   const m3h = (flows.outdoorIn / 1.2) * 3600;
   // Which rooms have windows open this hour, so a still room is not mistaken for a fault.
-  const openZones = [...new Set(net.links.filter((l) => conditions.open[l.name] > 0).map((l) => l.from))];
+  const openZones = [...new Set(net.links.filter((l) => l.control === 'zone' && conditions.open[l.name] > 0).map((l) => l.from))];
   const ventilable = new Set(net.links.filter((l) => l.control === 'zone').map((l) => l.from)).size;
   const which = !openZones.length ? 'all windows closed' : openZones.length === ventilable ? 'windows open in every room that has them'
     : `windows open in ${openZones.length <= 3 ? openZones.join(', ') : `${openZones.length} of ${ventilable} rooms`}`;
@@ -138,7 +145,7 @@ $('info').addEventListener('click', (e) => {
   legend();
 });
 $('windows-reset').addEventListener('click', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
-$('windows').addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
+for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
 
 // Vertical section, along or across the footprint's long side.
 function applySection() {
@@ -191,7 +198,7 @@ async function loadWeather(name, read) {
 }
 // Results: each zone's temperature, humidity and ventilation for the hour picked.
 function setResults(r, name = '') {
-  results = r;
+  results = r ? { ...r, name } : null;
   const option = $('windows').querySelector('option[value=results]');
   option.disabled = !r;
   if (r) $('windows').value = 'results';
@@ -315,7 +322,7 @@ function showInfo(found) {
       `${fmt(item.area, 2)} m² · faces ${deg(item.azimuth)} from north · ${fmt(item.height, 2)} m tall`,
       item.operableFraction ? `Operable fraction ${fmt(item.operableFraction.value, 2)}` : 'Not operable');
   } else if (kind === 'door') {
-    rows.push(`<b>Door between ${esc(item.zone)} and ${esc(item.partnerZone)}</b>`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m, open`,
+    rows.push(`<b>Door between ${esc(item.zone)} and ${esc(item.partnerZone)}</b>`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m`,
       '<span class="muted">Added by the tool for the airflow network; the model has no interior openings here.</span>');
   } else if (kind === 'zone') {
     rows.push(`<b>Zone ${esc(item.name)}</b>`, `${fmt(item.floorArea.value, 1)} m² floor · ${fmt(item.volume.value, 0)} m³ · ${fmt(item.height, 2)} m high`);
@@ -350,9 +357,10 @@ function airLines(kind, item) {
   const r = airflow.solution.links[i], l = net.links[i], other = l.to ?? 'outdoors';
   const what = l.type === 'crack' ? 'Leakage' : 'Air';
   const lines = [`${what}: ${m3h(r.forward)} m³/h ${esc(l.from)} → ${esc(other)}, ${m3h(r.backward)} m³/h ${esc(other)} → ${esc(l.from)}`];
-  if (l.control === 'zone') {
-    const open = airflow.conditions.open[l.name] > 0;
-    lines.push(`<button class="quiet" data-act="window" data-name="${esc(l.name)}" data-open="${open ? 0 : 1}">${open ? 'Close' : 'Open'} this window</button>`);
+  if (l.control === 'zone' || l.door) {
+    const open = airflow.conditions.open[l.name] > 0, what = l.door ? 'door' : 'window';
+    if (l.door) lines.push(open ? 'Open' : `Closed: leaks like a 1 cm gap under it`);
+    lines.push(`<button class="quiet" data-act="window" data-name="${esc(l.name)}" data-open="${open ? 0 : 1}">${open ? 'Close' : 'Open'} this ${what}</button>`);
   }
   return lines;
 }
@@ -380,7 +388,7 @@ function legend() {
   }
   if (Object.keys(model.windows).length) items.push(chip(TYPE_COLORS.Glazing, $('show-air').checked ? 'Glazing, closed' : 'Glazing'));
   if ($('show-air').checked && airflow) {
-    const n = Object.values(airflow.conditions.open).filter((f) => f > 0).length;
+    const n = Object.entries(airflow.conditions.open).filter(([k, f]) => f > 0 && !k.endsWith(':door')).length;
     if (n) items.push(chip(OPEN_WINDOW, `Window open (${n})`, 'Open to its operable fraction in the airflow. Select a window or a room to open or close it.'));
   }
   if (view.doors.length) items.push(chip(TYPE_COLORS.Door, `Door, added (${view.doors.length})`, `The tool adds an open ${DOOR.width} × ${DOOR.height} m door between each room and the circulation zones it shares a wall with, and between adjoining circulation zones, so air can move through the building. Circulation is recognised by zone name (circulation, corridor, hall, lobby, stair, vestibule, foyer, atrium).`));

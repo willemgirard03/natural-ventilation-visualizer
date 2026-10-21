@@ -22,6 +22,9 @@ export const NETWORK_DEFAULTS = {
   // Leakage as volume flow at 50 Pa, the blower-door figure: m3/h per m2 of surface, per m of window edge.
   surfaceLeakage50: 1.0,
   windowLeakage50: 0.5,
+  // A closed interior door leaks like a gap of about 1 cm under it: about 180 m3/h at 50 Pa for a
+  // 0.9 x 2.1 m door, 30 m3/h per m of its edge.
+  doorLeakage50: 30,
   flowExponent: 0.65,
   doors: true, // add interior doors between rooms and circulation
 };
@@ -54,6 +57,7 @@ export function footprintAxis(model) {
 //   crack:   coefficient (kg/s at 1 Pa, reference conditions) and exponent
 //   opening: a window or door; open over openFactor of its width, or a crack along its edges when closed.
 //            control: 'zone' (follows the zone's venting control), 'open' (always) or 'closed' (never).
+// options.states: { [opening name]: true (open) | false (closed) } overrides an opening's control.
 export function networkElements(model, options = {}) {
   const o = { ...NETWORK_DEFAULTS, ...options };
   const links = [];
@@ -76,7 +80,10 @@ export function networkElements(model, options = {}) {
     links.push(opening({ name: w.name, from: w.zone, to: null, vertices: w.vertices, openFactor: fraction ? Math.min(1, fraction) : 1, control: fraction ? 'zone' : 'closed' }));
   }
   const doors = o.doors ? interiorDoors(model) : [];
-  for (const d of doors) links.push(opening({ name: d.name, from: d.zone, to: d.partnerZone, vertices: d.vertices, openFactor: 1, control: 'open', door: d }));
+  for (const d of doors) {
+    links.push(opening({ name: d.name, from: d.zone, to: d.partnerZone, vertices: d.vertices, openFactor: 1, control: 'open', door: d, closedCoefficient: coefficient(o.doorLeakage50, o.flowExponent) }));
+  }
+  if (o.states) for (const l of links) if (l.type === 'opening' && l.name in o.states) l.control = o.states[l.name] ? 'open' : 'closed';
   return { zones: Object.keys(model.zones), links, doors, options: o };
 }
 
