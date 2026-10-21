@@ -106,7 +106,9 @@ export class Tracer {
         if (ct >= 0 && g.zone[ct] === q.zone) q.p = tryP;
       }
     }
-    q.t += (this.zoneT[q.zone] - q.t) * (1 - Math.exp(-dt / MIX_TIME));
+    // The grid solver has a temperature field; otherwise parcels take on their room's over MIX_TIME.
+    if (this.field.temperatureAt) q.t = this.field.temperatureAt(q.p[0], q.p[1], q.p[2]);
+    else q.t += (this.zoneT[q.zone] - q.t) * (1 - Math.exp(-dt / MIX_TIME));
     return true;
   }
 

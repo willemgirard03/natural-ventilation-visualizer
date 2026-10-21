@@ -359,11 +359,12 @@ export class GridFlow {
   // For the particle tracer (tracer.js): the velocity through face d of cell c along its axis (null
   // when neither side is air), and whether air may cross the face. Walls between zones carry no flow,
   // so the zone a particle is in does not matter here.
+  // Read from the snapshot taken after each step, which is also all a copy fed by a worker has.
   faceVelocityAt(c, d) {
     const g = this.g;
-    if (c >= 0 && g.zone[c] >= 0) return this.faceVal(c, d);
+    if (c >= 0 && g.zone[c] >= 0) return this.FV[c * 6 + d];
     const nb = c >= 0 ? neighbour(g, c, d) : -1;
-    if (nb >= 0 && g.zone[nb] >= 0) return this.faceVal(nb, d ^ 1);
+    if (nb >= 0 && g.zone[nb] >= 0) return this.FV[nb * 6 + (d ^ 1)];
     return null;
   }
   isOpenFace(c, d) { return this.kind[c * 6 + d] === OPEN; }
@@ -371,7 +372,7 @@ export class GridFlow {
   // Cell-centre velocities (m/s, three per cell), for colouring and checks.
   get velocity() {
     const v = new Float32Array(this.g.zone.length * 3);
-    for (const c of this.fluid) for (let a = 0; a < 3; a++) v[c * 3 + a] = (this.faceVal(c, 2 * a) + this.faceVal(c, 2 * a + 1)) / 2;
+    for (const c of this.fluid) for (let a = 0; a < 3; a++) v[c * 3 + a] = (this.FV[c * 6 + 2 * a] + this.FV[c * 6 + 2 * a + 1]) / 2;
     return v;
   }
 }

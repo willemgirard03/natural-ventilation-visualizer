@@ -16,7 +16,7 @@ Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findi
 | --- | --- |
 | `prototype/section-airflow.html` | Phase 1 2D section prototype. Open it in any browser. |
 | `src/model/` | Project model: `.epJSON` importer and exporter, airflow network export, tool-added interior doors, geometry, constructions, schedules. Plain JavaScript modules, no build step. |
-| `src/solver/` | Airflow network solver (zone pressures and flows through every crack, window and door, matching EnergyPlus), flow streams, and ideal flow inside rooms on a grid of cells. |
+| `src/solver/` | Airflow network solver (zone pressures and flows through every crack, window and door, matching EnergyPlus), flow streams, ideal flow inside rooms, the 3D grid solver (buoyancy, heat gains, flow through doors) and the particle tracer. |
 | `app/import.html` | Model import page: load an `.epJSON`, see it in 3D, see zones, windows, constructions and model checks, export it again. |
 | `app/view3d.js` | 3D view of the model (three.js): surfaces by type or zone, windows, shading, a horizontal cut, selection, model-check problems in red. |
 | `app/particles.js` | Airflow particles in the 3D view, carried by the room flow field. |

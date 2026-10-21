@@ -6,6 +6,7 @@ import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
 import { voxelize, prepareRoomFlow, roomFlow } from '../src/solver/roomflow.js';
+import { GridFlow } from '../src/solver/grid.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
@@ -35,6 +36,26 @@ const air = new AirflowParticles(view);
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
 let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room flow, and its latest field
 let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour solved
+// The grid solver runs in a worker; `grid` is the page's copy, reading the worker's latest step.
+let worker = null, grid = null, gridLive = false;
+function startGrid(m) {
+  worker?.terminate();
+  worker = null; grid = null; gridLive = false;
+  $('room-air-status').textContent = '';
+  if ($('room-air').value !== 'grid') return;
+  grid = new GridFlow(rooms, m);
+  worker = new Worker(new URL('./grid-worker.js', import.meta.url), { type: 'module' });
+  worker.onmessage = ({ data }) => {
+    if (data.type !== 'state' || !grid) return;
+    grid.FV.set(data.FV);
+    grid.T.set(data.T);
+    if (!gridLive && airflow) { gridLive = true; air.clear(); air.setField(grid, airflow.conditions); }
+    const pace = data.dt / (data.ms / 1000);
+    $('room-air-status').textContent = `${fmt(grid.fluid.length / 1000, 0)}k cells · ${fmt(pace, 1)}× real time`;
+    $('room-air-status').title = `Simulated air time ${fmt(data.time, 0)} s; this step ${fmt(data.ms, 0)} ms for ${fmt(data.dt, 2)} s of air, ${data.iterations} pressure iterations.`;
+  };
+  worker.postMessage({ type: 'model', epjson: m.epjson });
+}
 // Windows opened or closed one by one (by window name) or room by room (by zone), over the Windows setting.
 const windowSet = new Map(), roomSet = new Map();
 // Sashes set window by window ({ type, hinge }), over the Sashes setting.
@@ -111,13 +132,23 @@ function solveAir() {
   pressureRange = [0.5, 1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100].find((x) => x >= top) || Math.ceil(top);
   view.setPressures(dps, pressureRange);
   if ($('color-by').value === 'pressure') legend();
-  // The room flow takes a few hundred milliseconds, so it follows once the controls settle.
-  clearTimeout(fieldTimer);
-  fieldTimer = setTimeout(() => {
-    if (!rooms || airflow?.flows !== flows) return;
-    field = roomFlow(rooms, flows, { previous: field, open: conditions.open });
-    air.setField(field, conditions);
-  }, 120);
+  if ($('room-air').value === 'grid') {
+    // Simulated: the background solver takes the new conditions; the page's copy of the grid follows.
+    if (grid && worker) {
+      const hour = hourIndex(Number($('day').value), Number($('hour').value));
+      grid.setConditions(flows, conditions, { hour });
+      worker.postMessage({ type: 'conditions', conditions, hour });
+      if (gridLive) air.setField(grid, conditions);
+    }
+  } else {
+    // Ideal flow takes a few hundred milliseconds, so it follows once the controls settle.
+    clearTimeout(fieldTimer);
+    fieldTimer = setTimeout(() => {
+      if (!rooms || airflow?.flows !== flows) return;
+      field = roomFlow(rooms, flows, { previous: field, open: conditions.open });
+      air.setField(field, conditions);
+    }, 120);
+  }
   const volume = Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0);
   const m3h = (flows.outdoorIn / 1.2) * 3600;
   // Which rooms have windows open this hour, so a still room is not mistaken for a fault.
@@ -560,6 +591,13 @@ $('cut').addEventListener('input', (e) => {
 $('color-by').addEventListener('change', (e) => { view.setColorBy(e.target.value); legend(); });
 $('show-shading').addEventListener('change', (e) => view.setShadingVisible(e.target.checked));
 $('walls').addEventListener('change', (e) => view.setWalls(e.target.value));
+$('room-air').addEventListener('change', () => {
+  if (!model) return;
+  air.clear();
+  startGrid(model);
+  if ($('room-air').value !== 'grid') field = null;
+  solveAir();
+});
 $('window-depth').addEventListener('change', (e) => view.setWindowDepth(e.target.value));
 view.windowDepth = $('window-depth').value;
 $('fit').addEventListener('click', () => { view.setCut(null); showCut(null); view.frame(); });
@@ -628,6 +666,7 @@ function render(m) {
   net = buildNetwork(m);
   rooms = prepareRoomFlow(voxelize(m), net);
   field = null;
+  startGrid(m);
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   $('results-file').value = '';
   windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();
