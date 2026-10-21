@@ -52,7 +52,7 @@ export function parseEso(text, keep) {
 }
 
 // Streams a ReadableStream of bytes (a File's or a fetch response's) through the parser.
-export async function readEsoStream(stream, keep, onProgress = () => {}) {
+export async function readEsoStream(stream, keep, onProgress) {
   const p = new EsoParser(keep), decoder = new TextDecoder();
   const reader = stream.getReader();
   let bytes = 0;
@@ -61,7 +61,7 @@ export async function readEsoStream(stream, keep, onProgress = () => {}) {
     if (done) break;
     bytes += value.length;
     p.push(decoder.decode(value, { stream: true }));
-    onProgress(bytes);
+    onProgress?.(bytes);
   }
   p.push(decoder.decode());
   return p.finish();

@@ -60,3 +60,18 @@ test('zone results from ClimateStudio: every zone, every hour, streamed like the
   const z = zoneAt(r, '2F_Office_8', 196 * 24 + 14);
   assert.ok(z.t > 10 && z.t < 40 && z.w > 0.002 && z.w < 0.02);
 });
+
+test('a rerun week is laid over a year of results, window openings included', async () => {
+  const { mergeResults, windowAt, zoneAt } = await import('../src/model/results.js');
+  const year = { hours: 8760, zones: { A: { t: new Array(8760).fill(20), rh: new Array(8760).fill(50), w: null, vent: null } }, windows: {} };
+  const week = { hours: 168, zones: { A: { t: new Array(168).fill(25), rh: null, w: new Array(168).fill(0.009), vent: new Array(168).fill(true) } }, windows: { 'A:W0': new Array(168).fill(0.4) } };
+  const start = 189 * 24; // 9 July
+  const m = mergeResults(year, week, start);
+  assert.equal(zoneAt(m, 'A', start - 1).t, 20);
+  assert.equal(zoneAt(m, 'A', start).t, 25);
+  assert.equal(zoneAt(m, 'A', start).w, 0.009);
+  assert.equal(zoneAt(m, 'A', start + 168).t, 20);
+  assert.equal(windowAt(m, 'a:w0', start + 3), 0.4);
+  assert.equal(windowAt(m, 'A:W0', start - 1), null);
+  assert.equal(year.zones.A.t[start], 20, 'the year itself is left unchanged');
+});

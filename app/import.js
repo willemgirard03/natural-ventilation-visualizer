@@ -1,7 +1,7 @@
 import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
 import { View3D, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE } from './view3d.js';
-import { footprintAxis } from '../src/model/airflow-network.js';
+import { footprintAxis, toAirflowNetwork } from '../src/model/airflow-network.js';
 import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
@@ -10,7 +10,7 @@ import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
-import { readZoneResultsStream, zoneAt } from '../src/model/results.js';
+import { readZoneResultsStream, zoneAt, windowAt, mergeResults } from '../src/model/results.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -58,6 +58,9 @@ function solveAir() {
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
     open: Object.fromEntries(net.links.filter((l) => l.control === 'zone' || l.door).map((l) => {
       if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : $('doors').value === 'open') ? l.openFactor : 0];
+      // As in results: an airflow network run gives each window's opening; otherwise the zone's ventilation.
+      const reported = mode === 'results' && results ? windowAt(results, l.name, hourAt) : null;
+      if (reported !== null && !windowSet.has(l.name) && !roomSet.has(l.from)) return [l.name, reported];
       const base = mode === 'open' || (mode === 'results' && !!inside(l.from).vent);
       const open = windowSet.has(l.name) ? windowSet.get(l.name) : roomSet.has(l.from) ? roomSet.get(l.from) : base;
       return [l.name, open ? l.openFactor : 0];
@@ -71,8 +74,10 @@ function solveAir() {
   // With a results file, temperatures belong to the results' own window states.
   const differs = results && (mode !== 'results' || [...windowSet.keys()].some((n) => !n.endsWith(':door')) || roomSet.size);
   $('stale').hidden = !differs;
-  if (differs) {
-    $('stale').textContent = `Windows differ from ${results.name}. Room temperatures are still the ones it recorded with its own windows, so the stack effect and two-way flows use temperatures that these windows would change over the following hours. A new EnergyPlus run would update them.`;
+  if (differs && !rerunning) {
+    const [a, b] = rerunWeek();
+    $('stale').innerHTML = `Windows differ from ${esc(results.name)}. Room temperatures are still the ones it recorded with its own windows, so the stack effect and two-way flows use temperatures that these windows would change over the following hours. `
+      + `<button class="quiet" id="rerun">Rerun ${esc(dateOf(a).label)}–${esc(dateOf(b).label)} in EnergyPlus</button> (about 20 s, with these windows and doors)`;
   }
   // Pressure difference across every surface with a crack, seen from its own zone (its partner's is opposite).
   const dps = {};
@@ -131,6 +136,63 @@ $('show-air').addEventListener('change', (e) => {
   if (e.target.checked) { solveAir(); air.play(); } else { air.stop(); air.clear(); }
   legend();
 });
+// Rerunning EnergyPlus for the week ending on the day picked, with the windows and doors as set now:
+// the tool's airflow network model, run by the dev server, its results laid over the loaded ones.
+let rerunning = false;
+function rerunWeek() {
+  const end = Number($('day').value);
+  return [Math.max(1, end - 6), end];
+}
+function linkStates() {
+  const mode = $('windows').value, states = {};
+  for (const l of net.links) {
+    if (l.door) {
+      if (windowSet.has(l.name)) states[l.name] = windowSet.get(l.name);
+      else if ($('doors').value === 'closed') states[l.name] = false;
+    } else if (l.control === 'zone') {
+      if (windowSet.has(l.name)) states[l.name] = windowSet.get(l.name);
+      else if (roomSet.has(l.from)) states[l.name] = roomSet.get(l.from);
+      else if (mode !== 'results') states[l.name] = mode === 'open';
+      // else: left to the zone's control, opening above 25 degC as in ClimateStudio
+    }
+  }
+  return states;
+}
+async function rerun() {
+  if (rerunning || !results || !weather) return;
+  const file = $('weather-file').value;
+  if (!file || $('weather-file').selectedOptions[0].file) {
+    $('stale').textContent = 'A rerun needs one of the weather files the server offers; pick one under Weather.';
+    return;
+  }
+  const [a, b] = rerunWeek(), da = dateOf(a), db = dateOf(b);
+  const forModel = model, label = `${da.label}–${db.label}`;
+  const epjson = toAirflowNetwork(model, { states: linkStates(), runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true });
+  rerunning = true;
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('stale').textContent = `Running EnergyPlus for ${label}… ${Math.round((Date.now() - t0) / 1000)} s`; }, 500);
+  try {
+    const res = await fetch('/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ epjson, weather: file }) });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error);
+    const eso = await fetch(out.eso);
+    const week = await readZoneResultsStream(eso.body, forModel, null, { hours: (b - a + 1) * 24 });
+    if (model !== forModel) return;
+    const merged = mergeResults(results, week, hourIndex(a, 1));
+    windowSet.clear(); roomSet.clear(); // the run now holds these choices
+    $('windows').value = 'results';
+    clearInterval(tick);
+    rerunning = false;
+    setResults(merged, `${results.name.replace(/; rerun .*$/, '')}; rerun ${label} (${Math.round(out.seconds)} s)`);
+  } catch (err) {
+    $('stale').textContent = `The rerun did not finish: ${err.message}`;
+  } finally {
+    clearInterval(tick);
+    rerunning = false;
+  }
+}
+$('stale').addEventListener('click', (e) => { if (e.target.id === 'rerun') rerun(); });
+
 // Opening and closing windows one by one or room by room, from the details of what is selected.
 $('info').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-act]');

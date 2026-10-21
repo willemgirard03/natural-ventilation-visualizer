@@ -4,7 +4,8 @@
 //   node tools/serve.mjs [port]
 
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { createReadStream, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,8 +26,46 @@ const EXAMPLES = [
 const WEATHER = path.join(A2, 'Weather Files');
 const weatherFiles = () => (existsSync(WEATHER) ? readdirSync(WEATHER).filter((f) => f.toLowerCase().endsWith('.epw')) : []);
 
+// EnergyPlus runs for the page: the network model it built (posted as JSON), run with one of the
+// weather files above, results written under runs/live (ignored by Git). One run at a time.
+// EnergyPlus must be on an internal drive (it crashes on the exFAT project drive); run
+// tools/run_alignment.py once to copy it there.
+const EPLUS = path.join(process.env.EPLUS_DIR || 'C:/EnergyPlus-23.1.0', 'energyplus.exe');
+let running = false;
+async function runEnergyPlus(req, res) {
+  const json = (code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+  if (running) return json(409, { error: 'EnergyPlus is already running.' });
+  if (!existsSync(EPLUS)) return json(503, { error: `EnergyPlus not found at ${EPLUS}. Run tools/run_alignment.py once to set it up.` });
+  let body = '';
+  for await (const chunk of req) { body += chunk; if (body.length > 50e6) return json(413, { error: 'Model too large.' }); }
+  let input;
+  try { input = JSON.parse(body); } catch { return json(400, { error: 'Not JSON.' }); }
+  if (!weatherFiles().includes(input.weather)) return json(400, { error: 'Pick one of the weather files the server offers.' });
+  running = true;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dir = path.join(ROOT, 'runs', 'live', stamp);
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'run.epJSON'), JSON.stringify(input.epjson));
+    const start = Date.now();
+    const code = await new Promise((resolve) => {
+      const p = spawn(EPLUS, ['-w', path.join(WEATHER, input.weather), '-d', dir, '-p', 'run', '-s', 'C', path.join(dir, 'run.epJSON')], { stdio: 'ignore' });
+      p.on('error', () => resolve(-1));
+      p.on('close', resolve);
+    });
+    await rm(path.join(dir, 'runShading.csv'), { force: true });
+    const err = await readFile(path.join(dir, 'run.err'), 'utf8').catch(() => '');
+    const summary = err.trim().split(/\r?\n/).pop() || '';
+    if (code !== 0) return json(500, { error: `EnergyPlus failed (exit ${code}): ${summary.trim()}` });
+    json(200, { seconds: (Date.now() - start) / 1000, summary: summary.trim(), eso: `/runs/live/${stamp}/run.eso` });
+  } finally {
+    running = false;
+  }
+}
+
 createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/run' && req.method === 'POST') return runEnergyPlus(req, res);
   // ClimateStudio's results for each example (zone temperatures), streamed: they run to 150 MB.
   if (url.pathname === '/results/') {
     const found = EXAMPLES.map((e) => ({ ...e, results: e.file.replace(/\.epJSON$/, 'out.eso') })).filter((e) => existsSync(e.results))

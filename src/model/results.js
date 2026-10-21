@@ -8,21 +8,26 @@ import { humidityRatioFromRH } from './weather.js';
 const WANTED = [
   'Zone Mean Air Temperature', 'Zone Air Humidity Ratio', 'Zone Air Relative Humidity',
   'Zone Ventilation Total Heat Loss Energy', 'Zone Ventilation Total Heat Gain Energy',
-  'AFN Zone Ventilation Air Change Rate',
+  'AFN Zone Ventilation Air Change Rate', 'AFN Surface Venting Window or Door Opening Factor',
 ];
 export const keepZoneResults = (key, variable) => WANTED.includes(variable);
 
-export const readZoneResultsStream = (stream, model, onProgress) =>
-  readEsoStream(stream, keepZoneResults, onProgress).then((eso) => zoneResults(eso, model));
+export const readZoneResultsStream = (stream, model, onProgress, options) =>
+  readEsoStream(stream, keepZoneResults, onProgress).then((eso) => zoneResults(eso, model, options));
 
-// Hourly series (the last 8,760 values, after any sizing periods) for one zone and variable.
-function hourly(eso, variable, zone) {
-  const h = eso.find(variable, zone, 'Hourly');
-  if (h && h.length >= 8760) return h.slice(-8760);
-  const t = eso.find(variable, zone, 'TimeStep');
-  if (!t || t.length < 8760 || t.length % 8760) return null;
-  const per = t.length / 8760, v = t.slice(-8760 * per), out = new Array(8760);
-  for (let i = 0; i < 8760; i++) {
+// How far a window or door was open in the results at an hour index (0 to 1), or null if not reported.
+export const windowAt = (results, name, i) => results.windows?.[String(name).toUpperCase()]?.[i] ?? null;
+
+// Hourly series for one zone (or surface) and variable: hourly values where reported, finer ones
+// averaged to hours. A year-long run gives 8,760 (the last ones, after any sizing periods); a shorter
+// run, its own hours.
+function hourly(eso, variable, key, hours) {
+  const h = eso.find(variable, key, 'Hourly');
+  if (h && h.length >= hours) return h.slice(-hours);
+  const t = eso.find(variable, key, 'TimeStep');
+  if (!t || t.length < hours || t.length % hours) return null;
+  const per = t.length / hours, v = t.slice(-hours * per), out = new Array(hours);
+  for (let i = 0; i < hours; i++) {
     let s = 0;
     for (let k = 0; k < per; k++) s += v[i * per + k];
     out[i] = s / per;
@@ -30,30 +35,62 @@ function hourly(eso, variable, zone) {
   return out;
 }
 
-// { zones: { [model zone]: { t, w?, rh?, vent? } (8,760 values each) }, missing: [zone names] }
-export function zoneResults(eso, model) {
+// { zones: { [model zone]: { t, w?, rh?, vent? } }, windows: { [WINDOW OR DOOR NAME]: open factor },
+//   hours, missing: [zone names] }. hours: 8,760 for a year, or the run's length.
+export function zoneResults(eso, model, { hours = 8760 } = {}) {
   const zones = {}, missing = [];
   for (const name of Object.keys(model.zones)) {
-    const t = hourly(eso, 'Zone Mean Air Temperature', name);
+    const t = hourly(eso, 'Zone Mean Air Temperature', name, hours);
     if (!t) { missing.push(name); continue; }
-    const loss = hourly(eso, 'Zone Ventilation Total Heat Loss Energy', name);
-    const gain = hourly(eso, 'Zone Ventilation Total Heat Gain Energy', name);
-    const ach = hourly(eso, 'AFN Zone Ventilation Air Change Rate', name);
+    const loss = hourly(eso, 'Zone Ventilation Total Heat Loss Energy', name, hours);
+    const gain = hourly(eso, 'Zone Ventilation Total Heat Gain Energy', name, hours);
+    const ach = hourly(eso, 'AFN Zone Ventilation Air Change Rate', name, hours);
     zones[name] = {
       t,
-      w: hourly(eso, 'Zone Air Humidity Ratio', name),
-      rh: hourly(eso, 'Zone Air Relative Humidity', name),
+      w: hourly(eso, 'Zone Air Humidity Ratio', name, hours),
+      rh: hourly(eso, 'Zone Air Relative Humidity', name, hours),
       // Ventilation ran in an hour if it moved any heat (simple airflow) or air (airflow network).
       vent: loss || gain || ach ? t.map((_, i) => (loss?.[i] || 0) + (gain?.[i] || 0) + (ach?.[i] || 0) > 0) : null,
     };
   }
-  return { zones, missing };
+  // An airflow network run also reports how far each window and door was open, hour by hour.
+  const windows = {};
+  for (const key of eso.series.keys()) {
+    const [name, variable] = key.split('|');
+    if (variable !== 'AFN Surface Venting Window or Door Opening Factor') continue;
+    const f = hourly(eso, variable, name, hours);
+    if (f) windows[name] = f;
+  }
+  return { zones, windows, hours, missing };
+}
+
+// A shorter run's results laid over a year's from hour index `start` on: zone conditions and window
+// openings for those hours are replaced; the rest of the year is kept.
+export function mergeResults(year, part, start) {
+  const zones = {}, windows = {};
+  for (const [name, z] of Object.entries(year.zones)) {
+    const p = part.zones[name];
+    zones[name] = Object.fromEntries(Object.entries(z).map(([k, arr]) => {
+      if (!arr || !p?.[k]) return [k, arr];
+      const out = arr.slice();
+      p[k].forEach((x, i) => { if (start + i < out.length) out[start + i] = x; });
+      return [k, out];
+    }));
+    // A year without humidity ratio keeps relative humidity; where the part has a ratio, use it there.
+    if (p?.w && !z.w) zones[name].w = z.t.map((_, i) => (i >= start && i < start + p.w.length ? p.w[i - start] : null));
+  }
+  for (const [name, f] of Object.entries(part.windows)) {
+    const out = (year.windows?.[name] || new Array(year.hours).fill(null)).slice();
+    f.forEach((x, i) => { if (start + i < out.length) out[start + i] = x; });
+    windows[name] = out;
+  }
+  return { ...year, zones, windows: { ...year.windows, ...windows } };
 }
 
 // One zone's conditions at an hour index (0 to 8759); pressure (Pa) for humidity from relative humidity.
 export function zoneAt(results, zone, i, pressure = 101325) {
   const z = results.zones[zone];
   if (!z) return null;
-  const w = z.w ? z.w[i] : z.rh ? humidityRatioFromRH(z.t[i], z.rh[i], pressure) : 0.008;
+  const w = z.w?.[i] ?? (z.rh ? humidityRatioFromRH(z.t[i], z.rh[i], pressure) : 0.008);
   return { t: z.t[i], w, vent: z.vent ? z.vent[i] : null };
 }
