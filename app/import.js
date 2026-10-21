@@ -11,7 +11,7 @@ import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './p
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { readZoneResultsStream, zoneAt, windowAt, mergeResults } from '../src/model/results.js';
-import { SASH_TYPES, sashAngle } from '../src/model/sash.js';
+import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -42,6 +42,14 @@ const sashSet = new Map();
 const sashOf = (name) => ({ type: $('sash-type').value, hinge: 'left', ...sashSet.get(name) });
 // How a window's sash opens to give `fraction` of its rough opening: { angle, fraction, reachable, maxFraction }.
 const sashFor = (l, fraction) => sashAngle(sashOf(l.name).type, l.width, l.height, fraction);
+// Each window's opening amount: 0 to 1 of its sash's travel (1 = at the mechanism's limit). By default,
+// the amount that frees the model's operable fraction (ClimateStudio's 0.8 in the examples).
+const amountSet = new Map();
+const maxAngleOf = (l) => SASH_TYPES[sashOf(l.name).type].maxAngle;
+const defaultAmount = (l) => Math.min(1, sashFor(l, l.openFactor).angle / maxAngleOf(l));
+const amountOf = (l) => (amountSet.has(l.name) ? amountSet.get(l.name) : defaultAmount(l));
+// The free fraction of the opening at a window's amount: the opening factor EnergyPlus gets.
+const openFraction = (l) => freeFraction(sashOf(l.name).type, l.width, l.height, amountOf(l) * maxAngleOf(l));
 let weather = null, weatherHour = null; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
 
@@ -70,13 +78,14 @@ function solveAir() {
       if (reported !== null && !windowSet.has(l.name) && !roomSet.has(l.from)) return [l.name, reported > 0 ? sashFor(l, reported).fraction : 0];
       const base = mode === 'open' || (mode === 'results' && !!inside(l.from).vent);
       const open = windowSet.has(l.name) ? windowSet.get(l.name) : roomSet.has(l.from) ? roomSet.get(l.from) : base;
-      return [l.name, open ? sashFor(l, l.openFactor).fraction : 0];
+      return [l.name, open ? openFraction(l) : 0];
     })),
   };
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   airflow = { solution, flows, conditions };
   const openNow = Object.entries(conditions.open).filter(([n, f]) => f > 0 && !n.endsWith(':door')).map(([n]) => n);
+  view.setOpenDoors(new Set(Object.entries(conditions.open).filter(([n, f]) => f > 0 && n.endsWith(':door')).map(([n]) => n)));
   view.setOpenWindows(new Set(openNow), new Map(openNow.map((n) => {
     const l = net.links.find((x) => x.name === n);
     return [n, { ...sashOf(n), angle: sashFor(l, conditions.open[n]).angle }];
@@ -179,7 +188,7 @@ async function rerun() {
   const [a, b] = rerunWeek(), da = dateOf(a), db = dateOf(b);
   const forModel = model, label = `${da.label}–${db.label}`;
   // Windows open as far as their sashes allow; EnergyPlus's control then opens them up to that.
-  const openFactors = Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, sashFor(l, l.openFactor).fraction]));
+  const openFactors = Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, openFraction(l)]));
   const epjson = toAirflowNetwork(model, { states: linkStates(), openFactors, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true });
   rerunning = true;
   const t0 = Date.now();
@@ -223,6 +232,7 @@ $('info').addEventListener('click', (e) => {
 $('info').addEventListener('change', (e) => {
   if (e.target.dataset?.act !== 'sash') return;
   sashSet.set(e.target.dataset.name, { ...sashSet.get(e.target.dataset.name), type: e.target.value });
+  amountSet.delete(e.target.dataset.name); // a new mechanism: back to the amount that frees the model's fraction
   solveAir();
   showInfo(view.find(selected));
 });
@@ -234,7 +244,17 @@ $('info').addEventListener('click', (e) => {
   solveAir();
   showInfo(view.find(selected));
 });
-$('sash-type').addEventListener('change', () => { sashSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); });
+$('sash-type').addEventListener('change', () => { sashSet.clear(); amountSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); });
+// The opening amount slider in a window's details: the window opens to it as the slider moves.
+$('info').addEventListener('input', (e) => {
+  if (e.target.dataset?.act !== 'amount') return;
+  const name = e.target.dataset.name, a = Number(e.target.value) / 100, l = net.links.find((x) => x.name === name);
+  amountSet.set(name, a);
+  windowSet.set(name, a > 0);
+  solveAir();
+  const out = $('info').querySelector(`output[data-for="${CSS.escape(name)}"]`);
+  if (out) out.textContent = amountText(l);
+});
 $('windows-reset').addEventListener('click', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
 for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
 
@@ -454,7 +474,7 @@ function airLines(kind, item) {
     const types = Object.entries(SASH_TYPES).map(([k, t]) => `<option value="${k}"${k === s.type ? ' selected' : ''}>${t.label}</option>`).join('');
     lines.push(`Sash <select data-act="sash" data-name="${esc(l.name)}" title="${esc(Object.values(SASH_TYPES).map((t) => `${t.label}: ${t.help}, up to ${t.maxAngle}°`).join('. '))}">${types}</select>`
       + (s.type === 'casement' ? ` <button class="quiet" data-act="hinge" data-name="${esc(l.name)}">hinged ${s.hinge}</button>` : ''));
-    lines.push(now > 0 ? `Open ${fmt(sashFor(l, now).angle, 0)}°, ${fmt(100 * now, 0)}% of the opening free` : 'Closed');
+    lines.push(`Opening <input type="range" data-act="amount" data-name="${esc(l.name)}" min="0" max="100" step="1" value="${Math.round(100 * (now > 0 ? sashFor(l, now).angle / maxAngleOf(l) : amountOf(l)))}" title="How far the sash opens, as a share of its travel (100% = ${maxAngleOf(l)}°, the mechanism's limit)"> <output data-for="${esc(l.name)}">${esc(amountText(l))}</output>`);
     if (!need.reachable) {
       lines.push(`<span class="warning-text">At its ${SASH_TYPES[s.type].maxAngle}° limit this sash frees ${fmt(100 * need.maxFraction, 0)}% of the opening, not the ${fmt(100 * l.openFactor, 0)}% the model asks for; the airflow uses ${fmt(100 * need.maxFraction, 0)}%.</span>`);
     }
@@ -465,6 +485,15 @@ function airLines(kind, item) {
     lines.push(`<button class="quiet" data-act="window" data-name="${esc(l.name)}" data-open="${open ? 0 : 1}">${open ? 'Close' : 'Open'} this ${what}</button>`);
   }
   return lines;
+}
+
+// What a window's opening amount gives now: its angle, the free share of the opening, and the opening
+// factor EnergyPlus gets; or closed.
+function amountText(l) {
+  const now = airflow.conditions.open[l.name];
+  if (!(now > 0)) return 'closed';
+  const angle = sashFor(l, now).angle;
+  return `${fmt((100 * angle) / maxAngleOf(l), 0)}% of its travel: ${fmt(angle, 0)}°, ${fmt(100 * now, 0)}% free (EnergyPlus opening factor ${fmt(now, 2)})`;
 }
 
 // A button to open or close all of a room's operable windows, for the room or one of its surfaces.
@@ -530,6 +559,7 @@ $('cut').addEventListener('input', (e) => {
 });
 $('color-by').addEventListener('change', (e) => { view.setColorBy(e.target.value); legend(); });
 $('show-shading').addEventListener('change', (e) => view.setShadingVisible(e.target.checked));
+$('walls').addEventListener('change', (e) => view.setWalls(e.target.value));
 $('fit').addEventListener('click', () => { view.setCut(null); showCut(null); view.frame(); });
 
 function render(m) {
@@ -592,13 +622,13 @@ function render(m) {
 
   $('results').hidden = false;
   view.resize();
-  view.setModel(m, { doors: interiorDoors(m) });
+  view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value });
   net = buildNetwork(m);
   rooms = prepareRoomFlow(voxelize(m), net);
   field = null;
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   $('results-file').value = '';
-  windowSet.clear(); roomSet.clear(); sashSet.clear();
+  windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();
   $('section').value = '';
   applySection();
   setResults(null); // results belong to the previous model; this also solves the network

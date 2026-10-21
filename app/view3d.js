@@ -8,6 +8,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { area, bounds, triangulate, unitNormal } from '../src/model/geometry.js';
+import { surfaceTriangles } from './solids.js';
 
 // ClimateStudio's surface types, plus glazing and shading.
 export const TYPE_COLORS = {
@@ -182,10 +183,11 @@ export class View3D {
   }
 
   // doors: openings the tool adds (interior-doors.js), drawn on both sides of their wall.
-  setModel(model, { doors = [] } = {}) {
+  setModel(model, { doors = [], walls = this.walls || 'thin' } = {}) {
     this.clear();
     this.model = model;
     this.doors = doors;
+    this.walls = walls;
     this.swung = null;
     this.sashMesh = null;
     this.openingPick = null;
@@ -199,7 +201,7 @@ export class View3D {
 
     // Surfaces, drawn in their colour on the side they face (out of the zone) and darker behind.
     // Paired interzone surfaces sit on top of each other facing opposite ways, so each side shows one.
-    const geo = polygonGeometry(this.surfaces, this.origin, (s) => this.surfaceColor(s));
+    const geo = this.surfaceGeometry();
     const front = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide, clippingPlanes: this.clipping });
     const back = new THREE.MeshLambertMaterial({ vertexColors: true, color: INSIDE_SHADE, side: THREE.BackSide, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
     this.front = new THREE.Mesh(geo, front);
@@ -219,12 +221,73 @@ export class View3D {
     this.doorMesh = new THREE.Mesh(polygonGeometry(doors, this.origin, null), doorMat);
     this.doorMesh.userData = { kind: 'door', items: doors };
 
-    this.edges = new THREE.LineSegments(edgeGeometry([...this.surfaces, ...this.windows, ...doors], this.origin),
-      new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
+    this.edges = new THREE.LineSegments(this.edgesGeometry(), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
 
     this.group.add(this.front, this.back, this.glass, this.doorMesh, this.shading, this.edges, this.problemLayer());
     this.setCut(null);
     this.frame();
+  }
+
+  // Surfaces with their windows and doors cut out: thin, as modelled, or as solids of their
+  // construction's thickness about the location line (this.walls: 'thin', 'interior', 'centre' or
+  // 'exterior'). owner[i] is the index in this.surfaces of triangle i, for picking and colouring.
+  surfaceGeometry() {
+    const thick = this.walls && this.walls !== 'thin';
+    const holes = new Map();
+    const hole = (surface, pts) => holes.set(surface, [...(holes.get(surface) || []), pts]);
+    for (const w of this.windows) hole(w.parent, w.vertices);
+    for (const d of this.doors) { hole(d.surface, d.vertices); hole(d.partnerSurface, d.partnerVertices); }
+    const pos = [], col = [], owner = [], c = new THREE.Color();
+    this.surfaces.forEach((s, k) => {
+      const shared = s.boundary === 'Surface' && s.adjacentSurface;
+      if (thick && shared && s.name > s.adjacentSurface) return; // drawn once for the pair
+      const t = thick ? this.model.constructions[s.construction]?.thickness || 0.2 : 0;
+      let tris;
+      try { tris = surfaceTriangles(s.vertices, holes.get(s.name) || [], this.origin, t, shared ? 'centre' : this.walls); } catch { tris = []; }
+      if (!tris.length) { // an outline the cutter cannot handle: drawn as before, without holes
+        tris = [];
+        for (const tri of triangulate(s.vertices)) for (const i of tri) tris.push(...s.vertices[i].map((x, j) => x - this.origin[j]));
+      }
+      c.set(this.surfaceColor(s));
+      for (let i = 0; i < tris.length; i += 3) { pos.push(tris[i], tris[i + 1], tris[i + 2]); col.push(c.r, c.g, c.b); }
+      for (let i = 0; i < tris.length / 9; i++) owner.push(k);
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.computeVertexNormals();
+    g.userData.owner = owner;
+    return g;
+  }
+
+  // Outlines: of the modelled polygons when thin, of the solids' edges when thick.
+  edgesGeometry() {
+    if (this.walls && this.walls !== 'thin') return new THREE.EdgesGeometry(this.front.geometry, 25);
+    return edgeGeometry([...this.surfaces, ...this.windows, ...this.doors], this.origin);
+  }
+
+  // Draws the closed doors as panels; open ones leave their opening clear. open: a Set of door names.
+  setOpenDoors(open) {
+    if (!this.doorMesh) return;
+    const closed = this.doors.filter((d) => !open.has(d.name));
+    this.doorMesh.geometry.dispose();
+    this.doorMesh.geometry = polygonGeometry(closed, this.origin, null);
+    this.doorMesh.userData.items = closed;
+    this.render();
+  }
+
+  // Draws surfaces thin or with thickness: 'thin', 'interior', 'centre' or 'exterior' (the location line).
+  setWalls(mode) {
+    this.walls = mode;
+    if (!this.front) return;
+    const old = this.front.geometry;
+    const g = this.surfaceGeometry();
+    this.front.geometry = g;
+    this.back.geometry = g;
+    old.dispose();
+    this.edges.geometry.dispose();
+    this.edges.geometry = this.edgesGeometry();
+    this.render();
   }
 
   surfaceColor(s) {
