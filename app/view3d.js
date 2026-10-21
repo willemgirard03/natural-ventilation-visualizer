@@ -27,6 +27,7 @@ export const TYPE_COLORS = {
   Shading: '#9AA3A8',
 };
 const INSIDE_SHADE = 0x9a9a9a; // inside faces (the side a surface does not face) are drawn this much darker
+export const OPEN_WINDOW = '#1FA88E'; // an open window, in the airflow
 export const PROBLEM = '#D93025';
 const SELECTED = '#F2A900';
 
@@ -101,8 +102,10 @@ export class View3D {
     this.controls.addEventListener('change', () => this.render());
     this.renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
+    // Horizontal cut (hides what is above) and vertical section (hides one side); either can be off.
     this.cutPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), Infinity);
-    this.clipping = [this.cutPlane];
+    this.sectionPlane = new THREE.Plane(new THREE.Vector3(1, 0, 0), Infinity);
+    this.clipping = [this.cutPlane, this.sectionPlane];
     this.group = new THREE.Group();
     this.scene.add(this.group);
     this.highlight = null;
@@ -172,8 +175,8 @@ export class View3D {
     this.back = new THREE.Mesh(geo, back);
     this.front.userData = this.back.userData = { kind: 'surface', items: this.surfaces };
 
-    const glass = new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Glazing, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping });
-    this.glass = new THREE.Mesh(polygonGeometry(this.windows, this.origin, null, 0.02), glass);
+    const glass = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping });
+    this.glass = new THREE.Mesh(polygonGeometry(this.windows, this.origin, () => TYPE_COLORS.Glazing, 0.02), glass);
     this.glass.userData = { kind: 'window', items: this.windows };
 
     const shadeMat = new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Shading, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping });
@@ -242,6 +245,36 @@ export class View3D {
   }
 
   // Hides everything above a height in model coordinates (metres); null shows the whole building.
+  // Shows which windows are open (by name) in their own colour; null shows all as plain glazing.
+  setOpenWindows(open) {
+    if (!this.glass) return;
+    const g = this.glass.geometry, owner = g.userData.owner, col = g.getAttribute('color'), c = new THREE.Color();
+    owner.forEach((k, t) => {
+      c.set(open?.has(this.windows[k].name) ? OPEN_WINDOW : TYPE_COLORS.Glazing);
+      for (let j = 0; j < 3; j++) col.setXYZ(t * 3 + j, c.r, c.g, c.b);
+    });
+    col.needsUpdate = true;
+    this.render();
+  }
+
+  // A vertical section through the building. axis: 'along' (parallel to the footprint's long side) or
+  // 'across'; at: 0 to 1 across the building. The half away from the camera is kept, so the cut faces
+  // the viewer; flip keeps the other half. axis null removes it. longAxis: the long side's direction
+  // in model x, y.
+  setSection(axis, at = 0.5, flip = false, longAxis = [1, 0]) {
+    if (!axis) { this.sectionPlane.constant = Infinity; this.render(); return; }
+    const [lx, ly] = longAxis;
+    const n = axis === 'along' ? [-ly, lx] : [lx, ly]; // the plane's normal, horizontal
+    const proj = this.surfaces.flatMap((s) => s.vertices).map((p) => n[0] * p[0] + n[1] * p[1]);
+    const lo = Math.min(...proj), hi = Math.max(...proj);
+    const d = lo + at * (hi - lo) - (n[0] * this.origin[0] + n[1] * this.origin[1]);
+    const cameraSide = n[0] * this.camera.position.x + n[1] * this.camera.position.y > d;
+    const s = cameraSide !== flip ? -1 : 1; // -1 keeps n.p <= d, 1 keeps n.p >= d
+    this.sectionPlane.normal.set(s * n[0], s * n[1], 0);
+    this.sectionPlane.constant = -s * d;
+    this.render();
+  }
+
   setCut(z) {
     this.cutPlane.constant = z === null ? Infinity : z - this.origin[2];
     this.render();
@@ -305,7 +338,7 @@ export class View3D {
     ray.setFromCamera(ndc, this.camera);
     const targets = [this.front, this.back, this.glass, this.doorMesh, ...(this.shading.visible ? [this.shading] : [])];
     // Shading is drawn see-through, so the building behind it wins; shading is picked only on its own.
-    const hits = ray.intersectObjects(targets, false).filter((h) => this.cutPlane.distanceToPoint(h.point) >= 0);
+    const hits = ray.intersectObjects(targets, false).filter((h) => this.clipping.every((pl) => pl.distanceToPoint(h.point) >= 0));
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];
     if (!hit) return this.select(null);
     const { kind, items } = hit.object.userData;

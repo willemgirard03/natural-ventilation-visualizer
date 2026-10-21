@@ -1,6 +1,7 @@
 import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
-import { View3D, TYPE_COLORS, PROBLEM, zoneColor, pressureColor, NO_PRESSURE } from './view3d.js';
+import { View3D, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE } from './view3d.js';
+import { footprintAxis } from '../src/model/airflow-network.js';
 import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
@@ -33,6 +34,8 @@ const air = new AirflowParticles(view);
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
 let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room flow, and its latest field
 let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour solved
+// Windows opened or closed one by one (by window name) or room by room (by zone), over the Windows setting.
+const windowSet = new Map(), roomSet = new Map();
 let weather = null, weatherHour = null; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
 
@@ -53,12 +56,17 @@ function solveAir() {
       windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
     },
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
-    open: Object.fromEntries(net.links.filter((l) => l.control === 'zone')
-      .map((l) => [l.name, mode === 'open' || (mode === 'results' && inside(l.from).vent) ? l.openFactor : 0])),
+    open: Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => {
+      const base = mode === 'open' || (mode === 'results' && !!inside(l.from).vent);
+      const open = windowSet.has(l.name) ? windowSet.get(l.name) : roomSet.has(l.from) ? roomSet.get(l.from) : base;
+      return [l.name, open ? l.openFactor : 0];
+    })),
   };
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   airflow = { solution, flows, conditions };
+  view.setOpenWindows(new Set(Object.entries(conditions.open).filter(([, f]) => f > 0).map(([n]) => n)));
+  $('windows-reset').hidden = !windowSet.size && !roomSet.size;
   // Pressure difference across every surface with a crack, seen from its own zone (its partner's is opposite).
   const dps = {};
   solution.links.forEach((r, i) => {
@@ -116,6 +124,34 @@ $('show-air').addEventListener('change', (e) => {
   if (e.target.checked) { solveAir(); air.play(); } else { air.stop(); air.clear(); }
   legend();
 });
+// Opening and closing windows one by one or room by room, from the details of what is selected.
+$('info').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act]');
+  if (!b || !airflow) return;
+  if (b.dataset.act === 'window') windowSet.set(b.dataset.name, b.dataset.open === '1');
+  if (b.dataset.act === 'room') {
+    roomSet.set(b.dataset.zone, b.dataset.open === '1');
+    for (const l of net.links) if (l.from === b.dataset.zone) windowSet.delete(l.name);
+  }
+  solveAir();
+  showInfo(view.find(selected));
+  legend();
+});
+$('windows-reset').addEventListener('click', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
+$('windows').addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
+
+// Vertical section, along or across the footprint's long side.
+function applySection() {
+  const axis = $('section').value;
+  $('section-at').disabled = $('section-flip').disabled = !axis;
+  if (!model) return;
+  const a = ((footprintAxis(model).azimuth - model.site.northAxis) * Math.PI) / 180;
+  view.setSection(axis || null, Number($('section-at').value), $('section-flip').dataset.flip === '1', [Math.sin(a), Math.cos(a)]);
+}
+$('section').addEventListener('change', applySection);
+$('section-at').addEventListener('input', applySection);
+$('section-flip').addEventListener('click', (e) => { e.target.dataset.flip = e.target.dataset.flip === '1' ? '0' : '1'; applySection(); });
+
 $('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
 $('air-speed').addEventListener('input', (e) => { air.speed = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
 let selected = null;
@@ -286,7 +322,11 @@ function showInfo(found) {
   } else {
     rows.push(`<b>${esc(item.name)}</b>`, 'Shading surface');
   }
-  if (airflow && $('show-air').checked) rows.push(...airLines(kind, item));
+  if (airflow && $('show-air').checked) {
+    rows.push(...airLines(kind, item));
+    if (kind === 'zone') rows.push(...roomButton(item.name));
+    if (kind === 'surface') rows.push(...roomButton(item.zone));
+  }
   for (const c of model.checks.filter((c) => c.objects.includes(item.name))) {
     const cls = c.level === 'error' ? 'error-text' : c.level === 'warning' ? 'warning-text' : 'muted';
     rows.push(`<span class="${cls}">${esc(c.message)}</span>`);
@@ -303,11 +343,26 @@ function airLines(kind, item) {
     const c = airflow.conditions.zones[item.name];
     return [`Air at ${fmt(c.t, 1)} °C${results ? ' (from results)' : ''}; ${fmt(q, 0)} m³/h through the zone, ${fmt(q / item.volume.value, 1)} air changes/h`];
   }
-  const i = net.links.findIndex((l) => l.name === item.name);
+  // A wall between two zones is one link in the network, named after one of its two surfaces.
+  let i = net.links.findIndex((l) => l.name === item.name);
+  if (i < 0 && kind === 'surface' && item.adjacentSurface) i = net.links.findIndex((l) => l.name === item.adjacentSurface);
   if (i < 0) return [];
   const r = airflow.solution.links[i], l = net.links[i], other = l.to ?? 'outdoors';
   const what = l.type === 'crack' ? 'Leakage' : 'Air';
-  return [`${what}: ${m3h(r.forward)} m³/h ${esc(l.from)} → ${esc(other)}, ${m3h(r.backward)} m³/h ${esc(other)} → ${esc(l.from)}`];
+  const lines = [`${what}: ${m3h(r.forward)} m³/h ${esc(l.from)} → ${esc(other)}, ${m3h(r.backward)} m³/h ${esc(other)} → ${esc(l.from)}`];
+  if (l.control === 'zone') {
+    const open = airflow.conditions.open[l.name] > 0;
+    lines.push(`<button class="quiet" data-act="window" data-name="${esc(l.name)}" data-open="${open ? 0 : 1}">${open ? 'Close' : 'Open'} this window</button>`);
+  }
+  return lines;
+}
+
+// A button to open or close all of a room's operable windows, for the room or one of its surfaces.
+function roomButton(zone) {
+  const own = net.links.filter((l) => l.control === 'zone' && l.from === zone);
+  if (!airflow || !own.length) return [];
+  const anyOpen = own.some((l) => airflow.conditions.open[l.name] > 0);
+  return [`<button class="quiet" data-act="room" data-zone="${esc(zone)}" data-open="${anyOpen ? 0 : 1}">${anyOpen ? 'Close' : 'Open'} the windows of ${esc(zone)}</button>`];
 }
 
 function legend() {
@@ -323,7 +378,11 @@ function legend() {
     const types = new Set(Object.values(model.surfaces).map((s) => s.csType));
     for (const [t, c] of Object.entries(TYPE_COLORS)) if (types.has(t)) items.push(chip(c, t));
   }
-  if (Object.keys(model.windows).length) items.push(chip(TYPE_COLORS.Glazing, 'Glazing'));
+  if (Object.keys(model.windows).length) items.push(chip(TYPE_COLORS.Glazing, $('show-air').checked ? 'Glazing, closed' : 'Glazing'));
+  if ($('show-air').checked && airflow) {
+    const n = Object.values(airflow.conditions.open).filter((f) => f > 0).length;
+    if (n) items.push(chip(OPEN_WINDOW, `Window open (${n})`, 'Open to its operable fraction in the airflow. Select a window or a room to open or close it.'));
+  }
   if (view.doors.length) items.push(chip(TYPE_COLORS.Door, `Door, added (${view.doors.length})`, `The tool adds an open ${DOOR.width} × ${DOOR.height} m door between each room and the circulation zones it shares a wall with, and between adjoining circulation zones, so air can move through the building. Circulation is recognised by zone name (circulation, corridor, hall, lobby, stair, vestibule, foyer, atrium).`));
   if (model.shading.length) items.push(chip(TYPE_COLORS.Shading, 'Shading'));
   if (view.overlay) {
@@ -429,6 +488,9 @@ function render(m) {
   field = null;
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   $('results-file').value = '';
+  windowSet.clear(); roomSet.clear();
+  $('section').value = '';
+  applySection();
   setResults(null); // results belong to the previous model; this also solves the network
   if ($('show-air').checked) air.play();
   view.setColorBy($('color-by').value);
