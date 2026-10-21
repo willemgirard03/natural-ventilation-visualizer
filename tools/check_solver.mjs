@@ -42,7 +42,7 @@ for (let s = 0; s < steps; s++) {
     zones: Object.fromEntries(net.zones.map((z, i) => [z, { t: zt[i][zs], w: zw[i][zs] }])),
     open: Object.fromEntries(openings.map((l) => [l.name, openSeries[l.name][s]])),
   };
-  const r = solveNetwork(net, conditions);
+  const r = solveNetwork(net, conditions, { exactEnergyPlus: true });
   iterations += r.iterations;
   if (!r.converged) unconverged++;
   let stepErr = 0, stepRef = 0;

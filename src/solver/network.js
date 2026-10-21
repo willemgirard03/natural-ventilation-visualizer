@@ -143,7 +143,10 @@ export function powerLaw(coef, n, dp, a, b) {
 
 // Simple opening (EnergyPlus SimpleOpening::calculate): one- or two-way flow through a window or door.
 // As in EnergyPlus, dp is the pressure difference at the opening's centroid, used as if at its bottom.
-export function simpleOpening(l, open, dp, a, b) {
+// When both sides have nearly the same density, EnergyPlus computes an open opening's flow with its
+// closed leakage coefficient, so an open door between rooms at one temperature carries almost
+// nothing. Unless `exact`, the tool treats it as the open orifice it is: Cd A sqrt(2 rho dp).
+export function simpleOpening(l, open, dp, a, b, exact = false) {
   let width = l.width, height = l.height;
   const perimeterCoef = l.closedCoefficient * 2 * (width + height);
   const coefClosed = perimeterCoef / Math.sqrt(dp >= 0 ? a.rho : b.rho);
@@ -151,7 +154,15 @@ export function simpleOpening(l, open, dp, a, b) {
   width *= open;
   if (l.tilt < 90) height *= Math.sin((l.tilt * Math.PI) / 180);
   const drho = a.rho - b.rho, gdrho = 9.8 * drho;
-  if (Math.abs(drho) < MIN_DENSITY_DIFFERENCE) return powerLaw(coefClosed, l.exponent, dp - 0.5 * height * gdrho, a, b);
+  if (Math.abs(drho) < MIN_DENSITY_DIFFERENCE) {
+    const mid = dp - 0.5 * height * gdrho;
+    if (exact) return powerLaw(coefClosed, l.exponent, mid, a, b);
+    const k = l.dischargeCoefficient * width * height * Math.sqrt(2 * (mid >= 0 ? a.rho : b.rho));
+    const lin = 1e-4; // Pa: linear below this, to keep the slope finite at zero
+    if (Math.abs(mid) < lin) return { f: [(k * mid) / Math.sqrt(lin)], df: [k / Math.sqrt(lin)] };
+    const f = Math.sign(mid) * k * Math.sqrt(Math.abs(mid));
+    return { f: [f], df: [f / (2 * mid)] };
+  }
   const y = dp / gdrho; // neutral plane above the bottom
   const c = Math.SQRT2 * width * l.dischargeCoefficient;
   const df0 = (c * Math.sqrt(Math.abs(dp))) / Math.abs(gdrho);
@@ -174,7 +185,8 @@ const climb = (p0, rho, h, g) => -p0 * (1 - Math.exp((-h * rho * g) / p0));
 //                       close any other window or door for this moment (doors are otherwise open)
 //   conditions.site:    { elevation, latitude }
 // Returns zone pressures (Pa, relative to outdoors at ground level) and each link's flow both ways (kg/s).
-export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations = 100 } = {}) {
+// exactEnergyPlus: reproduce EnergyPlus also where it treats an open opening as closed (see simpleOpening).
+export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations = 100, exactEnergyPlus = false } = {}) {
   const { outdoor, site = { elevation: 0, latitude: 45 } } = conditions;
   const pStd = standardPressure(site.elevation), g = gravity(site.latitude);
   const zoneState = net.zones.map((z) => {
@@ -207,7 +219,7 @@ export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations
     const J = Array.from({ length: N }, () => new Array(N).fill(0));
     const flows = links.map((k) => {
       const dp = p[k.l.n] - (k.l.m < 0 ? k.pOut : p[k.l.m]) + k.stack;
-      const r = k.l.type === 'crack' ? powerLaw(k.l.coefficient, k.l.exponent, dp, k.a, k.b) : simpleOpening(k.l, k.open, dp, k.a, k.b);
+      const r = k.l.type === 'crack' ? powerLaw(k.l.coefficient, k.l.exponent, dp, k.a, k.b) : simpleOpening(k.l, k.open, dp, k.a, k.b, exactEnergyPlus);
       const total = r.f.reduce((s, x) => s + x, 0), d = r.df.reduce((s, x) => s + x, 0);
       sum[k.l.n] += total; scale[k.l.n] += r.f.reduce((s, x) => s + Math.abs(x), 0); J[k.l.n][k.l.n] += d;
       if (k.l.m >= 0) {
