@@ -155,7 +155,8 @@ export function prepareRoomFlow(g, net) {
 // (m/s, 3 per cell), the volume flow out of the cell through each opening face (key = cell * 6 +
 // direction, m3/s; negative: in), and the faces where outdoor air enters, for releasing particles.
 // previous: an earlier result for the same model, whose potential starts the solve.
-export function roomFlow(prep, flows, { previous = null, tolerance = 1e-4, maxIterations = 3000 } = {}) {
+// open: { [opening name]: open fraction } as solved (conditions.open), so partly open openings narrow.
+export function roomFlow(prep, flows, { previous = null, open = null, tolerance = 1e-4, maxIterations = 3000 } = {}) {
   const { g, net, faces, zonesCSR, zIndex } = prep;
   const N = g.zone.length;
   const out = new Map(), entries = [];
@@ -167,6 +168,10 @@ export function roomFlow(prep, flows, { previous = null, tolerance = 1e-4, maxIt
       if (!all.length) continue;
       let fs = all.filter((f) => f.z >= zmin + s.band[0] * H - 1e-9 && f.z <= zmin + s.band[1] * H + 1e-9);
       if (!fs.length) fs = all;
+      // A partly open window or door passes its air through that share of its width, centred, as
+      // EnergyPlus narrows a simple opening: so the air keeps its speed and the stream narrows.
+      const share = l.type === 'opening' ? open?.[l.name] ?? l.openFactor : 1;
+      if (share > 0 && share < 1 && fs.length > 1) fs = middleShare(g, fs, share);
       const q = (sign * s.rate) / RHO / fs.length;
       for (const f of fs) {
         out.set(f.key, (out.get(f.key) || 0) + q);
@@ -202,6 +207,21 @@ export function roomFlow(prep, flows, { previous = null, tolerance = 1e-4, maxIt
     }
   }
   return { velocity, out, entries, phi, iterations };
+}
+
+// The faces in the middle `share` of an opening's width: faces sorted along the opening's horizontal
+// direction (along z for a horizontal one), keeping the central ones, at least one.
+function middleShare(g, faces, share) {
+  const centres = faces.map((f) => cellCentre(g, f.c));
+  const spread = [0, 1, 2].map((k) => Math.max(...centres.map((c) => c[k])) - Math.min(...centres.map((c) => c[k])));
+  const axis = spread[0] >= spread[1] ? 0 : 1; // the opening's width runs along x or y
+  const span = spread[axis] > 1e-9 ? axis : 2;
+  const lo = Math.min(...centres.map((c) => c[span])), hi = Math.max(...centres.map((c) => c[span]));
+  const mid = (lo + hi) / 2, half = ((hi - lo + g.h) * share) / 2;
+  const kept = faces.filter((f, i) => Math.abs(centres[i][span] - mid) <= half);
+  if (kept.length) return kept;
+  const nearest = faces.map((f, i) => [Math.abs(centres[i][span] - mid), f]).sort((a, b) => a[0] - b[0]);
+  return [nearest[0][1]];
 }
 
 // Jacobi-preconditioned conjugate gradients on one zone's graph Laplacian (singular, consistent),

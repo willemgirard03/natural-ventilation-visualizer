@@ -115,7 +115,7 @@ function solveAir() {
   clearTimeout(fieldTimer);
   fieldTimer = setTimeout(() => {
     if (!rooms || airflow?.flows !== flows) return;
-    field = roomFlow(rooms, flows, { previous: field });
+    field = roomFlow(rooms, flows, { previous: field, open: conditions.open });
     air.setField(field, conditions);
   }, 120);
   const volume = Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0);
@@ -560,6 +560,8 @@ $('cut').addEventListener('input', (e) => {
 $('color-by').addEventListener('change', (e) => { view.setColorBy(e.target.value); legend(); });
 $('show-shading').addEventListener('change', (e) => view.setShadingVisible(e.target.checked));
 $('walls').addEventListener('change', (e) => view.setWalls(e.target.value));
+$('window-depth').addEventListener('change', (e) => view.setWindowDepth(e.target.value));
+view.windowDepth = $('window-depth').value;
 $('fit').addEventListener('click', () => { view.setCut(null); showCut(null); view.frame(); });
 
 function render(m) {

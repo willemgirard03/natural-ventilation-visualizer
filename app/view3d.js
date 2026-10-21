@@ -8,7 +8,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { area, bounds, triangulate, unitNormal } from '../src/model/geometry.js';
-import { surfaceTriangles } from './solids.js';
+import { surfaceTriangles, envelopeSolids, faceOffsets } from './solids.js';
 
 // ClimateStudio's surface types, plus glazing and shading.
 export const TYPE_COLORS = {
@@ -49,8 +49,8 @@ function polygonGeometry(polys, origin, colorOf, offset = 0) {
   const pos = [], col = [], owner = [];
   const c = new THREE.Color();
   polys.forEach((poly, k) => {
-    const n = unitNormal(poly.vertices);
-    const pts = poly.vertices.map((p) => [p[0] - origin[0] + n[0] * offset, p[1] - origin[1] + n[1] * offset, p[2] - origin[2] + n[2] * offset]);
+    const n = unitNormal(poly.vertices), off = typeof offset === 'function' ? offset(poly) : offset;
+    const pts = poly.vertices.map((p) => [p[0] - origin[0] + n[0] * off, p[1] - origin[1] + n[1] * off, p[2] - origin[2] + n[2] * off]);
     if (colorOf) c.set(colorOf(poly, k));
     for (const tri of triangulate(poly.vertices)) {
       for (const i of tri) { pos.push(...pts[i]); if (colorOf) col.push(c.r, c.g, c.b); }
@@ -83,7 +83,7 @@ const centroid = (pts) => pts.reduce((s, p) => [s[0] + p[0] / pts.length, s[1] +
 // The sash of a window swung open: the rough opening's rectangle turned about its hinge edge by the
 // angle, outwards for casements and awnings, inwards for hoppers. null for windows that are not
 // upright rectangles (skylights), which stay drawn in place.
-function sashPanel(w, sash) {
+function sashPanel(w, sash, depth = 0) {
   if (!w || !sash) return null;
   const n = unitNormal(w.vertices);
   if (Math.abs(n[2]) > 0.05) return null;
@@ -92,7 +92,7 @@ function sashPanel(w, sash) {
   const along = w.vertices.map((p) => p[0] * right[0] + p[1] * right[1]);
   const s0 = Math.min(...along), s1 = Math.max(...along);
   const z0 = Math.min(...w.vertices.map((p) => p[2])), z1 = Math.max(...w.vertices.map((p) => p[2]));
-  const plane = w.vertices[0][0] * out[0] + w.vertices[0][1] * out[1];
+  const plane = w.vertices[0][0] * out[0] + w.vertices[0][1] * out[1] + depth;
   const at = (s, z, o = 0) => [right[0] * s + out[0] * (plane + o), right[1] * s + out[1] * (plane + o), z];
   const a = (sash.angle * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
   const W = s1 - s0, H = z1 - z0;
@@ -209,7 +209,7 @@ export class View3D {
     this.front.userData = this.back.userData = { kind: 'surface', items: this.surfaces };
 
     const glass = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping });
-    this.glass = new THREE.Mesh(polygonGeometry(this.windows, this.origin, () => TYPE_COLORS.Glazing, 0.02), glass);
+    this.glass = new THREE.Mesh(polygonGeometry(this.windows, this.origin, () => TYPE_COLORS.Glazing, (w) => this.windowOffset(w)), glass);
     this.glass.userData = { kind: 'window', items: this.windows };
 
     const shadeMat = new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Shading, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping });
@@ -237,13 +237,23 @@ export class View3D {
     const hole = (surface, pts) => holes.set(surface, [...(holes.get(surface) || []), pts]);
     for (const w of this.windows) hole(w.parent, w.vertices);
     for (const d of this.doors) { hole(d.surface, d.vertices); hole(d.partnerSurface, d.partnerVertices); }
+    const thicknessOf = (s) => this.model.constructions[s.construction]?.thickness || 0.2;
+    // The envelope's solids are built together so their corners meet; shared surfaces are centred.
+    const envelope = thick ? this.surfaces.map((s, k) => [s, k]).filter(([s]) => s.boundary !== 'Surface') : [];
+    let solids = [];
+    try {
+      solids = envelopeSolids(envelope.map(([s]) => ({ vertices: s.vertices, holes: holes.get(s.name) || [], thickness: thicknessOf(s) })), this.origin, this.walls);
+    } catch { solids = envelope.map(() => []); }
+    const solidOf = new Map(envelope.map(([, k], i) => [k, solids[i]]));
     const pos = [], col = [], owner = [], c = new THREE.Color();
     this.surfaces.forEach((s, k) => {
       const shared = s.boundary === 'Surface' && s.adjacentSurface;
       if (thick && shared && s.name > s.adjacentSurface) return; // drawn once for the pair
-      const t = thick ? this.model.constructions[s.construction]?.thickness || 0.2 : 0;
-      let tris;
-      try { tris = surfaceTriangles(s.vertices, holes.get(s.name) || [], this.origin, t, shared ? 'centre' : this.walls); } catch { tris = []; }
+      let tris = solidOf.get(k);
+      if (!tris?.length) {
+        const t = thick ? thicknessOf(s) : 0;
+        try { tris = surfaceTriangles(s.vertices, holes.get(s.name) || [], this.origin, t, shared ? 'centre' : this.walls); } catch { tris = []; }
+      }
       if (!tris.length) { // an outline the cutter cannot handle: drawn as before, without holes
         tris = [];
         for (const tri of triangulate(s.vertices)) for (const i of tri) tris.push(...s.vertices[i].map((x, j) => x - this.origin[j]));
@@ -276,6 +286,29 @@ export class View3D {
     this.render();
   }
 
+  // How far a window's glazing sits from its modelled plane (along the wall's outward normal): at the
+  // drawn wall's exterior face, centre or interior face (this.windowDepth). Thin walls: in the plane.
+  windowOffset(w) {
+    const wall = this.model.surfaces[w.parent];
+    if (!this.walls || this.walls === 'thin' || !wall) return 0.02;
+    const t = this.model.constructions[wall.construction]?.thickness || 0.2;
+    const [a, b] = faceOffsets(t, wall.boundary === 'Surface' ? 'centre' : this.walls);
+    const depth = this.windowDepth || 'centre';
+    return depth === 'exterior' ? b - 0.02 : depth === 'interior' ? a + 0.02 : (a + b) / 2;
+  }
+
+  // Places windows at the exterior face, centre or interior face of thick walls (drawing only).
+  setWindowDepth(depth) {
+    this.windowDepth = depth;
+    this.redrawWindows();
+  }
+
+  redrawWindows() {
+    if (!this.glass) return;
+    const [open, sashes] = this.lastWindows || [new Set(), new Map()];
+    this.setOpenWindows(open, sashes, true);
+  }
+
   // Draws surfaces thin or with thickness: 'thin', 'interior', 'centre' or 'exterior' (the location line).
   setWalls(mode) {
     this.walls = mode;
@@ -287,7 +320,7 @@ export class View3D {
     old.dispose();
     this.edges.geometry.dispose();
     this.edges.geometry = this.edgesGeometry();
-    this.render();
+    this.redrawWindows();
   }
 
   surfaceColor(s) {
@@ -344,14 +377,16 @@ export class View3D {
   // name to { type: 'casement' | 'awning' | 'hopper', hinge: 'left' | 'right', angle (degrees) }.
   // An open window with a sash is drawn as its sash swung to that angle on its hinge, in the open
   // colour, with the rough opening left as an outline; other open windows are tinted in place.
-  setOpenWindows(open, sashes = new Map()) {
+  // rebuild: redraw the in-place glazing even if no sash changed (after the walls or window depth change).
+  setOpenWindows(open, sashes = new Map(), rebuild = false) {
     if (!this.glass) return;
+    this.lastWindows = [open, sashes];
     const swung = new Set([...(open || [])].filter((n) => sashes.get(n)?.angle > 0 && sashPanel(this.model.windows[n], sashes.get(n))));
     const c = new THREE.Color();
     // Swung windows leave the in-place glazing, which is rebuilt without them.
-    if (this.swung?.size || swung.size) {
+    if (rebuild || this.swung?.size || swung.size) {
       this.glass.geometry.dispose();
-      this.glass.geometry = polygonGeometry(this.windows.filter((w) => !swung.has(w.name)), this.origin, () => TYPE_COLORS.Glazing, 0.02);
+      this.glass.geometry = polygonGeometry(this.windows.filter((w) => !swung.has(w.name)), this.origin, () => TYPE_COLORS.Glazing, (w) => this.windowOffset(w));
       this.glass.userData.items = this.windows.filter((w) => !swung.has(w.name));
     }
     this.swung = swung;
@@ -367,14 +402,14 @@ export class View3D {
       this.group.remove(this.sashGroup);
     }
     this.sashGroup = new THREE.Group();
-    const panels = [...swung].map((n) => ({ name: n, vertices: sashPanel(this.model.windows[n], sashes.get(n)) }));
+    const panels = [...swung].map((n) => ({ name: n, vertices: sashPanel(this.model.windows[n], sashes.get(n), this.windowOffset(this.model.windows[n])) }));
     if (panels.length) {
       const mat = new THREE.MeshLambertMaterial({ color: OPEN_WINDOW, transparent: true, opacity: 0.6, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping });
       const mesh = new THREE.Mesh(polygonGeometry(panels, this.origin, null), mat);
       mesh.userData = { kind: 'window', items: panels.map((p) => this.model.windows[p.name]) };
       // The rough openings stay clickable, unseen, so an inward-opening sash can be picked from outside.
       const openings = [...swung].map((n) => this.model.windows[n]);
-      const pick = new THREE.Mesh(polygonGeometry(openings, this.origin, null, 0.02), new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }));
+      const pick = new THREE.Mesh(polygonGeometry(openings, this.origin, null, (w) => this.windowOffset(w)), new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }));
       pick.userData = { kind: 'window', items: openings };
       this.sashMesh = mesh;
       this.openingPick = pick;
