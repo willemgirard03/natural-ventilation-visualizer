@@ -133,3 +133,38 @@ test('room flow: cells fill the zones, and air is conserved in every cell, enter
   // What enters through the windows equals what the network says comes in from outdoors.
   near(f.entries.reduce((s, e) => s + e.q, 0) * 1.2, flows.outdoorIn, 1e-9 * Math.max(1, flows.outdoorIn), 'entering flow');
 });
+
+test('tracer: parcels stay inside their zone, glide along walls rather than stick, and leave through openings', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { voxelize, prepareRoomFlow, roomFlow, cellAt } = await import('../src/solver/roomflow.js');
+  const { Tracer } = await import('../src/solver/tracer.js');
+  const model = twoRooms();
+  const g = voxelize(model, { cell: 0.25 });
+  const net = buildNetwork(model, { doors: false });
+  const conditions = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0.5, 'Hall:s:w': 0.5 }, zones: { Room: { t: 26, w: 0.008 }, Hall: { t: 26, w: 0.008 } }, outdoor: { t: 16, w: 0.007, pressure: 101325, windSpeed: 3, windDirection: 200 } };
+  const field = roomFlow(prepareRoomFlow(g, net), flowStreams(net, solveNetwork(net, conditions), conditions));
+  const tr = new Tracer(g);
+  tr.setField(field, [26, 26], 16);
+  let seed = 1;
+  const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const ps = Array.from({ length: 300 }, () => tr.release(random));
+  let strays = 0, gone = 0;
+  const at540 = new Map();
+  for (let t = 0; t < 600; t += 0.5) {
+    for (const q of ps) {
+      if (q.gone) continue;
+      if (!tr.step(q, 0.5)) { q.gone = true; gone++; continue; }
+      if (!q.out) { const c = cellAt(g, q.p); if (c < 0 || g.zone[c] !== q.zone) strays++; }
+      if (t === 540) at540.set(q, [...q.p]);
+    }
+  }
+  assert.equal(strays, 0, 'parcels found outside their zone');
+  // With one window per room, ideal flow loops near the window and the far corners are nearly
+  // still, so not every parcel leaves in ten minutes; but none stands still where the air moves.
+  assert.ok(gone >= 0.75 * ps.length, `only ${gone} of ${ps.length} left within 10 minutes`);
+  for (const q of ps) {
+    if (q.gone || q.out || !at540.has(q)) continue;
+    const air = Math.hypot(...tr.velocityAt(q.p, q.zone)), moved = Math.hypot(...q.p.map((x, k) => x - at540.get(q)[k]));
+    assert.ok(air < 0.01 || moved > 0.3, `parcel stuck at ${q.p.map((x) => x.toFixed(2))} where the air moves ${air.toFixed(3)} m/s`);
+  }
+});

@@ -76,11 +76,16 @@ function solveAir() {
   fieldTimer = setTimeout(() => {
     if (!rooms || airflow?.flows !== flows) return;
     field = roomFlow(rooms, flows, { previous: field });
-    air.setField(field, flows, conditions);
+    air.setField(field, conditions);
   }, 120);
   const volume = Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0);
   const m3h = (flows.outdoorIn / 1.2) * 3600;
-  $('air-total').textContent = `Outdoor air ${fmt(m3h, 0)} m³/h · ${fmt(m3h / volume, m3h / volume < 1 ? 2 : 1)} air changes/h`;
+  // Which rooms have windows open this hour, so a still room is not mistaken for a fault.
+  const openZones = [...new Set(net.links.filter((l) => conditions.open[l.name] > 0).map((l) => l.from))];
+  const ventilable = new Set(net.links.filter((l) => l.control === 'zone').map((l) => l.from)).size;
+  const which = !openZones.length ? 'all windows closed' : openZones.length === ventilable ? 'windows open in every room that has them'
+    : `windows open in ${openZones.length <= 3 ? openZones.join(', ') : `${openZones.length} of ${ventilable} rooms`}`;
+  $('air-total').textContent = `Outdoor air ${fmt(m3h, 0)} m³/h · ${fmt(m3h / volume, m3h / volume < 1 ? 2 : 1)} air changes/h · ${which}`;
   $('air-total').title = 'Outdoor air entering the building through windows, doors and leaks, from the airflow network. Air changes per hour: that flow divided by the volume of all zones.';
 }
 for (const id of ['t-out', 't-in', 'wind', 'wind-dir', 'windows']) $(id).addEventListener('input', () => { solveAir(); drawRose(); if (model) showInfo(view.find(selected)); });
