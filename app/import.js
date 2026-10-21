@@ -1,12 +1,12 @@
 import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
-import { View3D, TYPE_COLORS, PROBLEM, zoneColor } from './view3d.js';
+import { View3D, TYPE_COLORS, PROBLEM, zoneColor, pressureColor, NO_PRESSURE } from './view3d.js';
 import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
 import { voxelize, prepareRoomFlow, roomFlow } from '../src/solver/roomflow.js';
 import { standardPressure } from '../src/solver/air.js';
-import { AirflowParticles, temperatureColor } from './particles.js';
+import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { readZoneResultsStream, zoneAt } from '../src/model/results.js';
@@ -32,6 +32,7 @@ const view = new View3D($('viewer'), { onSelect: showInfo });
 const air = new AirflowParticles(view);
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
 let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room flow, and its latest field
+let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour solved
 let weather = null, weatherHour = null; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
 
@@ -58,6 +59,18 @@ function solveAir() {
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   airflow = { solution, flows, conditions };
+  // Pressure difference across every surface with a crack, seen from its own zone (its partner's is opposite).
+  const dps = {};
+  solution.links.forEach((r, i) => {
+    if (net.links[i].type !== 'crack') return;
+    dps[r.name] = r.dp;
+    const partner = model.surfaces[r.name]?.adjacentSurface;
+    if (partner && model.surfaces[partner]) dps[partner] = -r.dp;
+  });
+  const top = Math.max(0.1, ...Object.values(dps).map(Math.abs));
+  pressureRange = [0.5, 1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100].find((x) => x >= top) || Math.ceil(top);
+  view.setPressures(dps, pressureRange);
+  if ($('color-by').value === 'pressure') legend();
   // The room flow takes a few hundred milliseconds, so it follows once the controls settle.
   clearTimeout(fieldTimer);
   fieldTimer = setTimeout(() => {
@@ -98,6 +111,7 @@ $('show-air').addEventListener('change', (e) => {
   if (e.target.checked) { solveAir(); air.play(); } else { air.stop(); air.clear(); }
   legend();
 });
+$('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
 $('air-speed').addEventListener('input', (e) => { air.speed = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
 let selected = null;
 
@@ -294,7 +308,11 @@ function airLines(kind, item) {
 function legend() {
   const chip = (color, label, title = '') => `<span${title ? ` title="${esc(title)}"` : ''}><i style="background:${color}"></i>${esc(label)}</span>`;
   const items = [];
-  if ($('color-by').value === 'zone') {
+  const ramp = (colors, w = 36) => `<i style="background:linear-gradient(90deg,${colors.map((c) => '#' + c.getHexString()).join(',')});width:${w}px"></i>`;
+  if ($('color-by').value === 'pressure') {
+    items.push(`<span title="Pressure difference across each surface in the hour solved, inside minus outside at the surface's height. Blue: outside pressure is higher, so air is pushed into the room through any opening or leak; red: pushed out. Square-root scale, so small differences still show.">${ramp([pressureColor(-pressureRange, pressureRange), pressureColor(0, pressureRange), pressureColor(pressureRange, pressureRange)], 48)}Pushed in ${pressureRange} Pa … pushed out ${pressureRange} Pa</span>`);
+    items.push(chip(NO_PRESSURE, 'No airflow across it', 'Surfaces on the ground or between parts of the same zone carry no flow in the network.'));
+  } else if ($('color-by').value === 'zone') {
     Object.keys(model.zones).forEach((z, i) => items.push(chip(`#${zoneColor(i).getHexString()}`, z)));
   } else {
     const types = new Set(Object.values(model.surfaces).map((s) => s.csType));
@@ -309,7 +327,14 @@ function legend() {
     SPEED_BANDS.forEach((b, i) => items.push(chip(BAND_COLORS[i], b === Infinity ? `over ${SPEED_BANDS[i - 1]} m/s` : `${i ? SPEED_BANDS[i - 1] : 0}–${b} m/s`)));
     items.push(chip('#E0401F', 'This hour', 'The arrow points the way the wind blows; its length grows with speed.'));
   }
-  if ($('show-air').checked) items.push(`<span title="Particle colour: the temperature of the air they carry"><i style="background:linear-gradient(90deg,#${temperatureColor(14).getHexString()},#${temperatureColor(22).getHexString()},#${temperatureColor(30).getHexString()});width:36px"></i>Air 14–30 °C</span>`);
+  if ($('show-air').checked) {
+    if ($('air-color').value === 'speed') {
+      const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
+      items.push(`<span title="Particle colour: air speed, on a log scale (each step ten times faster)">${ramp(stops, 48)}Air speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
+    } else {
+      items.push(`<span title="Particle colour: the temperature of the air they carry">${ramp([temperatureColor(14), temperatureColor(22), temperatureColor(30)])}Air 14–30 °C</span>`);
+    }
+  }
   if (view.problems.length) items.push(chip(PROBLEM, 'Named by a model check', 'The arrow shows the way EnergyPlus takes as outward, from the order of the corner points.'));
   $('legend').innerHTML = items.join('');
 }

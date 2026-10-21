@@ -32,6 +32,16 @@ const SELECTED = '#F2A900';
 
 export const zoneColor = (i) => new THREE.Color().setHSL(((i * 137.508) % 360) / 360, 0.38, 0.64);
 
+// Pressure difference across a surface (Pa, inside minus outside at its height): blue where air is
+// pushed into the room, through pale grey, to red where it is pushed out. range: the scale's end (Pa).
+// Square-root scale, so a few pascals across a facade still show beside tens across a roof in wind.
+const PUSHED_IN = new THREE.Color('#2F6DB5'), EVEN = new THREE.Color('#E4E7EA'), PUSHED_OUT = new THREE.Color('#C8402A');
+export const NO_PRESSURE = '#8E979D';
+export function pressureColor(dp, range, out = new THREE.Color()) {
+  const x = Math.sign(dp) * Math.sqrt(Math.min(1, Math.abs(dp) / range));
+  return x < 0 ? out.copy(EVEN).lerp(PUSHED_IN, -x) : out.copy(EVEN).lerp(PUSHED_OUT, x);
+}
+
 // Triangles of a set of polygons as one geometry; owner[i] is the polygon of triangle i.
 function polygonGeometry(polys, origin, colorOf, offset = 0) {
   const pos = [], col = [], owner = [];
@@ -184,7 +194,17 @@ export class View3D {
   }
 
   surfaceColor(s) {
+    if (this.colorBy === 'pressure') {
+      const dp = this.pressures?.values[s.name];
+      return dp === undefined ? NO_PRESSURE : pressureColor(dp, this.pressures.range);
+    }
     return this.colorBy === 'zone' ? zoneColor(this.zoneIndex[s.zone] ?? 0) : TYPE_COLORS[s.csType] || TYPE_COLORS.Unknown;
+  }
+
+  // Pressure differences by surface name (Pa) and the colour scale's end, for colouring by pressure.
+  setPressures(values, range) {
+    this.pressures = { values, range };
+    if (this.colorBy === 'pressure') this.setColorBy('pressure');
   }
 
   // Surfaces named by a model check: red on both sides, with an arrow the way EnergyPlus takes as outward.

@@ -15,10 +15,20 @@ const RHO = 1.2;
 // Blue (cool) through pale grey to red (warm), centred on 22 degC; saturated enough to read
 // against the model's light surfaces.
 const COOL = new THREE.Color('#1F6FE0'), MID = new THREE.Color('#E4E9EE'), WARM = new THREE.Color('#E0401F');
-const TRAIL = 6; // s of real time behind each particle drawn as its streak, at most 1.5 m
+const TRAIL = 6; // s of real time each particle's trail covers
+const HISTORY = 8; // positions kept per particle for its trail
 export function temperatureColor(t, out = new THREE.Color()) {
   const x = Math.max(-1, Math.min(1, (t - 22) / 8));
   return x < 0 ? out.copy(MID).lerp(COOL, -x) : out.copy(MID).lerp(WARM, x);
+}
+
+// Air speed on a log scale from 0.01 to 2 m/s: pale (still) through yellow and orange to deep red.
+const SPEED_STOPS = ['#DCE3EA', '#F2C14E', '#E0701F', '#B3261E', '#5E1235'].map((c) => new THREE.Color(c));
+export const SPEED_RANGE = [0.01, 2];
+export function speedColor(v, out = new THREE.Color()) {
+  const x = Math.max(0, Math.min(1, Math.log(Math.max(v, SPEED_RANGE[0]) / SPEED_RANGE[0]) / Math.log(SPEED_RANGE[1] / SPEED_RANGE[0])));
+  const f = x * (SPEED_STOPS.length - 1), i = Math.min(SPEED_STOPS.length - 2, Math.floor(f));
+  return out.copy(SPEED_STOPS[i]).lerp(SPEED_STOPS[i + 1], f - i);
 }
 
 export class AirflowParticles {
@@ -37,8 +47,9 @@ export class AirflowParticles {
     this.points.frustumCulled = false;
     view.scene.add(this.points);
     // A streak behind each particle, along its velocity: direction and speed at a glance.
-    this.trail = new Float32Array(CAPACITY * 6);
-    this.trailColors = new Float32Array(CAPACITY * 6);
+    // A trail behind each particle through its last positions: the path it took, bends included.
+    this.trail = new Float32Array(CAPACITY * HISTORY * 6);
+    this.trailColors = new Float32Array(CAPACITY * HISTORY * 6);
     const t = new THREE.BufferGeometry();
     t.setAttribute('position', new THREE.BufferAttribute(this.trail, 3));
     t.setAttribute('color', new THREE.BufferAttribute(this.trailColors, 3));
@@ -50,6 +61,7 @@ export class AirflowParticles {
     this.live = [];
     this.speed = 5; // display time runs this many times faster than real time
     this.densityScale = 1; // the Particles slider
+    this.colorBy = 'temperature'; // or 'speed'
     this.density = null; // particles released per kg of outdoor air; fixed per model
     this.spawnDebt = 0;
     this.field = null;
@@ -97,7 +109,7 @@ export class AirflowParticles {
     for (const x of entries) { if ((r -= x.q) <= 0) { e = x; break; } }
     const c = cellCentre(g, e.c), axis = DIRS[e.d].findIndex((x) => x !== 0), sgn = DIRS[e.d][axis];
     const p = c.map((x, k) => (k === axis ? x + sgn * g.h * 0.48 : x + (Math.random() - 0.5) * g.h));
-    return { p, zone: g.zone[e.c], t: this.outdoorT, age: 0, out: null, v: [0, 0, 0] };
+    return { p, zone: g.zone[e.c], t: this.outdoorT, age: 0, out: null, v: [0, 0, 0], hist: [], since: 0 };
   }
 
   // Air velocity at a point in a zone: trilinear between the cell centres of that zone around it.
@@ -184,20 +196,30 @@ export class AirflowParticles {
     const sim = Math.min(dt, 0.1) * this.speed;
     this.spawnDebt += this.density * this.densityScale * this.entryTotal * RHO * sim;
     for (; this.spawnDebt >= 1; this.spawnDebt--) if (this.live.length < CAPACITY) this.live.push(this.release());
-    const o = this.view.origin, col = new THREE.Color();
-    let n = 0;
+    const o = this.view.origin, col = new THREE.Color(), every = TRAIL / (HISTORY - 1);
+    let n = 0, segs = 0;
     for (const q of this.live) {
       if (!this.step(q, sim)) continue;
-      const sp = Math.hypot(...q.v), len = Math.min(1.5, sp * TRAIL), k = sp > 1e-6 ? len / sp : 0;
-      temperatureColor(q.t, col);
-      for (let i = 0; i < 3; i++) {
-        const head = q.p[i] - o[i];
-        this.positions[n * 3 + i] = head;
-        this.trail[n * 6 + i] = head;
-        this.trail[n * 6 + 3 + i] = head - q.v[i] * k;
+      // Remember a position every so often; the newest first.
+      q.since += sim;
+      if (q.since >= every || !q.hist.length) {
+        q.since = 0;
+        q.hist.unshift([...q.p]);
+        if (q.hist.length > HISTORY) q.hist.length = HISTORY;
       }
+      if (this.colorBy === 'speed') speedColor(Math.hypot(...q.v), col); else temperatureColor(q.t, col);
+      for (let i = 0; i < 3; i++) this.positions[n * 3 + i] = q.p[i] - o[i];
       this.colors[n * 3] = col.r; this.colors[n * 3 + 1] = col.g; this.colors[n * 3 + 2] = col.b;
-      this.trailColors.set([col.r, col.g, col.b, col.r * 0.6, col.g * 0.6, col.b * 0.6], n * 6);
+      // Trail: head to newest remembered position, then back through the rest, fading.
+      let a = q.p;
+      for (let j = 0; j < q.hist.length; j++) {
+        const b = q.hist[j], f0 = 1 - (0.75 * j) / HISTORY, f1 = 1 - (0.75 * (j + 1)) / HISTORY, at = segs * 6;
+        for (let i = 0; i < 3; i++) { this.trail[at + i] = a[i] - o[i]; this.trail[at + 3 + i] = b[i] - o[i]; }
+        this.trailColors[at] = col.r * f0; this.trailColors[at + 1] = col.g * f0; this.trailColors[at + 2] = col.b * f0;
+        this.trailColors[at + 3] = col.r * f1; this.trailColors[at + 4] = col.g * f1; this.trailColors[at + 5] = col.b * f1;
+        segs++;
+        a = b;
+      }
       this.live[n++] = q;
     }
     this.live.length = n;
@@ -206,7 +228,7 @@ export class AirflowParticles {
     g.attributes.position.needsUpdate = true;
     g.attributes.color.needsUpdate = true;
     const s = this.streaks.geometry;
-    s.setDrawRange(0, n * 2);
+    s.setDrawRange(0, segs * 2);
     s.attributes.position.needsUpdate = true;
     s.attributes.color.needsUpdate = true;
   }
