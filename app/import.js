@@ -62,8 +62,10 @@ function drawSlices(now = false) {
     value = kind === 'speed' ? (x, y, z) => { const c = cellAt(g, [x, y, z]); return Math.hypot(field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]); }
       : (x, y, z) => t[g.zones[g.zone[cellAt(g, [x, y, z])]]].t;
   }
-  const colour = kind === 'speed' ? (v) => speedColor(v) : kind === 'co2' ? (v) => co2Color(v) : (v, range) => rampTemperature(v, range[0], range[1]);
-  sliceRange = slices.update({ inside: fluid, value, velocity }, kind, colour, g, arrows);
+  const co2Ramp = (v, [lo, hi]) => co2Color(CO2_SCALE[0] + ((v - lo) / Math.max(1, hi - lo)) * (CO2_SCALE[2] - CO2_SCALE[0]));
+  const colour = kind === 'speed' ? (v) => speedColor(v) : kind === 'co2' ? co2Ramp : (v, range) => rampTemperature(v, range[0], range[1]);
+  const temperature = simulated ? (x, y, z) => grid.temperatureAt(x, y, z) : (x, y, z) => airflow.conditions.zones[g.zones[g.zone[cellAt(g, [x, y, z])]]]?.t ?? 20;
+  sliceRange = slices.update({ inside: fluid, value, velocity, temperature }, kind, colour, g, arrows);
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
@@ -497,8 +499,16 @@ for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { 
 $('slices').addEventListener('change', () => drawSlices(true));
 $('arrows').addEventListener('change', () => drawSlices(true));
 
-$('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
-$('air-speed').addEventListener('input', (e) => { air.speed = slices.timeScale = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
+$('air-color').addEventListener('change', (e) => { air.colorBy = slices.colorBy = e.target.value; legend(); });
+// The particles in the cuts: their own density and speed.
+$('cut-density').addEventListener('input', (e) => {
+  const k = 2 ** Number(e.target.value);
+  slices.density = k;
+  $('cut-density-value').textContent = `×${k < 1 ? k.toFixed(2).replace(/0$/, '') : k}`;
+  drawSlices(true);
+});
+$('cut-speed').addEventListener('input', (e) => { slices.timeScale = Number(e.target.value); $('cut-speed-value').textContent = `×${e.target.value}`; });
+$('air-speed').addEventListener('input', (e) => { air.speed = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
 let selected = null;
 
 // Weather: picking a day and hour fills in the outdoor conditions, which can still be edited.
@@ -789,9 +799,9 @@ function legend() {
     items.push(chip('#E0401F', 'This hour', 'The arrow points the way the wind blows; its length grows with speed.'));
   }
   if ($('slices').value && sliceRange !== undefined && slices.visible) {
-    if ($('slices').value === 'co2') {
-      const [lo, mid, hi] = CO2_SCALE;
-      items.push(`<span title="Cuts: CO2 in the room air, from the grid solver (each room's mean held at its balance figure) or, with ideal flow, each room's own level">${ramp([co2Color(lo), co2Color(mid), co2Color(hi)], 48)}Cuts: CO₂ ${lo} … ${hi}+ ppm</span>`);
+    if ($('slices').value === 'co2' && sliceRange) {
+      const [lo, hi] = sliceRange;
+      items.push(`<span title="Cuts: CO2 in the room air, from the grid solver (each room's mean held at its balance figure) or, with ideal flow, each room's own level. Coloured from the lowest to the highest on the cuts, so the pattern within rooms shows; the colours do not mean the same levels as Colour by CO2.">${ramp([co2Color(CO2_SCALE[0]), co2Color(CO2_SCALE[1]), co2Color(CO2_SCALE[2])], 48)}Cuts: CO₂ ${fmt(lo, 0)} … ${fmt(hi, 0)} ppm</span>`);
     } else if ($('slices').value === 'speed') {
       const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
       items.push(`<span title="Slices: air speed on a log scale">${ramp(stops, 48)}Slices: speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
@@ -892,6 +902,8 @@ typeable($('day-value'), $('day'), parseDay);
 typeable($('when'), $('hour'), parseHour);
 typeable($('air-density-value'), $('air-density'), (t) => { const k = parseTimes(t); return k > 0 ? Math.log2(k) : null; });
 typeable($('air-speed-value'), $('air-speed'), parseTimes);
+typeable($('cut-density-value'), $('cut-density'), (t) => { const k = parseTimes(t); return k > 0 ? Math.log2(k) : null; });
+typeable($('cut-speed-value'), $('cut-speed'), parseTimes);
 
 // A figure set by dragging its name left or right, as at the foot of the Solar Shading Explorer's views:
 // `per` of a unit for each pixel moved, kept within min and max (or wrapped round `wrap`); its value

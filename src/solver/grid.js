@@ -63,6 +63,13 @@ export class GridFlow {
     const first = !this.co2;
     this.co2 = { targets: g.zones.map((z) => targets[z] ?? outdoor), generation: byZone(generation), supply: byZone(supply), outdoor };
     if (first) for (const c of this.fluid) this.C[c] = this.co2.targets[g.zone[c]];
+    else {
+      // A new hour (or new windows) brings its own levels at once: each zone's field is shifted to its
+      // level, keeping the pattern within it, rather than drifting there over HOLD_TIME.
+      const sum = new Float64Array(g.zones.length), count = new Float64Array(g.zones.length);
+      for (const c of this.fluid) { sum[g.zone[c]] += this.C[c]; count[g.zone[c]]++; }
+      for (const c of this.fluid) { const z = g.zone[c]; this.C[c] += this.co2.targets[z] - sum[z] / count[z]; }
+    }
     this.inflowGhosts();
   }
 

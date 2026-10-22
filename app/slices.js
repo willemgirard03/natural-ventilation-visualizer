@@ -3,16 +3,20 @@
 // 2D section prototype. From the grid solver or ideal flow. Each plane's slice is sampled over its bounds at about half a cell's
 // spacing, just behind the plane on the side it keeps, so the cut walls are drawn over it.
 //
-// Where a plane shows its air, it hides the particles behind it but not the walls: the slice writes
-// depth only where there is air, is drawn after the building (so walls show through its colour) and
-// before the particles (so they do not).
+// A plane shaded with the air's temperature, speed or CO2 hides the 3D particles behind it but not
+// the walls: the slice writes depth where there is air, is drawn after the building (so walls show
+// through its colour) and before the particles (so they do not). An unshaded plane hides nothing.
+//
+// The particles in the planes are their own: moved within each plane by the air's velocity along it,
+// separately from the 3D particles, with their own density and speed, coloured the same way.
 
 import * as THREE from 'three';
 import { frameOf } from './sections.js';
+import { temperatureColor, speedColor } from './particles.js';
 
 const FILL = 0.82; // the slices' opacity: a field to read, with the model still showing through
-const INK = new THREE.Color('#18211F');
-const DENSITY = 2.5; // particles per m2 of air in a plane
+const TINT = new THREE.Color();
+const DENSITY = 2.5; // particles per m2 of air in a plane, at density x1
 const MAX_PER_PLANE = 1500;
 const HISTORY = 10; // trail points
 const LIFE = [3, 8]; // s of air time a particle lives, before it starts again somewhere else
@@ -31,7 +35,9 @@ export class FieldSlices {
     view.scene.add(this.group);
     this.visible = false;
     this.trails = new Map(); // by plane: its particles, kept across updates while the plane stays put
-    this.timeScale = 5; // as fast as the 3D particles
+    this.timeScale = 10; // how much faster than real time the particles in the planes move
+    this.density = 1; // times DENSITY
+    this.colorBy = 'temperature'; // or 'speed', as the 3D particles
     this.running = false;
   }
 
@@ -86,7 +92,9 @@ export class FieldSlices {
     });
     // Colour with a common range, then show.
     const all = out.flatMap((s) => s.values.filter((x) => x !== null));
-    const range = field === 'speed' || field === 'co2' ? null : all.length ? [Math.min(...all), Math.max(...all)] : [20, 24];
+    // Temperature and CO2 over the range on the cuts (CO2 at least 50 ppm wide), speed on its fixed log scale.
+    let range = field === 'speed' ? null : all.length ? [Math.min(...all), Math.max(...all)] : [20, 24];
+    if (field === 'co2' && range) { const mid = (range[0] + range[1]) / 2; range = [Math.min(range[0], mid - 25), Math.max(range[1], mid + 25)]; }
     for (const s of out) {
       const data = s.texture.image.data;
       s.values.forEach((val, k) => {
@@ -123,11 +131,13 @@ export class FieldSlices {
     const [c0, c1, c2, c3] = [corner(0, 0), corner(W * step, 0), corner(W * step, H * step), corner(0, H * step)];
     const geometry = new THREE.BufferGeometry().setFromPoints([c0, c1, c2, c0, c2, c3]);
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1], 2));
-    const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide, alphaTest: 0.5, colorWrite: coloured });
-    this.view.sections.patch(material, i);
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.renderOrder = 2;
-    this.group.add(mesh);
+    if (coloured) {
+      const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide, alphaTest: 0.5 });
+      this.view.sections.patch(material, i);
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.renderOrder = 2;
+      this.group.add(mesh);
+    } else { texture.dispose(); geometry.dispose(); }
     return { texture, values, W, H, step };
   }
 
@@ -139,7 +149,8 @@ export class FieldSlices {
     const key = [f.o.x, f.o.y, f.o.z, p.yaw, p.flip, ...p.b].map((x) => (typeof x === 'number' ? x.toFixed(3) : x)).join(',');
     let t = this.trails.get(p);
     if (t && t.key !== key) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
-    const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY));
+    const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY * this.density));
+    if (t && t.n !== n) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
     if (!t) {
       const segs = n * (HISTORY - 1);
       const g = new THREE.BufferGeometry();
@@ -150,7 +161,7 @@ export class FieldSlices {
       lines.renderOrder = 4;
       lines.frustumCulled = false;
       this.view.scene.add(lines);
-      t = { key, lines, n, uv: new Float32Array(n * HISTORY * 2), age: new Float32Array(n), life: new Float32Array(n), born: new Uint8Array(n) };
+      t = { key, lines, n, uv: new Float32Array(n * HISTORY * 2), age: new Float32Array(n), life: new Float32Array(n), born: new Uint8Array(n), tint: new Float32Array(n * 3) };
       this.trails.set(p, t);
     }
     Object.assign(t, { f, i, bounds, where, step });
@@ -195,6 +206,9 @@ export class FieldSlices {
         if (!sample.inside(x, y, z)) start();
         else {
           const vel = sample.velocity(x, y, z);
+          // Its colour, as a 3D particle's: the air's temperature where it is, or its speed.
+          const col = this.colorBy === 'speed' ? speedColor(Math.hypot(vel[0], vel[1], vel[2]), TINT) : temperatureColor(sample.temperature(x, y, z), TINT);
+          t.tint[k * 3] = col.r; t.tint[k * 3 + 1] = col.g; t.tint[k * 3 + 2] = col.b;
           const du = vel[0] * f.u.x + vel[1] * f.u.y + vel[2] * f.u.z, dv = vel[0] * f.v.x + vel[1] * f.v.y + vel[2] * f.v.z;
           a += du * dt; b += dv * dt;
           if (a < bounds[0] || a > bounds[1] || b < bounds[2] || b > bounds[3]) start();
@@ -213,7 +227,7 @@ export class FieldSlices {
           const q = at + (h + e) * 2, p3 = (s + e) * 3, c4 = (s + e) * 4;
           const ua = uv[q], vb = uv[q + 1];
           pos[p3] = base.x + f.u.x * ua + f.v.x * vb; pos[p3 + 1] = base.y + f.u.y * ua + f.v.y * vb; pos[p3 + 2] = base.z + f.u.z * ua + f.v.z * vb;
-          col[c4] = INK.r; col[c4 + 1] = INK.g; col[c4 + 2] = INK.b;
+          col[c4] = t.tint[k * 3]; col[c4 + 1] = t.tint[k * 3 + 1]; col[c4 + 2] = t.tint[k * 3 + 2];
           col[c4 + 3] = 0.85 * fadeIn * (1 - (h + e) / (HISTORY - 1));
         }
       }
