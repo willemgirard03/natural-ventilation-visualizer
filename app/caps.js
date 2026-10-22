@@ -9,9 +9,9 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { frameOf } from './sections.js';
 
-const PAPER = '#FDFDFC', INK = '#18211F';
+const PAPER = '#FDFDFC', INK = '#18211F', GLASS = '#2F6F68';
 const HATCH = [125 / 255, 138 / 255, 135 / 255]; // --ink3, as drawn
-const SPACING = 5, LINE = 1, EDGE = 1.1; // CSS px
+const SPACING = 5, LINE = 1, EDGE = 1.1, GLASS_EDGE = 2.4; // CSS px: a cut window reads as a heavier line in the glass colour
 
 export class SectionCaps {
   constructor(view) {
@@ -27,7 +27,12 @@ export class SectionCaps {
   update() {
     this.clear();
     const v = this.view, solids = v.solids || [];
-    if (!solids.length) { v.render(); return; }
+    // The glass, closed panes and open sashes: thin, so cut it shows as a line, drawn heavier than walls'.
+    const glass = [v.glass, v.sashMesh].filter((m) => m?.geometry).map((m) => {
+      const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry;
+      return g.getAttribute('position').array;
+    });
+    if (!solids.length && !glass.length) { v.render(); return; }
     const dpr = v.renderer.getPixelRatio(), size = v.renderer.getDrawingBufferSize(new THREE.Vector2());
     v.sections.planes.forEach((p, i) => {
       const f = frameOf(p), rect = p.b;
@@ -67,6 +72,16 @@ if (mod((gl_FragCoord.x + gl_FragCoord.y) * 0.70710678, ${SPACING.toFixed(1)} * 
         lines.renderOrder = 5;
         this.group.add(lines);
       }
+      const panes = [];
+      for (const tris of glass) for (const [a, b] of cutSolid(tris, f)) { const c = clipSegment(a, b, rect); if (c) panes.push(c); }
+      if (panes.length) {
+        const g = new LineSegmentsGeometry().setPositions(panes.flatMap(([a, b]) => [...to3(a).toArray(), ...to3(b).toArray()]));
+        const material = new LineMaterial({ color: GLASS, linewidth: GLASS_EDGE * dpr, resolution: size });
+        v.sections.patch(material, i);
+        const lines = new LineSegments2(g, material);
+        lines.renderOrder = 6;
+        this.group.add(lines);
+      }
     });
     v.render();
   }
@@ -78,7 +93,8 @@ if (mod((gl_FragCoord.x + gl_FragCoord.y) * 0.70710678, ${SPACING.toFixed(1)} * 
   }
 }
 
-// The segments where a closed solid (flat triangle array) crosses a plane, in the plane's u, v.
+// The segments where triangles (a flat array: a closed solid, or a pane of glass) cross a plane, in the
+// plane's u, v.
 function cutSolid(tris, f) {
   const segs = [], P = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()], d = [0, 0, 0];
   for (let i = 0; i < tris.length; i += 9) {

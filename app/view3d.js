@@ -507,6 +507,9 @@ export class View3D {
       this.sashGroup.add(mesh, pick, new THREE.LineSegments(edgeGeometry(panels, this.origin), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.6, clippingPlanes: this.clipping })));
     } else { this.sashMesh = null; this.openingPick = null; }
     this.group.add(this.sashGroup);
+    // The cuts redraw where they cross glass when sashes swing or close.
+    const key = [...swung].map((n) => `${n}:${sashes.get(n)?.type}:${sashes.get(n)?.angle?.toFixed(1)}`).sort().join('|');
+    if (key !== this.sashKey) { this.sashKey = key; if (this.sections?.planes.length) this.caps.update(); }
     this.render();
   }
 

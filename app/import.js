@@ -84,6 +84,7 @@ function startGrid(m) {
   worker = new Worker(new URL('./grid-worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }) => {
     if (data.type !== 'state' || !grid) return;
+    gridAirTime = data.time;
     grid.FV.set(data.FV);
     grid.T.set(data.T);
     if (data.C) grid.C.set(data.C);
@@ -1001,7 +1002,12 @@ for (const [id, per] of [['day', 0.25], ['hour', 0.25]]) scrubbable($(id).previo
 // weather, room temperatures, windows and CO2 follow each hour as if picked by hand; the grid solver
 // carries its air on from hour to hour (setConditions keeps the flow). Changing the date or time by
 // hand pauses it.
-let playTimer = 0, stepping = false;
+let playTimer = 0, stepping = false, gridAirTime = 0;
+// The air's own clock (s): the grid solver's simulated time, or with ideal flow (which has no time of
+// its own) the real time. Play day paces its hours by it, so every hour gets the same air time
+// whatever the computer's speed, and the plumes an hour shows do not depend on how long it is watched.
+const airSource = () => ($('room-air').value === 'grid' && gridLive ? 'air' : 'real');
+const airClock = () => (airSource() === 'air' ? gridAirTime : performance.now() / 1000);
 const pad2 = (h) => String(h).padStart(2, '0');
 function playSpan() {
   const from = Number($('play-from').value), to = Math.max(from + 1, Number($('play-to').value));
@@ -1009,21 +1015,34 @@ function playSpan() {
   return [from, to];
 }
 function setPlaying(on) {
-  clearTimeout(playTimer);
+  clearInterval(playTimer);
   playTimer = 0;
   $('play').classList.toggle('on', on);
   $('play').textContent = on ? '❚❚ Pause' : '▶ Play day';
-  if (!on) return;
+  if (!on) { applyHour(); return; } // the label back to the whole hour
   const [from, to] = playSpan(), start = Number($('hour').value) - 1; // the hour's start, standard time
   if (start < from || start >= to) setHour(from); // start from the beginning unless already within
-  const next = () => {
+  let began = airClock(), source = airSource();
+  // Each tenth of a second: the clock shows the minutes of the hour as its air time passes; when the
+  // hour's air time is up, the next hour.
+  playTimer = setInterval(() => {
+    if (airSource() !== source) { source = airSource(); began = airClock(); } // the grid started or stopped: count afresh
+    const per = Number($('play-hold').value), done = (airClock() - began) / per;
+    if (done < 1) { showMinutes(Math.floor(done * 60)); return; }
     const [f, t] = playSpan(), now = Number($('hour').value) - 1;
     if (now + 1 < t) setHour(now + 1);
     else if ($('play-loop').checked) setHour(f);
     else { setPlaying(false); return; }
-    playTimer = setTimeout(next, Number($('play-hold').value) * 1000);
-  };
-  playTimer = setTimeout(next, Number($('play-hold').value) * 1000);
+    began = airClock();
+    showMinutes(0);
+  }, 100);
+}
+// The time label with minutes, while the day plays: standard time, and the clock's on daylight-saving days.
+function showMinutes(minute) {
+  const day = Number($('day').value), start = Number($('hour').value) - 1;
+  const dst = model && daylightSavingDays(model.epjson);
+  const t = (h) => `${pad2(h % 24)}:${pad2(minute)}`;
+  $('when').textContent = t(start) + (dst && day - 1 >= dst[0] && day - 1 <= dst[1] ? ` (${t(start + 1)} daylight time)` : '');
 }
 // Moves to the hour starting at h (0 to 23), as the Time slider would.
 function setHour(h) {
