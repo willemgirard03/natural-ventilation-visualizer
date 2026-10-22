@@ -541,7 +541,8 @@ function setWeather(w) {
   applyHour();
 }
 function applyHour() {
-  for (const id of ['day', 'hour']) $(id).disabled = !weather && !results;
+  for (const id of ['day', 'hour', 'play']) $(id).disabled = !weather && !results;
+  if (!weather && !results && $('play').classList.contains('on')) setPlaying(false);
   const day = Number($('day').value), hour = Number($('hour').value);
   const hh = (h) => `${String(h).padStart(2, '0')}:00`;
   // Weather files and results keep standard time; on daylight-saving days the model's schedules
@@ -995,6 +996,46 @@ for (const el of document.querySelectorAll('.barval[data-for]')) {
 }
 // The sliders' names drag them too: a day or an hour for every 4 px.
 for (const [id, per] of [['day', 0.25], ['hour', 0.25]]) scrubbable($(id).previousElementSibling, $(id), { per, min: Number($(id).min), max: Number($(id).max) });
+
+// Play day: the hour steps on from From to To, each held for a few seconds while its air moves. The
+// weather, room temperatures, windows and CO2 follow each hour as if picked by hand; the grid solver
+// carries its air on from hour to hour (setConditions keeps the flow). Changing the date or time by
+// hand pauses it.
+let playTimer = 0, stepping = false;
+const pad2 = (h) => String(h).padStart(2, '0');
+function playSpan() {
+  const from = Number($('play-from').value), to = Math.max(from + 1, Number($('play-to').value));
+  $('play-span').textContent = `${pad2(from)}:00–${pad2(to)}:00`;
+  return [from, to];
+}
+function setPlaying(on) {
+  clearTimeout(playTimer);
+  playTimer = 0;
+  $('play').classList.toggle('on', on);
+  $('play').textContent = on ? '❚❚ Pause' : '▶ Play day';
+  if (!on) return;
+  const [from, to] = playSpan(), start = Number($('hour').value) - 1; // the hour's start, standard time
+  if (start < from || start >= to) setHour(from); // start from the beginning unless already within
+  const next = () => {
+    const [f, t] = playSpan(), now = Number($('hour').value) - 1;
+    if (now + 1 < t) setHour(now + 1);
+    else if ($('play-loop').checked) setHour(f);
+    else { setPlaying(false); return; }
+    playTimer = setTimeout(next, Number($('play-hold').value) * 1000);
+  };
+  playTimer = setTimeout(next, Number($('play-hold').value) * 1000);
+}
+// Moves to the hour starting at h (0 to 23), as the Time slider would.
+function setHour(h) {
+  stepping = true;
+  $('hour').value = h + 1;
+  $('hour').dispatchEvent(new Event('input', { bubbles: true }));
+  stepping = false;
+}
+$('play').addEventListener('click', () => setPlaying(!playTimer && !$('play').classList.contains('on')));
+for (const id of ['day', 'hour']) $(id).addEventListener('input', () => { if (!stepping && $('play').classList.contains('on')) setPlaying(false); });
+for (const id of ['play-from', 'play-to']) $(id).addEventListener('input', playSpan);
+playSpan();
 
 // The settings bar folds to one line; the view takes the height left under it.
 $('tuck').addEventListener('click', () => {
