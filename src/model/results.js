@@ -9,6 +9,7 @@ const WANTED = [
   'Zone Mean Air Temperature', 'Zone Air Humidity Ratio', 'Zone Air Relative Humidity',
   'Zone Ventilation Total Heat Loss Energy', 'Zone Ventilation Total Heat Gain Energy',
   'AFN Zone Ventilation Air Change Rate', 'AFN Surface Venting Window or Door Opening Factor',
+  'Surface Inside Face Temperature',
 ];
 export const keepZoneResults = (key, variable) => WANTED.includes(variable);
 
@@ -53,21 +54,21 @@ export function zoneResults(eso, model, { hours = 8760 } = {}) {
       vent: loss || gain || ach ? t.map((_, i) => (loss?.[i] || 0) + (gain?.[i] || 0) + (ach?.[i] || 0) > 0) : null,
     };
   }
-  // An airflow network run also reports how far each window and door was open, hour by hour.
-  const windows = {};
+  // An airflow network run also reports how far each window and door was open, hour by hour; the
+  // tool's reruns, every surface's inside temperature.
+  const windows = {}, surfaces = {};
   for (const key of eso.series.keys()) {
     const [name, variable] = key.split('|');
-    if (variable !== 'AFN Surface Venting Window or Door Opening Factor') continue;
-    const f = hourly(eso, variable, name, hours);
-    if (f) windows[name] = f;
+    if (variable === 'AFN Surface Venting Window or Door Opening Factor') { const f = hourly(eso, variable, name, hours); if (f) windows[name] = f; }
+    if (variable === 'Surface Inside Face Temperature') { const f = hourly(eso, variable, name, hours); if (f) surfaces[name] = f; }
   }
-  return { zones, windows, hours, missing };
+  return { zones, windows, surfaces, hours, missing };
 }
 
 // A shorter run's results laid over a year's from hour index `start` on: zone conditions and window
 // openings for those hours are replaced; the rest of the year is kept.
 export function mergeResults(year, part, start) {
-  const zones = {}, windows = {};
+  const zones = {};
   for (const [name, z] of Object.entries(year.zones)) {
     const p = part.zones[name];
     zones[name] = Object.fromEntries(Object.entries(z).map(([k, arr]) => {
@@ -79,12 +80,16 @@ export function mergeResults(year, part, start) {
     // A year without humidity ratio keeps relative humidity; where the part has a ratio, use it there.
     if (p?.w && !z.w) zones[name].w = z.t.map((_, i) => (i >= start && i < start + p.w.length ? p.w[i - start] : null));
   }
-  for (const [name, f] of Object.entries(part.windows)) {
-    const out = (year.windows?.[name] || new Array(year.hours).fill(null)).slice();
-    f.forEach((x, i) => { if (start + i < out.length) out[start + i] = x; });
-    windows[name] = out;
-  }
-  return { ...year, zones, windows: { ...year.windows, ...windows } };
+  const lay = (from, into) => {
+    const out = {};
+    for (const [name, f] of Object.entries(from || {})) {
+      const arr = (into?.[name] || new Array(year.hours).fill(null)).slice();
+      f.forEach((x, i) => { if (start + i < arr.length) arr[start + i] = x; });
+      out[name] = arr;
+    }
+    return { ...into, ...out };
+  };
+  return { ...year, zones, windows: lay(part.windows, year.windows), surfaces: lay(part.surfaces, year.surfaces) };
 }
 
 // One zone's conditions at an hour index (0 to 8759); pressure (Pa) for humidity from relative humidity.
@@ -94,3 +99,6 @@ export function zoneAt(results, zone, i, pressure = 101325) {
   const w = z.w?.[i] ?? (z.rh ? humidityRatioFromRH(z.t[i], z.rh[i], pressure) : 0.008);
   return { t: z.t[i], w, vent: z.vent ? z.vent[i] : null };
 }
+
+// A surface's inside temperature in the results at an hour index (degC), or null if not reported.
+export const surfaceAt = (results, name, i) => results.surfaces?.[String(name).toUpperCase()]?.[i] ?? null;

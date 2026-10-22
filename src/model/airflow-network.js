@@ -105,6 +105,7 @@ const NETWORK_OUTPUTS = [
 //   reporting: 'Hourly' (default) or 'Timestep' for the network outputs
 //   runPeriod: [beginMonth, beginDay, endMonth, endDay] to shorten the run
 //   checkOutputs: true adds the solver's inputs (weather, zone temperatures) at the same frequency
+//   surfaceTemperatures: true adds every surface's inside temperature, hourly (for the grid solver)
 //   skipSizing: true skips EnergyPlus's sizing runs when the ideal-loads equipment is switched off
 //               (ClimateStudio's free-running models): a week then runs in 18 s instead of 29 s
 export function toAirflowNetwork(model, options = {}) {
@@ -172,7 +173,7 @@ export function toAirflowNetwork(model, options = {}) {
 
   const frequency = o.reporting || 'Hourly';
   const outputs = { ...ep['Output:Variable'] };
-  for (const v of [...NETWORK_OUTPUTS, ...(o.checkOutputs ? CHECK_OUTPUTS : [])]) {
+  for (const v of [...NETWORK_OUTPUTS, ...(o.checkOutputs ? CHECK_OUTPUTS : []), ...(o.surfaceTemperatures ? ['Surface Inside Face Temperature'] : [])]) {
     outputs[`AFN check ${v}`] = { key_value: '*', variable_name: v, reporting_frequency: frequency };
   }
   ep['Output:Variable'] = outputs;

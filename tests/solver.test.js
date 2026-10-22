@@ -208,3 +208,20 @@ test('sashes: air comes in under an awning and over a hopper', async () => {
   const awning = height('awning'), hopper = height('hopper'); // the window runs from 1 to 2 m
   assert.ok(awning < 1.45 && hopper > 1.55, `air comes in at ${awning.toFixed(2)} m under an awning, ${hopper.toFixed(2)} m over a hopper`);
 });
+
+test('grid solver: a cold wall cools the air beside it, which sinks (a down-draught)', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { voxelize, prepareRoomFlow } = await import('../src/solver/roomflow.js');
+  const { GridFlow } = await import('../src/solver/grid.js');
+  const model = twoRooms();
+  const g = voxelize(model, { cell: 0.25 }), net = buildNetwork(model, { doors: false });
+  const cond = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0, 'Hall:s:w': 0 }, zones: { Room: { t: 22, w: 0.008 }, Hall: { t: 22, w: 0.008 } }, outdoor: { t: 22, w: 0.008, pressure: 101325, windSpeed: 0, windDirection: 0 }, surfaceT: { 'Room:n': 12 } };
+  const grid = new GridFlow(prepareRoomFlow(g, net, model), model);
+  grid.setConditions(flowStreams(net, solveNetwork(net, cond), cond), cond);
+  grid.sources = grid.sources.map((s) => ({ ...s, lower: 0, upper: 0 }));
+  assert.ok(grid.surfaceFaces.length > 0, 'the cold wall is mapped to cell faces');
+  for (let t = 0; t < 90;) t += grid.step(Math.min(0.5, grid.stableDt()));
+  // Room runs y 0 to 4, its north wall at y = 4.
+  assert.ok(grid.temperatureAt(2, 3.9, 1.5) < grid.temperatureAt(2, 2, 1.5) - 0.3, 'cooler beside the cold wall');
+  assert.ok(grid.velocityAt([2, 3.85, 1.5])[2] < -0.02, 'air sinks down the cold wall');
+});

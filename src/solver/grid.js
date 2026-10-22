@@ -14,6 +14,7 @@ import { buildHierarchy, vcycle } from './multigrid.js';
 const G = 9.81, RHO = 1.2, CP = 1006; // m/s2, kg/m3, J/kg.K
 const WALL = 0, OPEN = 1, SET = 2; // face kinds: no flow, solved, set by an opening's flow
 export const HOLD_TIME = 30; // s; how quickly a zone's mean temperature is drawn to its known value
+export const SURFACE_COEFFICIENT = 3; // W/m2.K, convection between a surface and the air beside it
 
 export class GridFlow {
   // prep: prepareRoomFlow(voxelize(model), net)
@@ -83,6 +84,15 @@ export class GridFlow {
     }
     this.connect();
     this.gains(hour);
+    // Surfaces with a known inside temperature (conditions.surfaceT, by surface or window name, any
+    // case) exchange heat with the air beside them through their faces.
+    const st = conditions.surfaceT || {}, upper = Object.fromEntries(Object.entries(st).map(([k, v]) => [k.toUpperCase(), v]));
+    this.surfaceFaces = [];
+    for (const [key, name] of prep.surfaceOf || []) {
+      const t = upper[name.toUpperCase()];
+      if (t === undefined || t === null || this.kind[key] !== WALL) continue;
+      this.surfaceFaces.push({ c: (key / 6) | 0, t });
+    }
   }
 
   // Regions of cells joined by open faces (rooms joined by open doors); each region's set flows are
@@ -287,6 +297,9 @@ export class GridFlow {
       add(s.occupied, s.lower);
       add(s.ceiling, s.upper);
     });
+    // Heat to or from surfaces with known temperatures, through the faces they cover.
+    const k = 1 - Math.exp(-(SURFACE_COEFFICIENT * dt) / (RHO * CP * h));
+    for (const f of this.surfaceFaces || []) this.T[f.c] += (f.t - this.T[f.c]) * k;
     // 3. Each zone's mean temperature drawn to its known value; the pattern within it kept.
     const pull = 1 - Math.exp(-dt / HOLD_TIME);
     this.sources.forEach((s, zi) => {

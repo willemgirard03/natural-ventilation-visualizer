@@ -13,7 +13,7 @@ import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
-import { readZoneResultsStream, zoneAt, windowAt, mergeResults } from '../src/model/results.js';
+import { readZoneResultsStream, zoneAt, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 
 const $ = (id) => document.getElementById(id);
@@ -78,7 +78,9 @@ function startGrid(m) {
     if (!gridLive && airflow) { gridLive = true; air.clear(); air.setField(grid, airflow.conditions); }
     const pace = data.dt / (data.ms / 1000);
     $('room-air-status').textContent = `${fmt(grid.fluid.length / 1000, 0)}k cells · ${fmt(pace, 1)}× real time`;
-    $('room-air-status').title = `Simulated air time ${fmt(data.time, 0)} s; this step ${fmt(data.ms, 0)} ms for ${fmt(data.dt, 2)} s of air, ${data.iterations} pressure iterations.`;
+    const walls = Object.keys(airflow?.conditions.surfaceT || {}).length;
+    $('room-air-status').title = `Simulated air time ${fmt(data.time, 0)} s; this step ${fmt(data.ms, 0)} ms for ${fmt(data.dt, 2)} s of air, ${data.iterations} pressure iterations. `
+      + (walls ? `Walls, floors and windows warm or cool the air at the inside temperatures of the results (${walls} surfaces).` : 'Surfaces neither warm nor cool the air: the results have no surface temperatures; a rerun adds them.');
   };
   worker.postMessage({ type: 'model', epjson: m.epjson });
 }
@@ -128,6 +130,14 @@ function solveAir() {
       return [l.name, open ? openFraction(l) : 0];
     })),
   };
+  // Surfaces' inside temperatures this hour, where the results have them (the tool's reruns do).
+  conditions.surfaceT = {};
+  if (results?.surfaces) {
+    for (const name of [...Object.keys(model.surfaces), ...Object.keys(model.windows)]) {
+      const t = surfaceAt(results, name, hourAt);
+      if (t !== null) conditions.surfaceT[name] = t;
+    }
+  }
   // Open windows' sashes, for spreading their air along them in the room air.
   conditions.sashes = Object.fromEntries(net.links.filter((l) => l.control === 'zone' && conditions.open[l.name] > 0)
     .map((l) => [l.name, { ...sashOf(l.name), angle: sashFor(l, conditions.open[l.name]).angle }]));
@@ -250,7 +260,7 @@ async function rerun() {
   const forModel = model, label = `${da.label}–${db.label}`;
   // Windows open as far as their sashes allow; EnergyPlus's control then opens them up to that.
   const openFactors = Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, openFraction(l)]));
-  const epjson = toAirflowNetwork(model, { states: linkStates(), openFactors, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true });
+  const epjson = toAirflowNetwork(model, { states: linkStates(), openFactors, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true, surfaceTemperatures: true });
   rerunning = true;
   const t0 = Date.now();
   const tick = setInterval(() => { $('stale').textContent = `Running EnergyPlus for ${label}… ${Math.round((Date.now() - t0) / 1000)} s`; }, 500);
@@ -708,7 +718,7 @@ function render(m) {
   view.resize();
   view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value });
   net = buildNetwork(m);
-  rooms = prepareRoomFlow(voxelize(m), net);
+  rooms = prepareRoomFlow(voxelize(m), net, m);
   field = null;
   startGrid(m);
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));

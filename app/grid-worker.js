@@ -14,7 +14,7 @@ self.onmessage = ({ data: m }) => {
   if (m.type === 'model') {
     const model = importEpJSON(m.epjson);
     net = buildNetwork(model);
-    grid = new GridFlow(prepareRoomFlow(voxelize(model), net), model);
+    grid = new GridFlow(prepareRoomFlow(voxelize(model), net, model), model);
     running = false;
   } else if (m.type === 'conditions' && grid) {
     const flows = flowStreams(net, solveNetwork(net, m.conditions), m.conditions);

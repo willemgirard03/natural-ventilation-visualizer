@@ -119,7 +119,9 @@ function linkFaces(g, cellsOf, link, z, taken) {
 
 // Everything that depends only on the cells and the network, not on the flows: each zone's cells and
 // their connections, and the faces each link covers from each of its zones. Done once per model.
-export function prepareRoomFlow(g, net) {
+// model (optional): also maps every surface and window to the cell faces it covers (surfaceOf: face key
+// -> name), for heat exchange with the air in the grid solver.
+export function prepareRoomFlow(g, net, model = null) {
   const N = g.zone.length, Z = g.zones.length;
   const cellsOf = Array.from({ length: Z }, () => []);
   for (let c = 0; c < N; c++) if (g.zone[c] >= 0) cellsOf[g.zone[c]].push(c);
@@ -148,7 +150,20 @@ export function prepareRoomFlow(g, net) {
     });
     return { cells, start, adj: Int32Array.from(adj) };
   });
-  return { g, net, cellsOf, faces, zonesCSR, zIndex };
+  // Every surface's faces, windows first so they keep theirs.
+  const surfaceOf = new Map();
+  if (model) {
+    const claimed = new Set();
+    const map = (name, vertices, zoneName) => {
+      const z = zIndex[zoneName];
+      if (z === undefined) return;
+      const fs = linkFaces(g, cellsOf, { vertices, n: z, area: 1 }, z, claimed);
+      for (const f of fs) { claimed.add(f.key); surfaceOf.set(f.key, name); }
+    };
+    for (const w of Object.values(model.windows)) map(w.name, w.vertices, w.zone);
+    for (const srf of Object.values(model.surfaces)) map(srf.name, srf.vertices, srf.zone);
+  }
+  return { g, net, cellsOf, faces, zonesCSR, zIndex, surfaceOf };
 }
 
 // The volume flow out of each cell face that carries an opening's air (key = cell * 6 + direction,
