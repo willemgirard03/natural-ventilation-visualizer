@@ -9,6 +9,7 @@
 
 import { DIRS, neighbour, cellCentre, boundaryFluxes } from './roomflow.js';
 import { hourlyValues } from '../model/schedules.js';
+import { buildHierarchy, vcycle } from './multigrid.js';
 
 const G = 9.81, RHO = 1.2, CP = 1006; // m/s2, kg/m3, J/kg.K
 const WALL = 0, OPEN = 1, SET = 2; // face kinds: no flow, solved, set by an opening's flow
@@ -41,6 +42,7 @@ export class GridFlow {
       [this.cx[c], this.cy[c], this.cz[c]] = cellCentre(g, c);
     }
     this.FV = new Float32Array(N * 6);
+    this.CC = new Float32Array(N * 3);
     this.ghostT = new Float32Array(N).fill(NaN);
   }
 
@@ -125,6 +127,9 @@ export class GridFlow {
       start[i + 1] = adj.length;
     });
     this.csr = { start, adj: Int32Array.from(adj), local };
+    // Multigrid levels for the pressure solve's preconditioner.
+    const pos = Array.from(this.fluid, (c) => [c % g.nx, Math.floor(c / g.nx) % g.ny, Math.floor(c / (g.nx * g.ny))]);
+    this.levels = buildHierarchy(start, this.csr.adj, pos, Int32Array.from(this.fluid, (c) => region[c]));
     // No flow through faces that are not open.
     for (const c of this.fluid) for (let a = 0; a < 3; a++) if (this.kind[c * 6 + 2 * a + 1] !== OPEN) this.U[a][c] = 0;
     // Outdoor air comes in at the outdoor temperature: the cells beyond inflow faces hold it.
@@ -250,18 +255,25 @@ export class GridFlow {
   // Advances the flow by dt seconds.
   step(dt = this.stableDt()) {
     const { g } = this, h = g.h;
-    // 1. Carry velocity and temperature along with the air.
+    // 1. Carry velocity and temperature along with the air. The velocity that traces a point back is
+    // taken cheaply: at a cell centre, the average of its faces; at a face, its own normal velocity
+    // and, across it, the average of the two cells it separates.
     this.snapshot();
-    const U2 = this.U.map((u) => Float32Array.from(u)), T2 = Float32Array.from(this.T), b = new Float64Array(3);
+    const F = this.FV, CC = this.CC;
+    for (const c of this.fluid) for (let a = 0; a < 3; a++) CC[c * 3 + a] = 0.5 * (F[c * 6 + 2 * a] + F[c * 6 + 2 * a + 1]);
+    const U2 = this.U.map((u) => Float32Array.from(u)), T2 = Float32Array.from(this.T);
     for (const c of this.fluid) {
       const cx = this.cx[c], cy = this.cy[c], cz = this.cz[c];
       for (let a = 0; a < 3; a++) {
         if (this.kind[c * 6 + 2 * a + 1] !== OPEN) continue;
-        this.back(cx + (a === 0 ? h / 2 : 0), cy + (a === 1 ? h / 2 : 0), cz + (a === 2 ? h / 2 : 0), dt, b);
-        U2[a][c] = this.component(a, b[0], b[1], b[2]);
+        const nb = this.nbr[c * 6 + 2 * a + 1];
+        const vx = a === 0 ? F[c * 6 + 1] : 0.5 * (CC[c * 3] + CC[nb * 3]);
+        const vy = a === 1 ? F[c * 6 + 3] : 0.5 * (CC[c * 3 + 1] + CC[nb * 3 + 1]);
+        const vz = a === 2 ? F[c * 6 + 5] : 0.5 * (CC[c * 3 + 2] + CC[nb * 3 + 2]);
+        const fx = cx + (a === 0 ? h / 2 : 0), fy = cy + (a === 1 ? h / 2 : 0), fz = cz + (a === 2 ? h / 2 : 0);
+        U2[a][c] = this.component(a, fx - vx * dt, fy - vy * dt, fz - vz * dt);
       }
-      this.back(cx, cy, cz, dt, b);
-      T2[c] = this.temperatureAt(b[0], b[1], b[2]);
+      T2[c] = this.temperatureAt(cx - CC[c * 3] * dt, cy - CC[c * 3 + 1] * dt, cz - CC[c * 3 + 2] * dt);
     }
     this.U = U2;
     this.T = T2;
@@ -325,7 +337,8 @@ export class GridFlow {
     let bb = 0, rr = 0, rz = 0;
     for (let i = 0; i < n; i++) { bb += b[i] * b[i]; r[i] = b[i] - Aq[i]; rr += r[i] * r[i]; }
     const stop = tolerance * Math.sqrt(bb || 1);
-    for (let i = 0; i < n; i++) { z[i] = r[i] / (start[i + 1] - start[i] || 1); q[i] = z[i]; rz += r[i] * z[i]; }
+    vcycle(this.levels, r, z);
+    for (let i = 0; i < n; i++) { q[i] = z[i]; rz += r[i] * z[i]; }
     let it = 0;
     for (; it < maxIterations && Math.sqrt(rr) > stop; it++) {
       apply(q, Aq);
@@ -335,7 +348,9 @@ export class GridFlow {
       const alpha = rz / qAq;
       let rzNew = 0;
       rr = 0;
-      for (let i = 0; i < n; i++) { x[i] += alpha * q[i]; r[i] -= alpha * Aq[i]; rr += r[i] * r[i]; z[i] = r[i] / (start[i + 1] - start[i] || 1); rzNew += r[i] * z[i]; }
+      for (let i = 0; i < n; i++) { x[i] += alpha * q[i]; r[i] -= alpha * Aq[i]; rr += r[i] * r[i]; }
+      vcycle(this.levels, r, z);
+      for (let i = 0; i < n; i++) rzNew += r[i] * z[i];
       const beta = rzNew / rz;
       rz = rzNew;
       for (let i = 0; i < n; i++) q[i] = z[i] + beta * q[i];
