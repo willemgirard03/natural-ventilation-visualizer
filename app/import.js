@@ -410,7 +410,8 @@ function applyHour() {
   // (people, lights) run an hour ahead, so the clock reads an hour later.
   const dst = model && daylightSavingDays(model.epjson);
   const clock = dst && day - 1 >= dst[0] && day - 1 <= dst[1] ? ` (${hh(hour % 24)}–${hh((hour + 1) % 24)} daylight time)` : '';
-  const when = `${dateOf(day).label}, ${hh(hour - 1)}–${hh(hour)}${clock}`;
+  const when = `${hh(hour - 1)}–${hh(hour)}${clock}`;
+  $('day-value').textContent = weather || results ? dateOf(day).label : '';
   if (!weather) {
     $('when').textContent = results ? when : '';
     $('when').title = '';
@@ -535,7 +536,7 @@ async function loadText(name, read) {
 fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
   if (!list.length) return;
   $('examples').hidden = false;
-  $('examples').innerHTML = list.map((e, i) => `<button class="quiet" data-i="${i}" title="${esc(e.file)}">${esc(e.label)}</button>`).join(' ');
+  $('examples').innerHTML = list.map((e, i) => `<button class="minibtn" data-i="${i}" title="${esc(e.file)}">${esc(e.label)}</button>`).join(' ');
   $('examples').addEventListener('click', (ev) => {
     const e = list[ev.target.dataset?.i];
     if (e) loadText(e.file, () => fetch(e.url).then((r) => r.text())).then(() => offerResults(e.id));
@@ -721,6 +722,32 @@ $('room-air').addEventListener('change', () => {
 $('window-depth').addEventListener('change', (e) => view.setWindowDepth(e.target.value));
 view.windowDepth = $('window-depth').value;
 $('fit').addEventListener('click', () => { view.setCut(null); showCut(null); view.frame(); });
+$('projection').addEventListener('click', (e) => {
+  const mode = e.target.dataset?.proj;
+  if (!mode) return;
+  for (const b of $('projection').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b === e.target));
+  view.setProjection(mode);
+});
+// Full screen: the view fills the window; Esc or the button again leaves it.
+function setFull(on) {
+  $('view3d').classList.toggle('full', on);
+  document.body.classList.toggle('hasfull', on);
+  $('full').title = on ? 'Leave full screen' : 'Full screen';
+  view.resize();
+}
+$('full').addEventListener('click', () => setFull(!$('view3d').classList.contains('full')));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('view3d').classList.contains('full')) setFull(false); });
+// The settings bar folds to one line; the view takes the height left under it.
+$('tuck').addEventListener('click', () => {
+  const on = document.body.classList.toggle('bartucked');
+  $('tuck').textContent = on ? '▾' : '▴';
+  $('tuck').title = on ? 'Show all the settings' : 'Fold the settings to one line';
+});
+new ResizeObserver(() => document.documentElement.style.setProperty('--cbh', `${$('drop').offsetHeight}px`)).observe($('drop'));
+// A menu in a view's bar closes on a click anywhere outside it.
+document.addEventListener('pointerdown', (e) => {
+  for (const d of document.querySelectorAll('details.dd[open]')) if (!d.contains(e.target)) d.open = false;
+});
 
 function render(m) {
   const zones = Object.values(m.zones);

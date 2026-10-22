@@ -3,12 +3,14 @@
 // (models are often placed far from it, e.g. Example_01 near x = 1,550 m), which keeps the
 // graphics card's single-precision numbers exact enough.
 //
-// Mouse: left click selects, right drag orbits, middle drag pans, wheel zooms.
+// Mouse: left click selects, right drag orbits, middle drag pans, wheel zooms. The camera can be
+// perspective or parallel, and a view cube in the corner turns it to look from any side.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { area, bounds, triangulate, unitNormal } from '../src/model/geometry.js';
 import { surfaceTriangles, envelopeSolids, faceOffsets } from './solids.js';
+import { ViewCube } from './viewcube.js';
 
 // ClimateStudio's surface types, plus glazing and shading.
 export const TYPE_COLORS = {
@@ -124,8 +126,10 @@ export class View3D {
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 5000);
-    this.camera.up.set(0, 0, 1); // EnergyPlus: z up, y north
+    this.perspective = new THREE.PerspectiveCamera(40, 1, 0.1, 5000);
+    this.parallel = new THREE.OrthographicCamera(-1, 1, 1, -1, -5000, 5000);
+    for (const c of [this.perspective, this.parallel]) c.up.set(0, 0, 1); // EnergyPlus: z up, y north
+    this.camera = this.perspective;
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f94, 2.2));
     this.sun = new THREE.DirectionalLight(0xffffff, 1.4);
     this.sun.position.set(-0.5, -1, 1.4); // from the south-west, above
@@ -159,6 +163,7 @@ export class View3D {
       if (moved < 5) this.pickAt(e);
     });
 
+    this.cube = new ViewCube(this, (dir) => this.lookFrom(dir));
     new ResizeObserver(() => this.resize()).observe(container);
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyTheme());
     this.applyTheme();
@@ -176,12 +181,67 @@ export class View3D {
     const w = this.container.clientWidth, h = this.container.clientHeight;
     if (!w || !h) return;
     this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    this.perspective.aspect = w / h;
+    this.perspective.updateProjectionMatrix();
+    this.fitParallel(this.parallel.top);
     this.render();
   }
 
-  render() { this.renderer.render(this.scene, this.camera); }
+  render() {
+    this.renderer.render(this.scene, this.camera);
+    this.cube?.render();
+  }
+
+  // The parallel camera's frustum for a half height (m, before its zoom), at the view's proportions.
+  fitParallel(half) {
+    const c = this.parallel, r = this.container.clientWidth / Math.max(1, this.container.clientHeight);
+    Object.assign(c, { top: half, bottom: -half, left: -half * r, right: half * r });
+    c.updateProjectionMatrix();
+  }
+
+  // Perspective or parallel. The new camera shows the same extent at the target as the old one.
+  setProjection(mode) {
+    const to = mode === 'parallel' ? this.parallel : this.perspective;
+    if (to === this.camera) return;
+    const from = this.camera, target = this.controls.target, tan = Math.tan(THREE.MathUtils.degToRad(this.perspective.fov / 2));
+    const dir = from.position.clone().sub(target);
+    if (to === this.parallel) {
+      this.fitParallel(dir.length() * tan);
+      to.zoom = 1;
+      to.position.copy(from.position);
+    } else {
+      const dist = this.parallel.top / this.parallel.zoom / tan;
+      to.position.copy(target).addScaledVector(dir.normalize(), dist);
+      to.near = Math.max(0.05, dist / 2000);
+      to.far = dist * 20 + 2000;
+    }
+    to.quaternion.copy(from.quaternion);
+    to.updateProjectionMatrix();
+    this.camera = to;
+    this.controls.object = to;
+    this.controls.update();
+    this.render();
+  }
+
+  // Turns the camera to look at the target from a direction (unit vector, model axes), keeping its
+  // distance, over a third of a second. Straight down or up is nudged so north stays at the top.
+  lookFrom(dir) {
+    const d = dir.clone();
+    if (Math.abs(d.z) > 0.999) d.set(0, -1e-3 * Math.sign(d.z), Math.sign(d.z)).normalize();
+    const target = this.controls.target, start = this.camera.position.clone().sub(target);
+    const dist = start.length(), a = start.clone().normalize(), t0 = performance.now();
+    const step = (now) => {
+      const k = Math.min(1, (now - t0) / 330), e = k * k * (3 - 2 * k);
+      const q = new THREE.Quaternion().setFromUnitVectors(a, d);
+      const v = a.clone().applyQuaternion(new THREE.Quaternion().slerp(q, e));
+      this.camera.position.copy(target).addScaledVector(v, dist);
+      this.camera.lookAt(target);
+      this.controls.update();
+      this.render();
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
 
   clear() {
     for (const obj of [...this.group.children]) {
@@ -556,11 +616,16 @@ export class View3D {
         radius = Math.max(radius, box.getSize(new THREE.Vector3()).length() / 2);
       }
     }
-    const dist = (radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.05;
+    const dist = (radius / Math.sin(THREE.MathUtils.degToRad(this.perspective.fov / 2))) * 1.05;
     const dir = from.clone().normalize();
     this.camera.position.copy(centre).addScaledVector(dir, dist);
-    this.camera.near = Math.max(0.05, dist / 2000);
-    this.camera.far = dist * 20 + 2000;
+    if (this.camera === this.parallel) {
+      this.fitParallel(radius * 1.05);
+      this.parallel.zoom = 1;
+    } else {
+      this.camera.near = Math.max(0.05, dist / 2000);
+      this.camera.far = dist * 20 + 2000;
+    }
     this.camera.updateProjectionMatrix();
     this.controls.target.copy(centre);
     this.controls.update();

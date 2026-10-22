@@ -1,0 +1,155 @@
+/* Natural Ventilation Visualizer: the look of the Solar Shading Explorer (A1 v9), its palette, type,
+   settings bar, view bars and menus, carried over to the three.js views. */
+:root{
+  --paper:#EDF0EE; --panel:#FDFDFC; --ink:#18211F; --ink2:#4B5855; --ink3:#7D8A87;
+  --rule:#C7D1CE; --rule2:#DDE4E1;
+  --glass:#2F6F68; --glassfill:rgba(47,111,104,.15); --glasssoft:rgba(47,111,104,.08);
+  --sun:#D9821A; --sunsoft:rgba(217,130,26,.16);
+  --shade:#93A6AA; --shadefill:#C4D0D2; --poche:#243230;
+  --warn:#8A5A12; --error:#A23A16;
+  --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --cond:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased}
+h1,h2,h3,h4{font-family:var(--cond); font-weight:600; letter-spacing:.005em; margin:0}
+a{color:var(--glass)}
+button{font:inherit}
+code{font-family:var(--mono); font-size:12px; background:var(--panel); border:1px solid var(--rule2); padding:1px 4px; border-radius:2px}
+
+/* ---------- masthead ---------- */
+.masthead{border-bottom:1px solid var(--rule); background:var(--panel); padding:14px 22px; display:flex; flex-wrap:wrap; gap:14px 26px; align-items:baseline}
+.masthead h1{font-size:23px; line-height:1.1}
+.masthead .sub{color:var(--ink2); font-size:13.5px; max-width:60ch; margin:4px 0 0}
+.chips{display:flex; gap:8px; flex-wrap:wrap; margin-left:auto}
+.chip{font-family:var(--mono); font-size:11.5px; color:var(--ink2); border:1px solid var(--rule); border-radius:2px; padding:3px 8px; background:var(--paper)}
+.chip b{color:var(--ink); font-weight:500}
+.tipped{cursor:help; border-bottom:1px dotted var(--ink3)}
+
+/* ---------- controls ---------- */
+.minibtn{font-size:12px; padding:3px 9px; border:1px solid var(--rule); border-radius:2px; background:var(--panel); color:var(--ink2); cursor:pointer; line-height:1.4; display:inline-block}
+.minibtn:hover:not(:disabled){border-color:var(--glass); color:var(--ink)}
+.minibtn:disabled{opacity:.4; cursor:default}
+.minibtn[aria-pressed=true]{background:var(--poche); color:#fff; border-color:var(--poche)}
+.minibtn.iconbtn{display:inline-flex; align-items:center; justify-content:center; padding:3px 6px; line-height:0}
+.linkbtn{border:0; background:none; color:var(--glass); text-decoration:underline; padding:0 2px; font-size:11.5px; cursor:pointer}
+button.quiet{font-size:12px; padding:2px 8px; border:1px solid var(--rule); border-radius:2px; background:var(--panel); color:var(--glass); cursor:pointer}
+button.quiet:hover{border-color:var(--glass)}
+input[type=file]{position:absolute; width:1px; height:1px; opacity:0; pointer-events:none}
+input[type=range]{accent-color:var(--glass); height:18px; margin:0; vertical-align:middle}
+select, input[type=number]{font:inherit; font-size:12px; padding:3px 6px; border:1px solid var(--rule); border-radius:2px; background:var(--panel); color:var(--ink)}
+input[type=number]{width:4.6em; font-family:var(--mono)}
+select:focus, input:focus{outline:none; border-color:var(--glass)}
+.seg{display:inline-flex; gap:0}
+.seg button{font-size:11.5px; padding:3px 9px; border:1px solid var(--rule); background:var(--panel); color:var(--ink2); cursor:pointer; margin-left:-1px}
+.seg button:first-child{border-radius:2px 0 0 2px; margin-left:0}
+.seg button:last-child{border-radius:0 2px 2px 0}
+.seg button[aria-pressed=true]{background:var(--poche); color:#fff; border-color:var(--poche); position:relative}
+.chk{display:flex; gap:8px; align-items:center; font-size:12.5px; color:var(--ink2); margin:3px 0}
+.chk input{margin:0; accent-color:var(--glass); flex:none}
+.muted{color:var(--ink3)}
+.error-text{color:var(--error)}
+.warning-text{color:var(--warn)}
+
+/* ---------- the calculation settings bar: stays at the top as the page scrolls ---------- */
+.calcbar{position:sticky; top:0; z-index:30; display:flex; flex-direction:column; gap:6px; padding:8px 18px; background:var(--panel); border-bottom:1px solid var(--rule); box-shadow:0 2px 6px rgba(0,0,0,.05)}
+.calcbar.over{outline:2px dashed var(--glass); outline-offset:-4px}
+.cbrow{display:flex; flex-wrap:wrap; align-items:center; gap:6px 16px}
+.cbtitle{font-family:var(--cond); font-weight:600; font-size:14px; color:var(--ink); white-space:nowrap}
+.cbsep{width:1px; align-self:stretch; background:var(--rule2)}
+.cbval{font-family:var(--mono); font-size:11.5px; color:var(--ink)}
+.cbnote{font-family:var(--mono); font-size:11px; color:var(--ink3)}
+.barsel{display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--ink2); white-space:nowrap}
+.barsel .unit{font-size:11.5px; color:var(--ink3)}
+.barslide{display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--ink2); white-space:nowrap}
+.barslide input[type=range]{width:150px}
+.barslide .val{min-width:4.2em; font-family:var(--mono); font-size:12px; color:var(--ink)}
+.airrow{border-top:1px solid var(--rule2); margin:0 -18px -8px; padding:4px 18px 5px}
+.airrow .cbfig{font-family:var(--mono); font-size:12px; color:var(--ink); border-left:3px solid var(--glass); padding-left:8px}
+.stale{margin:0; padding:5px 10px; border-left:3px solid var(--sun); background:var(--sunsoft); font-size:12.5px; color:var(--ink)}
+
+/* ---------- views ---------- */
+.views{background:#fff; border-bottom:1px solid var(--rule)}
+.view{background:var(--panel); display:flex; flex-direction:column; min-width:0; position:relative}
+.v3dbar{padding:7px 10px; border-bottom:1px solid var(--rule2); position:relative; z-index:6; background:var(--panel)}
+.vbarrow{display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; padding-right:70px}
+.vtitle{font-family:var(--cond); font-weight:600; font-size:13.5px; color:var(--ink); margin-right:4px}
+.vbtns{position:absolute; right:10px; top:7px; display:inline-flex; gap:4px}
+.vb{min-width:26px; padding:2px 6px; font-size:13px; line-height:1}
+.viewer{position:relative; height:calc(100vh - var(--cbh, 200px) - 82px); min-height:380px; overflow:hidden; background:var(--panel); touch-action:none}
+.viewer canvas{display:block; width:100%; height:100%}
+.view.full{position:fixed; inset:0; z-index:40}
+.view.full .viewer{flex:1; height:auto}
+body.hasfull{overflow:hidden}
+.viewcube{position:absolute; top:8px; right:8px; width:112px; height:112px; z-index:4; cursor:pointer}
+
+/* drop-down menus in a view's bar */
+.dd{position:relative}
+.dd>summary{list-style:none; cursor:pointer; font-size:12px; padding:3px 9px; user-select:none; border:1px solid var(--rule); border-radius:2px; background:var(--panel); color:var(--ink2)}
+.dd>summary::-webkit-details-marker{display:none}
+.dd>summary::after{content:" \25BE"; color:var(--ink3)}
+.dd>summary:hover{border-color:var(--glass)}
+.dd[open]>summary{border-color:var(--glass); color:var(--ink)}
+.ddmenu{position:absolute; z-index:20; top:calc(100% + 4px); left:0; min-width:272px; background:var(--panel); border:1px solid var(--rule); border-radius:2px; padding:7px 11px; box-shadow:0 7px 20px rgba(24,33,31,.14); font-size:12px; color:var(--ink2)}
+.ddmenu .ddsel{font-size:11.5px; padding:2px 4px}
+.laygrp{border-top:1px solid var(--rule2); padding:4px 0 2px}
+.laygrp:first-child{border-top:0}
+.layhd{display:flex; justify-content:space-between; align-items:center; gap:10px; min-height:24px}
+.layhd b{font-weight:500; color:var(--ink)}
+.layitem{padding-left:22px}
+.layrow{display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:26px; white-space:nowrap}
+.layrow input[type=range]{width:100px}
+.opv{font-family:var(--mono); font-size:11px; color:var(--ink3); min-width:3.2em; display:inline-block; text-align:right}
+
+/* the foot of a view: its legend */
+.tblock{display:flex; flex-wrap:wrap; gap:4px 16px; align-items:center; border-top:1px solid var(--rule2); padding:7px 12px; font-size:11.5px; color:var(--ink2)}
+.legend span{display:inline-flex; align-items:center; gap:6px}
+.legend i{width:12px; height:12px; border-radius:1px; display:inline-block; border:1px solid rgba(0,0,0,.12)}
+
+/* the picked item's details, floating over the view */
+.pick-info{position:absolute; left:10px; bottom:10px; z-index:5; max-width:min(440px, calc(100% - 20px)); padding:7px 10px 8px; border-radius:5px; background:var(--panel); border:1px solid var(--rule); box-shadow:0 3px 10px rgba(0,0,0,.13); font-size:12px; line-height:1.45; color:var(--ink2)}
+.pick-info b{font-weight:600; color:var(--ink)}
+.pick-info div + div{margin-top:3px}
+.pick-info button{margin-top:4px}
+.pick-info select{font-size:11.5px; padding:1px 4px}
+.pick-info input[type=range]{width:120px}
+
+/* ---------- model details, folded away under the view ---------- */
+.refs{border-bottom:1px solid var(--rule)}
+.refs>summary{font-family:var(--cond); font-weight:600; font-size:16px; padding:14px 24px; cursor:pointer; list-style:none; color:var(--ink2)}
+.refs>summary::-webkit-details-marker{display:none}
+.refs>summary::before{content:"+ "; font-family:var(--mono); color:var(--ink3)}
+.refs[open]>summary::before{content:"– "}
+.refs>section{padding:4px 24px 24px; border-top:1px solid var(--rule2)}
+.refs h2{font-size:16px; margin:22px 0 8px}
+.summary{display:flex; flex-wrap:wrap; gap:6px 22px; margin:12px 0 0; font-size:13px; color:var(--ink2)}
+.summary b{color:var(--ink); font-weight:500; font-family:var(--mono)}
+.checks{list-style:none; padding:0; margin:0; border-top:2px solid var(--poche); font-size:13px}
+.checks li{padding:7px 2px; border-bottom:1px solid var(--rule2)}
+.checks .level{display:inline-block; min-width:68px; font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:.04em}
+.checks .error .level{color:var(--error)}
+.checks .warning .level{color:var(--warn)}
+.checks .info .level{color:var(--ink3)}
+.checks button.object{font:inherit; padding:0; border:none; background:none; color:var(--glass); text-decoration:underline; cursor:pointer}
+.scroll{overflow-x:auto; background:var(--panel); border:1px solid var(--rule2)}
+table{border-collapse:collapse; width:100%; font-size:12.5px; font-variant-numeric:tabular-nums}
+th, td{padding:5px 10px; text-align:right; white-space:nowrap; border-bottom:1px solid var(--rule2)}
+td{font-family:var(--mono); font-size:12px}
+th{font-weight:600; color:var(--ink2); font-size:11.5px; vertical-align:bottom}
+th:first-child, td:first-child, #surfaces th:last-child, #surfaces td:last-child{text-align:left}
+td:first-child{font-family:var(--sans)}
+#surfaces td:last-child{white-space:normal}
+tr:last-child td{border-bottom:none}
+td[title]{text-decoration:underline dotted var(--ink3); text-underline-offset:3px; cursor:help}
+footer{padding:18px 24px 40px; font-size:12px; color:var(--ink3); max-width:88ch}
+
+/* the settings bar folds to its first line */
+.tuck{border:1px solid var(--rule); background:var(--panel); color:var(--ink2); border-radius:2px; cursor:pointer; font-size:12px; padding:1px 7px; line-height:1.3}
+.tuck:hover{border-color:var(--glass); color:var(--ink)}
+body.bartucked .calcbar>.cbrow:not(:first-child):not(.airrow){display:none}
+body.bartucked .calcbar>.cbrow:first-child>:not(.tuck):not(.cbtitle){display:none}
+.calcbar select#weather-file{max-width:20em}
+.calcbar input[type=number]{width:5.2em}

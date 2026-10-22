@@ -3,208 +3,128 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Model import</title>
+<title>Natural Ventilation Visualizer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <script type="importmap">
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
 } }
 </script>
-<style>
-:root {
-  --paper: #E7EBE9;
-  --panel: #F3F5F4;
-  --ink: #1D2124;
-  --ink-soft: #586065;
-  --rule: #C4CBC8;
-  --accent: #2356A3;
-  --accent-ink: #FFFFFF;
-  --error: #B3261E;
-  --warning: #8A5A00;
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --paper: #1B1E21;
-    --panel: #23272B;
-    --ink: #E3E7E5;
-    --ink-soft: #9AA3A8;
-    --rule: #3A4146;
-    --accent: #86AEEB;
-    --accent-ink: #0F1C30;
-    --error: #F2B8B5;
-    --warning: #E8C26B;
-    color-scheme: dark;
-  }
-}
-:root[data-theme="dark"] {
-  --paper: #1B1E21;
-  --panel: #23272B;
-  --ink: #E3E7E5;
-  --ink-soft: #9AA3A8;
-  --rule: #3A4146;
-  --accent: #86AEEB;
-  --accent-ink: #0F1C30;
-  --error: #F2B8B5;
-  --warning: #E8C26B;
-  color-scheme: dark;
-}
-*, *::before, *::after { box-sizing: border-box; }
-body {
-  margin: 0;
-  background: var(--paper);
-  color: var(--ink);
-  font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
-  font-size: 15px;
-  line-height: 1.45;
-}
-main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
-h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
-h2 { font-size: 16px; font-weight: 600; margin: 28px 0 8px; }
-p.lede { color: var(--ink-soft); margin: 0 0 16px; max-width: 70ch; }
-.drop {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
-  padding: 20px; border: 1.5px dashed var(--rule); border-radius: 8px; background: var(--panel);
-}
-.drop.over { border-color: var(--accent); }
-.drop span { color: var(--ink-soft); }
-button, label.button {
-  font: inherit; font-weight: 500; cursor: pointer;
-  padding: 7px 14px; border-radius: 6px; border: 1px solid var(--accent);
-  background: var(--accent); color: var(--accent-ink);
-}
-button:disabled { opacity: 0.4; cursor: default; }
-input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.summary { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 16px 0 0; color: var(--ink-soft); }
-.summary b { color: var(--ink); font-weight: 600; }
-.checks { list-style: none; padding: 0; margin: 0; }
-.checks li { padding: 6px 0; border-bottom: 1px solid var(--rule); }
-.checks .level { display: inline-block; min-width: 68px; font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; }
-.checks .error .level { color: var(--error); }
-.checks .warning .level { color: var(--warning); }
-.checks .info .level { color: var(--ink-soft); }
-.scroll { overflow-x: auto; background: var(--panel); border-radius: 8px; }
-table { border-collapse: collapse; width: 100%; font-size: 14px; font-variant-numeric: tabular-nums; }
-th, td { padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--rule); }
-th { font-weight: 600; color: var(--ink-soft); font-size: 12px; vertical-align: bottom; }
-th:first-child, td:first-child, #surfaces th:last-child, #surfaces td:last-child { text-align: left; }
-#surfaces td:last-child { white-space: normal; }
-tr:last-child td { border-bottom: none; }
-td[title] { text-decoration: underline dotted var(--ink-soft); text-underline-offset: 3px; cursor: help; }
-.muted { color: var(--ink-soft); }
-.error-text { color: var(--error); }
-button.quiet { background: transparent; color: var(--accent); }
-.view-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin: 0 0 8px; color: var(--ink-soft); }
-.view-tools label { display: inline-flex; align-items: center; gap: 6px; }
-.view-tools select, .view-tools output { font: inherit; color: var(--ink); }
-.view-tools output { min-width: 4.5em; font-variant-numeric: tabular-nums; }
-.view-tools input[type=number] { width: 4.2em; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 2px 4px; }
-#air-total, #when { color: var(--ink); }
-.quiet-button { color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
-.viewer { position: relative; height: min(64vh, 620px); min-height: 320px; border-radius: 8px; overflow: hidden; background: var(--panel); }
-.viewer canvas { display: block; width: 100%; height: 100%; }
-.pick-info {
-  position: absolute; left: 10px; bottom: 10px; max-width: min(420px, calc(100% - 20px));
-  padding: 8px 12px; border-radius: 6px; background: var(--paper); border: 1px solid var(--rule);
-  font-size: 13px; line-height: 1.4; box-shadow: 0 2px 8px rgb(0 0 0 / 0.12);
-}
-.pick-info b { font-weight: 600; }
-.pick-info div + div { margin-top: 4px; }
-.warning-text { color: var(--warning); }
-.pick-info button { margin-top: 6px; padding: 3px 10px; font-size: 13px; }
-.stale { margin: 0 0 8px; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--warning); color: var(--ink); font-size: 14px; }
-.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; font-size: 13px; color: var(--ink-soft); }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.legend i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
-.checks button.object { font: inherit; padding: 0; border: none; background: none; color: var(--accent); text-decoration: underline; cursor: pointer; }
-footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
-</style>
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<main>
-  <h1>Model import</h1>
-  <p class="lede">Reads an EnergyPlus <code>.epJSON</code> file, such as the one in every ClimateStudio results folder, into the tool's project model. The file stays on this computer. Underlined values come from the file; hover to see the EnergyPlus object and field.</p>
-
-  <div class="drop" id="drop">
-    <label class="button" for="file">Choose .epJSON</label>
-    <input type="file" id="file" accept=".epJSON,.epjson,.json">
-    <span id="status">or drop a file here</span>
-    <span id="examples" hidden></span>
-    <button id="export" disabled>Export .epJSON</button>
+<header class="masthead">
+  <div>
+    <h1>Natural Ventilation Visualizer</h1>
+    <p class="sub">How air moves through a building and its rooms, from an EnergyPlus model: where it comes in, where it goes, how warm it is and how much CO₂ it carries.</p>
   </div>
-  <div class="summary" id="summary"></div>
-
-  <div id="results" hidden>
-    <h2>3D view</h2>
-    <div class="view-tools">
-      <label title="Colour each surface by its ClimateStudio surface type, by the zone it belongs to, or by the pressure difference across it in the hour solved (blue: air pushed into the room, red: pushed out). Each surface is lighter on the side it faces (out of its zone) and darker on the inside.">Colour by
-        <select id="color-by"><option value="type">Surface type</option><option value="zone">Zone</option><option value="pressure">Pressure difference</option><option value="co2">CO₂</option></select></label>
-      <label title="Hide everything above this height to see inside the building">Cut at
-        <input type="range" id="cut" min="0" max="1" step="0.1"> <output id="cut-value">none</output></label>
-      <label title="Draw walls, floors and roofs as modelled (thin), or as solids of their construction's thickness. The location line is where the modelled surface sits in the solid: at its interior finish (the solid grows outwards), its centreline, or its exterior finish (the solid grows into the room). Walls shared by two zones are always centred. Drawing only: the airflow uses the zones as modelled.">Walls <select id="walls"><option value="thin">Thin</option><option value="interior">Interior finish</option><option value="centre">Centreline</option><option value="exterior">Exterior finish</option></select></label>
-      <label title="Where windows sit in thick walls: at the wall's exterior face, its centre, or its interior face. Drawing only.">Windows at <select id="window-depth"><option value="exterior">Exterior face</option><option value="centre" selected>Centre</option><option value="interior">Interior face</option></select></label>
-      <label title="Colour the horizontal cut and the vertical section by the air's temperature or speed where they pass through rooms, from the room air (simulated or ideal flow). Set a cut height or a section to see them.">Slices <select id="slices"><option value="">none</option><option value="temperature">Temperature</option><option value="speed">Speed</option></select></label>
-      <label title="Surrounding buildings and other shading surfaces"><input type="checkbox" id="show-shading" checked> Shading</label>
-      <label title="Wind rose on the ground for the month picked in the weather file, with this hour's wind as an arrow"><input type="checkbox" id="show-rose" checked> Wind rose</label>
-      <label title="A vertical cut through the building, along or across its long side, to see into the rooms from the side">Section
-        <select id="section"><option value="">none</option><option value="along">Along</option><option value="across">Across</option></select>
-        <input type="range" id="section-at" min="0" max="1" step="0.01" value="0.5" disabled></label>
-      <button id="section-flip" class="quiet" title="Show the other side of the section" disabled>Flip</button>
-      <button id="fit" class="quiet" title="Fit the whole building in view">Fit</button>
-      <span title="Left click: select a surface or window · Right drag: orbit · Middle drag: pan · Wheel: zoom">Mouse controls</span>
-    </div>
-    <div class="view-tools">
-      <label title="Hourly weather file (.epw) for the site: picking a day and hour fills in the outdoor conditions">Weather <select id="weather-file"><option value="">none</option></select></label>
-      <label class="quiet-button" title="Load a weather file from this computer">Load .epw<input type="file" id="weather-load" accept=".epw"></label>
-      <label title="Day of the year">Day <input type="range" id="day" min="1" max="365" value="196" disabled></label>
-      <label title="Hour of the day: the weather file's hour ending at this time">Hour <input type="range" id="hour" min="1" max="24" value="15" disabled></label>
-      <output id="when"></output>
-    </div>
-    <div class="view-tools">
-      <label title="Zone temperatures and ventilation, hour by hour, from an EnergyPlus results file (.eso), such as the one in a ClimateStudio results folder">Results <select id="results-file"><option value="">none</option></select></label>
-      <label class="quiet-button" title="Load a results file (.eso) from this computer">Load .eso<input type="file" id="results-load" accept=".eso"></label>
-      <output id="results-status"></output>
-    </div>
-    <div class="view-tools">
-      <label title="Particles follow the airflow network: where outdoor air enters, which rooms it passes through and where it leaves. They do not show the pattern of air inside each room."><input type="checkbox" id="show-air" checked> Airflow</label>
-      <label title="Outdoor air temperature">Outdoor <input type="number" id="t-out" value="18" step="1"> °C</label>
-      <label id="t-in-label" title="Indoor air temperature, the same in every zone. With a results file, each zone takes its own.">Indoor <input type="number" id="t-in" value="26" step="1"> °C</label>
-      <label title="Wind speed at the weather station">Wind <input type="number" id="wind" value="3" min="0" step="0.5"> m/s</label>
-      <label title="Direction the wind comes from, in degrees clockwise from north (270 = west)">from <input type="number" id="wind-dir" value="270" min="0" max="359" step="15">°</label>
-      <label title="Operable windows: all open as far as their operable fraction allows, all closed, or open in the zones whose natural ventilation ran in that hour of the results">Windows <select id="windows"><option value="open">All open</option><option value="closed">All closed</option><option value="results" disabled>As in results</option></select></label>
-      <label title="How air moves inside rooms. Simulated: the grid solver, with buoyancy from heat and temperature differences, jets that carry momentum, and air between rooms through open doors; it runs in the background and takes a moment to settle after a change. Ideal flow: the smoothest path between openings, instant but with no buoyancy or momentum.">Room air <select id="room-air"><option value="grid">Simulated</option><option value="ideal">Ideal flow</option></select></label>
-      <output id="room-air-status"></output>
-      <label title="Colour the particles by the temperature of the air they carry, or by its speed">Colour <select id="air-color"><option value="temperature">Temperature</option><option value="speed">Speed</option></select></label>
-      <label title="How every window opens: casement (hinged at one side, opening out), awning (hinged at the top, opening out) or hopper (hinged at the bottom, opening in). The sash opens as far as needed for the window's operable fraction, within its limit. Select a window to set its own.">Sashes <select id="sash-type"><option value="casement">Casement</option><option value="awning">Awning</option><option value="hopper">Hopper</option></select></label>
-      <label title="The interior doors the tool adds: all open, or all closed (a closed door still leaks, like a 1 cm gap under it)">Doors <select id="doors"><option value="open">Open</option><option value="closed">Closed</option></select></label>
-      <button id="windows-reset" class="quiet" hidden title="Undo the windows and doors opened or closed one by one, back to the Windows and Doors settings">Reset windows</button>
-      <label title="How many particles to show for the same flow">Particles <input type="range" id="air-density" min="-2" max="2" step="0.5" value="0"> <output id="air-density-value">×1</output></label>
-      <label title="How much faster than real time the particles move">Speed <input type="range" id="air-speed" min="1" max="30" value="5"> <output id="air-speed-value">×5</output></label>
-      <output id="air-total"></output>
-    </div>
-    <p class="stale" id="stale" hidden></p>
-    <div class="viewer" id="viewer">
-      <div class="pick-info" id="info" hidden></div>
-    </div>
-    <div class="legend" id="legend"></div>
-
-    <h2>Model checks</h2>
-    <ul class="checks" id="checks"></ul>
-
-    <h2>Zones</h2>
-    <div class="scroll"><table id="zones"></table></div>
-
-    <h2>Surfaces by type</h2>
-    <div class="scroll"><table id="surfaces"></table></div>
-
-    <h2>Constructions</h2>
-    <div class="scroll"><table id="constructions"></table></div>
+  <div class="chips">
+    <span class="chip tipped" title="Left click: select a surface, window or section plane · Right drag: orbit · Middle drag: pan · Wheel: zoom">Mouse</span>
   </div>
-  <footer>Natural Ventilation Visualizer · importer, model version <span id="version"></span></footer>
+</header>
+
+<div class="calcbar" id="drop">
+  <div class="cbrow">
+    <button type="button" class="tuck" id="tuck" title="Fold the settings to one line">▴</button>
+    <span class="cbtitle tipped" title="What the airflow is calculated for: the model, the weather and results files it uses, the hour, and the conditions. Drop an .epJSON anywhere on this bar to open it.">Calculation settings</span>
+    <span class="barsel"><span class="tipped" title="An EnergyPlus .epJSON file, such as the one in every ClimateStudio results folder. The file stays on this computer.">Model</span>
+      <label class="minibtn" for="file">Open .epJSON</label><input type="file" id="file" accept=".epJSON,.epjson,.json">
+      <span id="status" class="cbval">none</span>
+      <span id="examples" hidden></span>
+      <button type="button" class="minibtn" id="export" disabled title="Save the model as it stands, with the tool's changes, as .epJSON">Export</button></span>
+    <span class="barsel"><span class="tipped" title="Hourly weather file (.epw) for the site: picking a date and time fills in the outdoor conditions">Weather file</span>
+      <select id="weather-file"><option value="">none</option></select>
+      <label class="linkbtn" title="Load a weather file from this computer">.epw<input type="file" id="weather-load" accept=".epw"></label></span>
+    <span class="barsel"><span class="tipped" title="Zone temperatures, ventilation and CO₂, hour by hour, from an EnergyPlus results file (.eso), such as the one in a ClimateStudio results folder">Results</span>
+      <select id="results-file"><option value="">none</option></select>
+      <label class="linkbtn" title="Load a results file (.eso) from this computer">.eso<input type="file" id="results-load" accept=".eso"></label></span>
+    <output id="results-status" class="cbnote"></output>
+  </div>
+  <div class="cbrow">
+    <span class="barslide"><span class="tipped" title="Day of the year">Date</span><input type="range" id="day" min="1" max="365" value="196" disabled><output id="day-value" class="val"></output></span>
+    <span class="barslide"><span class="tipped" title="Hour of the day: the weather file's hour, in standard time. On daylight-saving days the clock reads an hour later, and the model's schedules follow the clock.">Time</span><input type="range" id="hour" min="1" max="24" value="15" disabled><output id="when" class="val"></output></span>
+    <span class="cbsep"></span>
+    <span class="barsel"><span class="tipped" title="Outdoor air temperature">Outdoor</span><input type="number" id="t-out" value="18" step="1"><span class="unit">°C</span></span>
+    <span class="barsel" id="t-in-label"><span class="tipped" title="Indoor air temperature, the same in every zone. With a results file, each zone takes its own.">Indoor</span><input type="number" id="t-in" value="26" step="1"><span class="unit">°C</span></span>
+    <span class="barsel"><span class="tipped" title="Wind speed at the weather station, and the direction it comes from in degrees clockwise from north (270 = west)">Wind</span><input type="number" id="wind" value="3" min="0" step="0.5"><span class="unit">m/s from</span><input type="number" id="wind-dir" value="270" min="0" max="359" step="15"><span class="unit">°</span></span>
+  </div>
+  <div class="cbrow">
+    <span class="barsel"><span class="tipped" title="Operable windows: all open as far as their operable fraction allows, all closed, or as they were in the results (open in the zones whose natural ventilation ran in that hour)">Windows</span><select id="windows"><option value="open">All open</option><option value="closed">All closed</option><option value="results" disabled>As in results</option></select></span>
+    <span class="barsel"><span class="tipped" title="The interior doors the tool adds: all open, or all closed (a closed door still leaks, like a 1 cm gap under it)">Doors</span><select id="doors"><option value="open">Open</option><option value="closed">Closed</option></select></span>
+    <span class="barsel"><span class="tipped" title="How every window opens: casement (hinged at one side, opening out), awning (hinged at the top, opening out) or hopper (hinged at the bottom, opening in). The sash opens as far as needed for the window's operable fraction, within its limit. Select a window to set its own.">Sashes</span><select id="sash-type"><option value="casement">Casement</option><option value="awning">Awning</option><option value="hopper">Hopper</option></select></span>
+    <button type="button" id="windows-reset" class="minibtn" hidden title="Undo the windows and doors opened or closed one by one, back to the Windows and Doors settings">Reset windows</button>
+    <span class="barsel"><span class="tipped" title="How air moves inside rooms. Simulated: the grid solver, with buoyancy from heat and temperature differences, jets that carry momentum, and air between rooms through open doors; it runs in the background and takes a moment to settle after a change. Ideal flow: the smoothest path between openings, instant but with no buoyancy or momentum.">Room air</span><select id="room-air"><option value="grid">Simulated</option><option value="ideal">Ideal flow</option></select></span>
+    <output id="room-air-status" class="cbnote"></output>
+  </div>
+  <div class="cbrow airrow">
+    <span class="cbtitle tipped" title="Outdoor air entering the building through windows, doors and leaks, from the airflow network. Air changes per hour: that flow divided by the volume of all zones.">Airflow</span>
+    <output id="air-total" class="cbfig"></output>
+  </div>
+  <p class="stale" id="stale" hidden></p>
+</div>
+
+<main id="results" hidden>
+  <section class="views">
+    <div class="view" id="view3d">
+      <div class="v3dbar"><div class="vbarrow">
+        <span class="vtitle">Building in 3D</span>
+        <label class="barsel"><span class="tipped" title="Colour each surface by its ClimateStudio surface type, by its zone, by the pressure difference across it in the hour solved (blue: air pushed into the room, red: pushed out), or by its room's CO₂. Each surface is lighter on the side it faces and darker inside.">Colour by</span>
+          <select id="color-by"><option value="type">Surface type</option><option value="zone">Zone</option><option value="pressure">Pressure difference</option><option value="co2">CO₂</option></select></label>
+        <details class="dd" id="layers-dd"><summary>Layers</summary><div class="ddmenu">
+          <div class="laygrp"><div class="layhd"><label class="chk"><input type="checkbox" id="show-air" checked><span><b class="tipped" title="Particles follow the air: where outdoor air enters, the rooms it passes through, and the pattern of the air inside them (from the room air setting)">Airflow particles</b></span></label></div>
+            <div class="layrow layitem"><span>Colour</span><select id="air-color" class="ddsel"><option value="temperature">Temperature</option><option value="speed">Speed</option></select></div>
+            <div class="layrow layitem"><span class="tipped" title="How many particles to show for the same flow">Density</span><span><input type="range" id="air-density" min="-2" max="2" step="0.5" value="0"> <output id="air-density-value" class="opv">×1</output></span></div>
+            <div class="layrow layitem"><span class="tipped" title="How much faster than real time the particles move">Speed</span><span><input type="range" id="air-speed" min="1" max="30" value="5"> <output id="air-speed-value" class="opv">×5</output></span></div>
+          </div>
+          <div class="laygrp"><div class="layhd"><span><b class="tipped" title="Colour the cuts by the air's temperature or speed where they pass through rooms, from the room air (simulated or ideal flow)">Air on the cuts</b></span><select id="slices" class="ddsel"><option value="">none</option><option value="temperature">Temperature</option><option value="speed">Speed</option></select></div></div>
+          <div class="laygrp"><div class="layhd"><label class="chk"><input type="checkbox" id="show-shading" checked><span><b class="tipped" title="Surrounding buildings and other shading surfaces">Shading</b></span></label></div></div>
+          <div class="laygrp"><div class="layhd"><label class="chk"><input type="checkbox" id="show-rose" checked><span><b class="tipped" title="Wind rose on the ground for the month picked, with this hour's wind as an arrow">Wind rose</b></span></label></div></div>
+        </div></details>
+        <details class="dd" id="walls-dd"><summary>Walls</summary><div class="ddmenu">
+          <div class="layrow"><span class="tipped" title="Draw walls, floors and roofs as solids of their construction's thickness, or as modelled (thin). The location line is where the modelled surface sits in the solid: at its interior finish (the solid grows outwards), its centreline, or its exterior finish (the solid grows into the room). Walls shared by two zones are always centred. Drawing only: the airflow uses the zones as modelled.">Location line</span>
+            <select id="walls" class="ddsel"><option value="interior" selected>Interior finish</option><option value="centre">Centreline</option><option value="exterior">Exterior finish</option><option value="thin">Thin (as modelled)</option></select></div>
+          <div class="layrow"><span class="tipped" title="Where windows sit in thick walls: at the wall's exterior face, its centre, or its interior face. Drawing only.">Windows at</span>
+            <select id="window-depth" class="ddsel"><option value="exterior">Exterior face</option><option value="centre" selected>Centre</option><option value="interior">Interior face</option></select></div>
+        </div></details>
+        <details class="dd" id="cuts-dd"><summary>Cuts</summary><div class="ddmenu">
+          <div class="layrow"><span class="tipped" title="Hide everything above this height to see inside the building">Plan cut</span><span><input type="range" id="cut" min="0" max="1" step="0.1"> <output id="cut-value" class="opv">none</output></span></div>
+          <div class="layrow"><span class="tipped" title="A vertical cut through the building, along or across its long side">Section</span>
+            <span><select id="section" class="ddsel"><option value="">none</option><option value="along">Along</option><option value="across">Across</option></select>
+            <input type="range" id="section-at" min="0" max="1" step="0.01" value="0.5" disabled>
+            <button type="button" id="section-flip" class="minibtn" title="Show the other side of the section" disabled>Flip</button></span></div>
+        </div></details>
+        <span class="seg mini" id="projection"><button type="button" data-proj="perspective" aria-pressed="true" title="Perspective: nearer things larger">Perspective</button><button type="button" data-proj="parallel" aria-pressed="false" title="Parallel: true proportions, as in an axonometric">Parallel</button></span>
+        <span class="vbtns">
+          <button type="button" class="minibtn vb iconbtn" id="fit" title="Fit the whole building in view"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="1.6" fill="currentColor"/></svg></button>
+          <button type="button" class="minibtn vb iconbtn" id="full" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3.5 12.5l9-9" stroke="currentColor" stroke-width="1.4"/><path d="M8.5 2.5h5v5M2.5 8.5v5h5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></button>
+        </span>
+      </div></div>
+      <div class="viewer" id="viewer">
+        <div class="pick-info" id="info" hidden></div>
+      </div>
+      <div class="legend tblock" id="legend"></div>
+    </div>
+  </section>
+
+  <details class="refs" id="details">
+    <summary>Model details</summary>
+    <section>
+      <div class="summary" id="summary"></div>
+      <h2>Model checks</h2>
+      <ul class="checks" id="checks"></ul>
+      <h2>Zones</h2>
+      <div class="scroll"><table id="zones"></table></div>
+      <h2>Surfaces by type</h2>
+      <div class="scroll"><table id="surfaces"></table></div>
+      <h2>Constructions</h2>
+      <div class="scroll"><table id="constructions"></table></div>
+    </section>
+  </details>
 </main>
+<footer>Natural Ventilation Visualizer, model version <span id="version"></span>. A teaching tool for natural ventilation; the airflow follows EnergyPlus's airflow network, and the room air is a simplified simulation, not a CFD study.</footer>
 <script type="module" src="import.js"></script>
 </body>
 </html>
