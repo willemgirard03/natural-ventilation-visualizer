@@ -141,7 +141,7 @@ footer { margin-top: 32px; color: var(--ink-soft); font-size: 13px; }
     <h2>3D view</h2>
     <div class="view-tools">
       <label title="Colour each surface by its ClimateStudio surface type, by the zone it belongs to, or by the pressure difference across it in the hour solved (blue: air pushed into the room, red: pushed out). Each surface is lighter on the side it faces (out of its zone) and darker on the inside.">Colour by
-        <select id="color-by"><option value="type">Surface type</option><option value="zone">Zone</option><option value="pressure">Pressure difference</option></select></label>
+        <select id="color-by"><option value="type">Surface type</option><option value="zone">Zone</option><option value="pressure">Pressure difference</option><option value="co2">CO₂</option></select></label>
       <label title="Hide everything above this height to see inside the building">Cut at
         <input type="range" id="cut" min="0" max="1" step="0.1"> <output id="cut-value">none</output></label>
       <label title="Draw walls, floors and roofs as modelled (thin), or as solids of their construction's thickness. The location line is where the modelled surface sits in the solid: at its interior finish (the solid grows outwards), its centreline, or its exterior finish (the solid grows into the room). Walls shared by two zones are always centred. Drawing only: the airflow uses the zones as modelled.">Walls <select id="walls"><option value="thin">Thin</option><option value="interior">Interior finish</option><option value="centre">Centreline</option><option value="exterior">Exterior finish</option></select></label>

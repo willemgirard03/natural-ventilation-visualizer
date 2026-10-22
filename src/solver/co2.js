@@ -10,14 +10,23 @@ import { density, standardPressure } from './air.js';
 
 const RHO = 1.2;
 
+// Schedules expanded to the year once per model: the page asks for many hours at a time.
+const expanded = new WeakMap();
+function scheduleAt(epjson, name, hour) {
+  if (!expanded.has(epjson)) expanded.set(epjson, new Map());
+  const cache = expanded.get(epjson);
+  if (!cache.has(name)) cache.set(name, hourlyValues(epjson, name));
+  return cache.get(name)?.[hour];
+}
+
 // CO2 generated in each zone at an hour index (m3/s), in the network's zone order.
 export function co2Generation(model, zones, hour) {
-  const sched = (name) => (name ? hourlyValues(model.epjson, name)?.[hour] ?? 1 : 1);
+  const sched = (name) => (name ? scheduleAt(model.epjson, name, hour) ?? 1 : 1);
   return zones.map((z) => {
     const p = model.zones[z].people;
     if (!p) return 0;
     const people = p.density.value * model.zones[z].floorArea.value * sched(p.schedule);
-    const activity = p.activityLevel ? hourlyValues(model.epjson, p.activityLevel.from.name)?.[hour] ?? p.activityLevel.value : 120;
+    const activity = p.activityLevel ? scheduleAt(model.epjson, p.activityLevel.from.name, hour) ?? p.activityLevel.value : 120;
     return people * activity * p.co2GenerationRate.value;
   });
 }
@@ -29,7 +38,7 @@ export function co2Generation(model, zones, hour) {
 // at standard density (20 C dry air at the site's pressure). That fresh air dilutes the zone's CO2.
 export function outdoorAirSupply(model, zones, hour, elevation = 0) {
   const ep = model.epjson;
-  const sched = (name) => (name ? hourlyValues(ep, name)?.[hour] ?? 1 : 1);
+  const sched = (name) => (name ? scheduleAt(ep, name, hour) ?? 1 : 1);
   const lists = ep['ZoneHVAC:EquipmentList'] || {}, units = ep['ZoneHVAC:IdealLoadsAirSystem'] || {};
   const connections = Object.values(ep['ZoneHVAC:EquipmentConnections'] || {});
   const rho = density(standardPressure(elevation), 20, 0);
@@ -56,7 +65,7 @@ export function outdoorAirSupply(model, zones, hour, elevation = 0) {
 // Outdoor CO2 at an hour index (ppm): EnergyPlus's schedule, or 400 ppm.
 export function outdoorCO2(model, hour) {
   const balance = Object.values(model.epjson.ZoneAirContaminantBalance || {})[0];
-  const v = balance?.outdoor_carbon_dioxide_schedule_name ? hourlyValues(model.epjson, balance.outdoor_carbon_dioxide_schedule_name)?.[hour] : null;
+  const v = balance?.outdoor_carbon_dioxide_schedule_name ? scheduleAt(model.epjson, balance.outdoor_carbon_dioxide_schedule_name, hour) : null;
   return v ?? 400;
 }
 

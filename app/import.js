@@ -1,12 +1,13 @@
 import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
-import { View3D, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE } from './view3d.js';
+import { View3D, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE, co2Color, CO2_SCALE } from './view3d.js';
 import { footprintAxis, toAirflowNetwork } from '../src/model/airflow-network.js';
 import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
 import { voxelize, prepareRoomFlow, roomFlow } from '../src/solver/roomflow.js';
 import { GridFlow } from '../src/solver/grid.js';
+import { co2Generation, outdoorAirSupply, outdoorCO2, stepCO2 } from '../src/solver/co2.js';
 import { cellAt } from '../src/solver/roomflow.js';
 import { FieldSlices, rampTemperature } from './slices.js';
 import { standardPressure } from '../src/solver/air.js';
@@ -15,6 +16,7 @@ import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windros
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { readZoneResultsStream, zoneAt, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
+import { daylightSavingDays } from '../src/model/schedules.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -59,6 +61,7 @@ function drawSlices(now = false) {
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
+let co2Timer = 0;
 let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room flow, and its latest field
 let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour solved
 // The grid solver runs in a worker; `grid` is the page's copy, reading the worker's latest step.
@@ -102,22 +105,13 @@ const openFraction = (l) => freeFraction(sashOf(l.name).type, l.width, l.height,
 let weather = null, weatherHour = null; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
 
-// Solves the network for the conditions in the Airflow controls and hands the flows to the particles.
-function solveAir() {
-  if (!model || !net) return;
-  // The site comes from the weather file when there is one, else from the model, else sea level.
-  const loc = weather?.location || Object.values(model.epjson['Site:Location'] || {})[0] || {};
-  const site = { elevation: loc.elevation ?? 0, latitude: loc.latitude ?? 45 };
+// The network's conditions at an hour index: the outdoor air given, rooms from the results (or the
+// Inside setting) and windows and doors as set, following the results' own openings where asked.
+function conditionsAt(hourAt, outdoor, site) {
   const tIn = Number($('t-in').value), mode = $('windows').value;
-  const hourAt = hourIndex(Number($('day').value), Number($('hour').value));
-  const pressure = weatherHour?.pressure ?? standardPressure(site.elevation);
-  const inside = (z) => (results && zoneAt(results, z, hourAt, pressure)) || { t: tIn, w: 0.008, vent: null };
-  const conditions = {
-    site,
-    outdoor: {
-      t: Number($('t-out').value), w: weatherHour?.w ?? 0.008, pressure: weatherHour?.pressure ?? standardPressure(site.elevation),
-      windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
-    },
+  const inside = (z) => (results && zoneAt(results, z, hourAt, outdoor.pressure)) || { t: tIn, w: 0.008, vent: null };
+  return {
+    site, outdoor,
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
     open: Object.fromEntries(net.links.filter((l) => l.control === 'zone' || l.door).map((l) => {
       if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : $('doors').value === 'open') ? l.openFactor : 0];
@@ -130,6 +124,47 @@ function solveAir() {
       return [l.name, open ? openFraction(l) : 0];
     })),
   };
+}
+
+// CO2 in each zone (ppm), the mean over the hour picked, as EnergyPlus reports it. It builds up over
+// hours, so the balance steps through the two days before from outdoor levels: each hour with its own weather (this hour's held
+// without a weather file), the results' room temperatures, the windows and doors as set now, people
+// from the model's schedules and the outdoor air its ventilation equipment supplies.
+const CO2_HOURS = 48;
+function co2History(hourAt, solutionNow, site, outdoorNow) {
+  const volumes = net.zones.map((z) => model.zones[z].volume.value);
+  let C = null;
+  for (let k = CO2_HOURS - 1; k >= 0; k--) {
+    const i = (hourAt - k + 8760) % 8760;
+    const outdoor = k && weather ? outdoorAt(weather, Math.floor(i / 24) + 1, (i % 24) + 1) : outdoorNow;
+    const solution = k ? solveNetwork(net, conditionsAt(i, outdoor, site)) : solutionNow;
+    const co = outdoorCO2(model, i);
+    const generation = co2Generation(model, net.zones, i), supply = outdoorAirSupply(model, net.zones, i, site.elevation);
+    C ??= net.zones.map(() => co);
+    if (k) { C = stepCO2(net, solution, C, 3600, volumes, generation, co, supply); continue; }
+    // The hour picked, in 10-minute steps, averaged.
+    const mean = C.map(() => 0);
+    for (let s = 0; s < 6; s++) {
+      C = stepCO2(net, solution, C, 600, volumes, generation, co, supply);
+      C.forEach((c, z) => { mean[z] += c / 6; });
+    }
+    return Object.fromEntries(net.zones.map((z, i) => [z, mean[i]]));
+  }
+}
+
+// Solves the network for the conditions in the Airflow controls and hands the flows to the particles.
+function solveAir() {
+  if (!model || !net) return;
+  // The site comes from the weather file when there is one, else from the model, else sea level.
+  const loc = weather?.location || Object.values(model.epjson['Site:Location'] || {})[0] || {};
+  const site = { elevation: loc.elevation ?? 0, latitude: loc.latitude ?? 45 };
+  const hourAt = hourIndex(Number($('day').value), Number($('hour').value));
+  const outdoor = {
+    t: Number($('t-out').value), w: weatherHour?.w ?? 0.008, pressure: weatherHour?.pressure ?? standardPressure(site.elevation),
+    windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
+  };
+  const conditions = conditionsAt(hourAt, outdoor, site);
+  const mode = $('windows').value;
   // Surfaces' inside temperatures this hour, where the results have them (the tool's reruns do).
   conditions.surfaceT = {};
   if (results?.surfaces) {
@@ -143,7 +178,18 @@ function solveAir() {
     .map((l) => [l.name, { ...sashOf(l.name), angle: sashFor(l, conditions.open[l.name]).angle }]));
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
-  airflow = { solution, flows, conditions };
+  // CO2 keeps the last figures until its history (up to a few seconds in large models) is redone once the controls settle.
+  airflow = { solution, flows, conditions, co2: airflow?.co2 ?? null };
+  clearTimeout(co2Timer);
+  co2Timer = setTimeout(() => {
+    const now = airflow;
+    if (now?.solution !== solution) return;
+    now.co2 = co2History(hourAt, solution, site, outdoor);
+    view.setCO2(now.co2);
+    if ($('color-by').value === 'co2') legend();
+    const line = document.getElementById('co2-line');
+    if (line) line.outerHTML = co2Line(line.dataset.zone);
+  }, 250);
   const openNow = Object.entries(conditions.open).filter(([n, f]) => f > 0 && !n.endsWith(':door')).map(([n]) => n);
   view.setOpenDoors(new Set(Object.entries(conditions.open).filter(([n, f]) => f > 0 && n.endsWith(':door')).map(([n]) => n)));
   view.setOpenWindows(new Set(openNow), new Map(openNow.map((n) => {
@@ -170,7 +216,7 @@ function solveAir() {
   const top = Math.max(0.1, ...Object.values(dps).map(Math.abs));
   pressureRange = [0.5, 1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100].find((x) => x >= top) || Math.ceil(top);
   view.setPressures(dps, pressureRange);
-  if ($('color-by').value === 'pressure') legend();
+  if ($('color-by').value === 'pressure' || $('color-by').value === 'co2') legend();
   if ($('room-air').value === 'grid') {
     // Simulated: the background solver takes the new conditions; the page's copy of the grid follows.
     if (grid && worker) {
@@ -360,8 +406,13 @@ function applyHour() {
   for (const id of ['day', 'hour']) $(id).disabled = !weather && !results;
   const day = Number($('day').value), hour = Number($('hour').value);
   const hh = (h) => `${String(h).padStart(2, '0')}:00`;
+  // Weather files and results keep standard time; on daylight-saving days the model's schedules
+  // (people, lights) run an hour ahead, so the clock reads an hour later.
+  const dst = model && daylightSavingDays(model.epjson);
+  const clock = dst && day - 1 >= dst[0] && day - 1 <= dst[1] ? ` (${hh(hour % 24)}–${hh((hour + 1) % 24)} daylight time)` : '';
+  const when = `${dateOf(day).label}, ${hh(hour - 1)}–${hh(hour)}${clock}`;
   if (!weather) {
-    $('when').textContent = results ? `${dateOf(day).label}, ${hh(hour - 1)}–${hh(hour)}` : '';
+    $('when').textContent = results ? when : '';
     $('when').title = '';
     solveAir();
     if (model) showInfo(view.find(selected));
@@ -371,7 +422,7 @@ function applyHour() {
   $('t-out').value = weatherHour.t;
   $('wind').value = weatherHour.windSpeed;
   $('wind-dir').value = weatherHour.windDirection;
-  $('when').textContent = `${dateOf(day).label}, ${hh(hour - 1)}–${hh(hour)}`;
+  $('when').textContent = when;
   $('when').title = `${weather.location.name}, ${weather.fileName || 'weather file'}: ${weatherHour.t} °C, wind ${weatherHour.windSpeed} m/s from ${weatherHour.windDirection}°, ${(weatherHour.w * 1000).toFixed(1)} g/kg humidity`;
   solveAir();
   drawRose();
@@ -519,6 +570,7 @@ function showInfo(found) {
   if (airflow) {
     rows.push(...airLines(kind, item));
     if (kind === 'zone') rows.push(...roomButton(item.name));
+    if (kind === 'surface' || kind === 'window') rows.push(`Room: ${co2Line(item.zone)}`);
     if (kind === 'surface') rows.push(...roomButton(item.zone));
   }
   for (const c of model.checks.filter((c) => c.objects.includes(item.name))) {
@@ -529,13 +581,22 @@ function showInfo(found) {
   box.hidden = false;
 }
 
+const CO2_HELP = `The mean over this hour, from a balance over the airflow network run through the ${CO2_HOURS} hours before: the people in the model's schedules breathing out CO2, outdoor air coming in through windows, leaks and any ventilation equipment, and air passing between rooms. Windows and doors are held as set now for those hours. Outdoor air is about 400 ppm; above 1000 ppm rooms feel stuffy.`;
+
+// A zone's CO2 from the tool, with the results' own figure beside it where they report one.
+function co2Line(zone) {
+  const co2 = airflow?.co2?.[zone], recorded = airflow?.conditions.zones[zone]?.co2;
+  return `<span id="co2-line" data-zone="${esc(zone)}"><span title="${esc(CO2_HELP)}">CO₂ ${co2 === undefined ? '…' : `${fmt(co2, 0)} ppm`}</span>`
+    + `${recorded !== null && recorded !== undefined ? ` <span class="muted" title="Zone Air CO2 Concentration in the results, the mean over this hour">(results: ${fmt(recorded, 0)} ppm)</span>` : ''}</span>`;
+}
+
 // Air moving through a zone, or through a window, door or surface leak, from the latest solution.
 function airLines(kind, item) {
   const m3h = (kg) => fmt((kg / 1.2) * 3600, 0);
   if (kind === 'zone') {
     const q = (airflow.flows.throughflow[net.zones.indexOf(item.name)] / 1.2) * 3600;
     const c = airflow.conditions.zones[item.name];
-    return [`Air at ${fmt(c.t, 1)} °C${results ? ' (from results)' : ''}; ${fmt(q, 0)} m³/h through the zone, ${fmt(q / item.volume.value, 1)} air changes/h`];
+    return [`Air at ${fmt(c.t, 1)} °C${results ? ' (from results)' : ''}; ${fmt(q, 0)} m³/h through the zone, ${fmt(q / item.volume.value, 1)} air changes/h`, co2Line(item.name)];
   }
   // A wall between two zones is one link in the network, named after one of its two surfaces.
   let i = net.links.findIndex((l) => l.name === item.name);
@@ -587,6 +648,11 @@ function legend() {
   if ($('color-by').value === 'pressure') {
     items.push(`<span title="Pressure difference across each surface in the hour solved, inside minus outside at the surface's height. Blue: outside pressure is higher, so air is pushed into the room through any opening or leak; red: pushed out. Square-root scale, so small differences still show.">${ramp([pressureColor(-pressureRange, pressureRange), pressureColor(0, pressureRange), pressureColor(pressureRange, pressureRange)], 48)}Pushed in ${pressureRange} Pa … pushed out ${pressureRange} Pa</span>`);
     items.push(chip(NO_PRESSURE, 'No airflow across it', 'Surfaces on the ground or between parts of the same zone carry no flow in the network.'));
+  } else if ($('color-by').value === 'co2') {
+    if (airflow) {
+      const [lo, mid, hi] = CO2_SCALE;
+      items.push(`<span title="${esc(CO2_HELP)} Each zone's surfaces take its colour.">${ramp([co2Color(lo), co2Color(mid), co2Color(hi)], 48)}CO₂ ${lo} … ${mid} … ${hi}+ ppm</span>`);
+    } else items.push('<span class="muted">CO₂ needs the airflow on</span>');
   } else if ($('color-by').value === 'zone') {
     Object.keys(model.zones).forEach((z, i) => items.push(chip(`#${zoneColor(i).getHexString()}`, z)));
   } else {

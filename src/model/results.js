@@ -1,6 +1,6 @@
 // Zone conditions, hour by hour, from an EnergyPlus results file (.eso) such as the one in every
-// ClimateStudio results folder: air temperature, humidity and whether the zone's natural ventilation
-// was running. Hourly values are used where reported; finer ones are averaged to hours.
+// ClimateStudio results folder: air temperature, humidity, CO2 and whether the zone's natural
+// ventilation was running. Hourly values are used where reported; finer ones are averaged to hours.
 
 import { readEsoStream } from './eso.js';
 import { humidityRatioFromRH } from './weather.js';
@@ -9,7 +9,7 @@ const WANTED = [
   'Zone Mean Air Temperature', 'Zone Air Humidity Ratio', 'Zone Air Relative Humidity',
   'Zone Ventilation Total Heat Loss Energy', 'Zone Ventilation Total Heat Gain Energy',
   'AFN Zone Ventilation Air Change Rate', 'AFN Surface Venting Window or Door Opening Factor',
-  'Surface Inside Face Temperature',
+  'Surface Inside Face Temperature', 'Zone Air CO2 Concentration',
 ];
 export const keepZoneResults = (key, variable) => WANTED.includes(variable);
 
@@ -36,7 +36,7 @@ function hourly(eso, variable, key, hours) {
   return out;
 }
 
-// { zones: { [model zone]: { t, w?, rh?, vent? } }, windows: { [WINDOW OR DOOR NAME]: open factor },
+// { zones: { [model zone]: { t, w?, rh?, co2?, vent? } }, windows: { [WINDOW OR DOOR NAME]: open factor },
 //   hours, missing: [zone names] }. hours: 8,760 for a year, or the run's length.
 export function zoneResults(eso, model, { hours = 8760 } = {}) {
   const zones = {}, missing = [];
@@ -50,6 +50,7 @@ export function zoneResults(eso, model, { hours = 8760 } = {}) {
       t,
       w: hourly(eso, 'Zone Air Humidity Ratio', name, hours),
       rh: hourly(eso, 'Zone Air Relative Humidity', name, hours),
+      co2: hourly(eso, 'Zone Air CO2 Concentration', name, hours),
       // Ventilation ran in an hour if it moved any heat (simple airflow) or air (airflow network).
       vent: loss || gain || ach ? t.map((_, i) => (loss?.[i] || 0) + (gain?.[i] || 0) + (ach?.[i] || 0) > 0) : null,
     };
@@ -97,7 +98,7 @@ export function zoneAt(results, zone, i, pressure = 101325) {
   const z = results.zones[zone];
   if (!z) return null;
   const w = z.w?.[i] ?? (z.rh ? humidityRatioFromRH(z.t[i], z.rh[i], pressure) : 0.008);
-  return { t: z.t[i], w, vent: z.vent ? z.vent[i] : null };
+  return { t: z.t[i], w, vent: z.vent ? z.vent[i] : null, co2: z.co2?.[i] ?? null };
 }
 
 // A surface's inside temperature in the results at an hour index (degC), or null if not reported.

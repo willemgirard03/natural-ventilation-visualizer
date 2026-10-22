@@ -32,6 +32,15 @@ export const OPEN_WINDOW = '#1FA88E'; // an open window, in the airflow
 export const PROBLEM = '#D93025';
 const SELECTED = '#F2A900';
 
+// CO2 (ppm): green at outdoor levels, amber at 1000 ppm where rooms start to feel stuffy, red from 1500.
+export const CO2_SCALE = [400, 1000, 1500];
+const CO2_STOPS = ['#3E8E5E', '#E0A526', '#C4372D'].map((c) => new THREE.Color(c));
+export function co2Color(ppm) {
+  const [lo, mid, hi] = CO2_SCALE;
+  const x = Math.min(Math.max(ppm, lo), hi);
+  return x <= mid ? new THREE.Color().lerpColors(CO2_STOPS[0], CO2_STOPS[1], (x - lo) / (mid - lo))
+    : new THREE.Color().lerpColors(CO2_STOPS[1], CO2_STOPS[2], (x - mid) / (hi - mid));
+}
 export const zoneColor = (i) => new THREE.Color().setHSL(((i * 137.508) % 360) / 360, 0.38, 0.64);
 
 // Pressure difference across a surface (Pa, inside minus outside at its height): blue where air is
@@ -328,6 +337,10 @@ export class View3D {
       const dp = this.pressures?.values[s.name];
       return dp === undefined ? NO_PRESSURE : pressureColor(dp, this.pressures.range);
     }
+    if (this.colorBy === 'co2') {
+      const c = this.co2?.[s.zone];
+      return c === undefined ? NO_PRESSURE : co2Color(c);
+    }
     return this.colorBy === 'zone' ? zoneColor(this.zoneIndex[s.zone] ?? 0) : TYPE_COLORS[s.csType] || TYPE_COLORS.Unknown;
   }
 
@@ -335,6 +348,12 @@ export class View3D {
   setPressures(values, range) {
     this.pressures = { values, range };
     if (this.colorBy === 'pressure') this.setColorBy('pressure');
+  }
+
+  // CO2 by zone name (ppm), for colouring by CO2.
+  setCO2(values) {
+    this.co2 = values;
+    if (this.colorBy === 'co2') this.setColorBy('co2');
   }
 
   // Surfaces named by a model check: red on both sides, with an arrow the way EnergyPlus takes as outward.
