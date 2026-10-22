@@ -153,3 +153,9 @@ body.bartucked .calcbar>.cbrow:not(:first-child):not(.airrow){display:none}
 body.bartucked .calcbar>.cbrow:first-child>:not(.tuck):not(.cbtitle){display:none}
 .calcbar select#weather-file{max-width:20em}
 .calcbar input[type=number]{width:5.2em}
+
+/* placing a section plane: dragged in from the bar, or a click on the button then on the view */
+body.placing .viewer, body.placing .viewer *{cursor:crosshair !important}
+body.placedrag, body.placedrag *{cursor:copy !important; user-select:none}
+/* a distance typed after a click on a gumball arrow */
+.floatedit{position:absolute; z-index:80; width:7em; font-family:var(--mono); font-size:12px; padding:1px 4px; border:1px solid var(--glass); border-radius:2px; background:var(--panel); color:var(--ink); box-shadow:0 2px 8px rgba(0,0,0,.15)}

@@ -79,7 +79,8 @@
             <div class="layrow layitem"><span class="tipped" title="How many particles to show for the same flow">Density</span><span><input type="range" id="air-density" min="-2" max="2" step="0.5" value="0"> <output id="air-density-value" class="opv">×1</output></span></div>
             <div class="layrow layitem"><span class="tipped" title="How much faster than real time the particles move">Speed</span><span><input type="range" id="air-speed" min="1" max="30" value="5"> <output id="air-speed-value" class="opv">×5</output></span></div>
           </div>
-          <div class="laygrp"><div class="layhd"><span><b class="tipped" title="Colour the cuts by the air's temperature or speed where they pass through rooms, from the room air (simulated or ideal flow)">Air on the cuts</b></span><select id="slices" class="ddsel"><option value="">none</option><option value="temperature">Temperature</option><option value="speed">Speed</option></select></div></div>
+          <div class="laygrp"><div class="layhd"><span><b class="tipped" title="Colour the section planes by the air's temperature or speed where they pass through rooms, from the room air (simulated or ideal flow)">Air on the cuts</b></span><select id="slices" class="ddsel"><option value="">none</option><option value="temperature">Temperature</option><option value="speed">Speed</option></select></div>
+            <div class="layrow layitem"><label class="chk"><input type="checkbox" id="arrows" checked><span class="tipped" title="Arrows for how the air moves within each section plane: its direction along the plane, longer the faster it moves (full length at 1 m/s). Particles behind a plane with arrows are hidden, so the plane reads as a drawing.">Flow arrows</span></label></div></div>
           <div class="laygrp"><div class="layhd"><label class="chk"><input type="checkbox" id="show-shading" checked><span><b class="tipped" title="Surrounding buildings and other shading surfaces">Shading</b></span></label></div></div>
           <div class="laygrp"><div class="layhd"><label class="chk"><input type="checkbox" id="show-rose" checked><span><b class="tipped" title="Wind rose on the ground for the month picked, with this hour's wind as an arrow">Wind rose</b></span></label></div></div>
         </div></details>
@@ -89,13 +90,8 @@
           <div class="layrow"><span class="tipped" title="Where windows sit in thick walls: at the wall's exterior face, its centre, or its interior face. Drawing only.">Windows at</span>
             <select id="window-depth" class="ddsel"><option value="exterior">Exterior face</option><option value="centre" selected>Centre</option><option value="interior">Interior face</option></select></div>
         </div></details>
-        <details class="dd" id="cuts-dd"><summary>Cuts</summary><div class="ddmenu">
-          <div class="layrow"><span class="tipped" title="Hide everything above this height to see inside the building">Plan cut</span><span><input type="range" id="cut" min="0" max="1" step="0.1"> <output id="cut-value" class="opv">none</output></span></div>
-          <div class="layrow"><span class="tipped" title="A vertical cut through the building, along or across its long side">Section</span>
-            <span><select id="section" class="ddsel"><option value="">none</option><option value="along">Along</option><option value="across">Across</option></select>
-            <input type="range" id="section-at" min="0" max="1" step="0.01" value="0.5" disabled>
-            <button type="button" id="section-flip" class="minibtn" title="Show the other side of the section" disabled>Flip</button></span></div>
-        </div></details>
+        <button type="button" class="minibtn" data-add="section" title="Add a vertical section: drag it onto the building, or click here and then on the building. It cuts away the side facing you, within its bounds.">Add section</button>
+        <button type="button" class="minibtn" data-add="plan" title="Add a plan cut 1.5 m above the floor you point at: drag it onto the building, or click here and then on the building. It cuts away what is above it, within its bounds.">Add plan cut</button>
         <span class="seg mini" id="projection"><button type="button" data-proj="perspective" aria-pressed="true" title="Perspective: nearer things larger">Perspective</button><button type="button" data-proj="parallel" aria-pressed="false" title="Parallel: true proportions, as in an axonometric">Parallel</button></span>
         <span class="vbtns">
           <button type="button" class="minibtn vb iconbtn" id="fit" title="Fit the whole building in view"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="1.6" fill="currentColor"/></svg></button>

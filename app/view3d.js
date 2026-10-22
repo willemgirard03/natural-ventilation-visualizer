@@ -11,6 +11,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { area, bounds, triangulate, unitNormal } from '../src/model/geometry.js';
 import { surfaceTriangles, envelopeSolids, faceOffsets } from './solids.js';
 import { ViewCube } from './viewcube.js';
+import { Sections } from './sections.js';
+import { SectionCaps } from './caps.js';
 
 // ClimateStudio's surface types, plus glazing and shading.
 export const TYPE_COLORS = {
@@ -144,10 +146,8 @@ export class View3D {
     this.renderer.domElement.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
     this.renderer.domElement.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
-    // Horizontal cut (hides what is above) and vertical section (hides one side); either can be off.
-    this.cutPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), Infinity);
-    this.sectionPlane = new THREE.Plane(new THREE.Vector3(1, 0, 0), Infinity);
-    this.clipping = [this.cutPlane, this.sectionPlane];
+    // Cuts are section planes (sections.js), which patch every material; no three.js clipping planes.
+    this.clipping = [];
     this.group = new THREE.Group();
     this.scene.add(this.group);
     this.highlight = null;
@@ -164,6 +164,8 @@ export class View3D {
     });
 
     this.cube = new ViewCube(this, (dir) => this.lookFrom(dir));
+    this.sections = new Sections(this);
+    this.caps = new SectionCaps(this);
     new ResizeObserver(() => this.resize()).observe(container);
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyTheme());
     this.applyTheme();
@@ -184,10 +186,12 @@ export class View3D {
     this.perspective.aspect = w / h;
     this.perspective.updateProjectionMatrix();
     this.fitParallel(this.parallel.top);
+    this.caps?.resize();
     this.render();
   }
 
   render() {
+    this.sections?.beforeRender();
     this.renderer.render(this.scene, this.camera);
     this.cube?.render();
   }
@@ -293,7 +297,7 @@ export class View3D {
     this.edges = new THREE.LineSegments(this.edgesGeometry(), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
 
     this.group.add(this.front, this.back, this.glass, this.doorMesh, this.shading, this.edges, this.problemLayer());
-    this.setCut(null);
+    this.sections.clear();
     this.frame();
   }
 
@@ -315,6 +319,7 @@ export class View3D {
     } catch { solids = envelope.map(() => []); }
     const solidOf = new Map(envelope.map(([, k], i) => [k, solids[i]]));
     const pos = [], col = [], owner = [], c = new THREE.Color();
+    this.solids = []; // each thick surface's closed solid (triangles, view coordinates), for the cut caps
     this.surfaces.forEach((s, k) => {
       const shared = s.boundary === 'Surface' && s.adjacentSurface;
       if (thick && shared && s.name > s.adjacentSurface) return; // drawn once for the pair
@@ -323,6 +328,7 @@ export class View3D {
         const t = thick ? thicknessOf(s) : 0;
         try { tris = surfaceTriangles(s.vertices, holes.get(s.name) || [], this.origin, t, shared ? 'centre' : this.walls); } catch { tris = []; }
       }
+      if (thick && tris.length) this.solids.push(tris);
       if (!tris.length) { // an outline the cutter cannot handle: drawn as before, without holes
         tris = [];
         for (const tri of triangulate(s.vertices)) for (const i of tri) tris.push(...s.vertices[i].map((x, j) => x - this.origin[j]));
@@ -390,6 +396,7 @@ export class View3D {
     this.edges.geometry.dispose();
     this.edges.geometry = this.edgesGeometry();
     this.redrawWindows();
+    this.caps.update();
   }
 
   surfaceColor(s) {
@@ -498,29 +505,6 @@ export class View3D {
     this.render();
   }
 
-  // A vertical section through the building. axis: 'along' (parallel to the footprint's long side) or
-  // 'across'; at: 0 to 1 across the building. The half away from the camera is kept, so the cut faces
-  // the viewer; flip keeps the other half. axis null removes it. longAxis: the long side's direction
-  // in model x, y.
-  setSection(axis, at = 0.5, flip = false, longAxis = [1, 0]) {
-    if (!axis) { this.sectionPlane.constant = Infinity; this.render(); return; }
-    const [lx, ly] = longAxis;
-    const n = axis === 'along' ? [-ly, lx] : [lx, ly]; // the plane's normal, horizontal
-    const proj = this.surfaces.flatMap((s) => s.vertices).map((p) => n[0] * p[0] + n[1] * p[1]);
-    const lo = Math.min(...proj), hi = Math.max(...proj);
-    const d = lo + at * (hi - lo) - (n[0] * this.origin[0] + n[1] * this.origin[1]);
-    const cameraSide = n[0] * this.camera.position.x + n[1] * this.camera.position.y > d;
-    const s = cameraSide !== flip ? -1 : 1; // -1 keeps n.p <= d, 1 keeps n.p >= d
-    this.sectionPlane.normal.set(s * n[0], s * n[1], 0);
-    this.sectionPlane.constant = -s * d;
-    this.render();
-  }
-
-  setCut(z) {
-    this.cutPlane.constant = z === null ? Infinity : z - this.origin[2];
-    this.render();
-  }
-
   setShadingVisible(on) { if (this.shading) { this.shading.visible = on; this.render(); } }
 
   // Half the diagonal of the zones' footprint (m), for drawings placed around the building.
@@ -536,7 +520,7 @@ export class View3D {
       this.scene.remove(this.overlay);
     }
     this.overlay = obj;
-    if (obj) this.scene.add(obj);
+    if (obj) { obj.userData.noSection = true; this.scene.add(obj); }
     this.render();
   }
 
@@ -573,13 +557,14 @@ export class View3D {
   }
 
   pickAt(e) {
+    this.sections.select(null);
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, this.camera);
     const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.shading.visible ? [this.shading] : [])];
     // Shading is drawn see-through, so the building behind it wins; shading is picked only on its own.
-    const hits = ray.intersectObjects(targets, false).filter((h) => this.clipping.every((pl) => pl.distanceToPoint(h.point) >= 0));
+    const hits = ray.intersectObjects(targets, false).filter((h) => !this.sections.removed(h.point));
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];
     if (!hit) return this.select(null);
     const { kind, items } = hit.object.userData;
@@ -589,17 +574,15 @@ export class View3D {
   }
 
   // Shows a surface, window or zone in context: a plan cut 1.5 m above its lowest point (the usual
-  // plan-drawing height), looking down at its zone from the south-west. Returns the cut height, or null.
+  // plan-drawing height), looking down at its zone from the south-west.
   focus(name) {
     const found = this.find(name);
     if (!found) return null;
     const zone = this.model.zones[found.kind === 'zone' ? name : found.item.zone];
     const cut = bounds(found.polys.flatMap((p) => p.vertices)).min[2] + 1.5;
-    const z = cut >= this.zRange[1] ? null : cut;
-    this.setCut(z);
+    if (cut < this.zRange[1]) this.sections.planAt(cut - this.origin[2]);
     this.select(name);
     this.frame(zone ? zone.surfaces.map((n) => this.model.surfaces[n]) : found.polys, new THREE.Vector3(-0.45, -0.8, 1.4));
-    return z;
   }
 
   // Points the camera at a set of polygons (the whole building by default), from the south-west.

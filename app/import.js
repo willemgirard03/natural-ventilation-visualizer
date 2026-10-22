@@ -10,6 +10,7 @@ import { GridFlow } from '../src/solver/grid.js';
 import { co2Generation, outdoorAirSupply, outdoorCO2, stepCO2 } from '../src/solver/co2.js';
 import { cellAt } from '../src/solver/roomflow.js';
 import { FieldSlices, rampTemperature } from './slices.js';
+import { frameOf } from './sections.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
@@ -42,13 +43,15 @@ let sliceRange = null, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
 // room's own temperature. Throttled, since the simulation posts several steps a second.
 function drawSlices(now = false) {
-  const kind = $('slices').value, simulated = $('room-air').value === 'grid';
-  if (!kind || !model || !rooms || (simulated ? !gridLive : !field)) { slices.hide(); sliceRange = null; legend(); return; }
+  const kind = $('slices').value, arrows = $('arrows').checked, simulated = $('room-air').value === 'grid';
+  if ((!kind && !arrows) || !model || !rooms || !view.sections.planes.length || (simulated ? !gridLive : !field)) { slices.hide(); sliceRange = null; legend(); return; }
   const wait = 300 - (performance.now() - sliceLast);
   if (!now && wait > 0) { clearTimeout(sliceTimer); sliceTimer = setTimeout(() => drawSlices(true), wait); return; }
   sliceLast = performance.now();
   const g = rooms.g, fluid = (x, y, z) => { const c = cellAt(g, [x, y, z]); return c >= 0 && g.zone[c] >= 0; };
   let value;
+  const velocity = simulated ? (x, y, z) => grid.velocityAt([x, y, z])
+    : (x, y, z) => { const c = cellAt(g, [x, y, z]); return [field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]]; };
   if (simulated) {
     value = kind === 'speed' ? (x, y, z) => Math.hypot(...grid.velocityAt([x, y, z])) : (x, y, z) => grid.temperatureAt(x, y, z);
   } else {
@@ -57,7 +60,7 @@ function drawSlices(now = false) {
       : (x, y, z) => t[g.zones[g.zone[cellAt(g, [x, y, z])]]].t;
   }
   const colour = kind === 'speed' ? (v) => speedColor(v) : (v, range) => rampTemperature(v, range[0], range[1]);
-  sliceRange = slices.update({ inside: fluid, value }, kind, colour, g);
+  sliceRange = slices.update({ inside: fluid, value, velocity }, kind, colour, g, arrows);
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
@@ -245,7 +248,7 @@ function solveAir() {
   $('air-total').textContent = `Outdoor air ${fmt(m3h, 0)} m³/h · ${fmt(m3h / volume, m3h / volume < 1 ? 2 : 1)} air changes/h · ${which}`;
   $('air-total').title = 'Outdoor air entering the building through windows, doors and leaks, from the airflow network. Air changes per hour: that flow divided by the volume of all zones.';
 }
-for (const id of ['t-out', 't-in', 'wind', 'wind-dir', 'windows']) $(id).addEventListener('input', () => { solveAir(); drawRose(); if (model) showInfo(view.find(selected)); });
+for (const id of ['t-out', 't-in', 'wind', 'wind-dir', 'windows']) $(id).addEventListener('input', () => { solveAir(); drawRose(); if (model) showInfo(current()); });
 $('air-density').addEventListener('input', (e) => {
   const k = 2 ** Number(e.target.value);
   $('air-density-value').textContent = `×${k < 1 ? k.toFixed(2).replace(/0$/, '') : k}`;
@@ -332,9 +335,47 @@ async function rerun() {
 }
 $('stale').addEventListener('click', (e) => { if (e.target.id === 'rerun') rerun(); });
 
+// The compass direction (true north) a horizontal direction in model axes points to, in words.
+function compass(d) {
+  const az = (THREE_DEG(Math.atan2(d.x, d.y)) + (model?.site.northAxis || 0) + 360) % 360;
+  return ['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west'][Math.round(az / 45) % 8];
+}
+const THREE_DEG = (r) => (r * 180) / Math.PI;
+
+// What is selected now: a section plane, or a surface, window, door or zone.
+const current = () => (view.sections.selected ? { kind: 'plane', item: view.sections.selected } : view.find(selected));
+
+// Section planes: added from the bar (dragged in, or a click on the button and then on the view), and
+// picked, moved and turned in the view (sections.js). The air on them follows every change.
+view.sections.onChange = () => drawSlices(true);
+view.sections.onSelect = (p) => {
+  if (p) { view.select(null); showInfo({ kind: 'plane', item: p }); }
+  else if (!$('info').hidden && $('info').dataset.kind === 'plane') showInfo(null);
+};
+for (const b of document.querySelectorAll('[data-add]')) {
+  b.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !model) return;
+    const x0 = e.clientX, y0 = e.clientY;
+    const move = (m) => {
+      if (Math.hypot(m.clientX - x0, m.clientY - y0) < 6) return;
+      window.removeEventListener('pointermove', move);
+      view.sections.startPlacing(b.dataset.add, true);
+      b.dataset.dragged = '1';
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', () => window.removeEventListener('pointermove', move), { once: true });
+  });
+  b.addEventListener('click', () => {
+    if (b.dataset.dragged) { delete b.dataset.dragged; return; }
+    if (model) view.sections.startPlacing(b.dataset.add, false);
+  });
+}
+
 // Opening and closing windows one by one or room by room, from the details of what is selected.
 $('info').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-act]');
+  if (b?.dataset.act === 'plane-flip') { view.sections.flip(view.sections.selected); return; }
+  if (b?.dataset.act === 'plane-delete') { view.sections.remove(view.sections.selected); return; }
   if (!b || !airflow) return;
   if (b.dataset.act === 'window') windowSet.set(b.dataset.name, b.dataset.open === '1');
   if (b.dataset.act === 'room') {
@@ -342,7 +383,7 @@ $('info').addEventListener('click', (e) => {
     for (const l of net.links) if (l.from === b.dataset.zone) windowSet.delete(l.name);
   }
   solveAir();
-  showInfo(view.find(selected));
+  showInfo(current());
   legend();
 });
 // Sashes: one window's type or hinge from its details, or all of them from the Sashes setting.
@@ -351,7 +392,7 @@ $('info').addEventListener('change', (e) => {
   sashSet.set(e.target.dataset.name, { ...sashSet.get(e.target.dataset.name), type: e.target.value });
   amountSet.delete(e.target.dataset.name); // a new mechanism: back to the amount that frees the model's fraction
   solveAir();
-  showInfo(view.find(selected));
+  showInfo(current());
 });
 $('info').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-act=hinge]');
@@ -359,9 +400,9 @@ $('info').addEventListener('click', (e) => {
   const s = sashOf(b.dataset.name);
   sashSet.set(b.dataset.name, { ...sashSet.get(b.dataset.name), hinge: s.hinge === 'left' ? 'right' : 'left' });
   solveAir();
-  showInfo(view.find(selected));
+  showInfo(current());
 });
-$('sash-type').addEventListener('change', () => { sashSet.clear(); amountSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); });
+$('sash-type').addEventListener('change', () => { sashSet.clear(); amountSet.clear(); solveAir(); if (model) showInfo(current()); });
 // The opening amount slider in a window's details: the window opens to it as the slider moves.
 $('info').addEventListener('input', (e) => {
   if (e.target.dataset?.act !== 'amount') return;
@@ -372,25 +413,12 @@ $('info').addEventListener('input', (e) => {
   const out = $('info').querySelector(`output[data-for="${CSS.escape(name)}"]`);
   if (out) out.textContent = amountText(l);
 });
-$('windows-reset').addEventListener('click', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
-for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(view.find(selected)); legend(); });
+$('windows-reset').addEventListener('click', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(current()); legend(); });
+for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(current()); legend(); });
 
 // Vertical section, along or across the footprint's long side.
-function applySection() {
-  const axis = $('section').value;
-  $('section-at').disabled = $('section-flip').disabled = !axis;
-  if (!model) return;
-  const a = ((footprintAxis(model).azimuth - model.site.northAxis) * Math.PI) / 180;
-  view.setSection(axis || null, Number($('section-at').value), $('section-flip').dataset.flip === '1', [Math.sin(a), Math.cos(a)]);
-}
-$('section').addEventListener('change', applySection);
 $('slices').addEventListener('change', () => drawSlices(true));
-$('cut').addEventListener('input', () => drawSlices());
-$('section-at').addEventListener('input', () => drawSlices());
-$('section').addEventListener('change', () => drawSlices(true));
-$('section-flip').addEventListener('click', () => drawSlices(true));
-$('section-at').addEventListener('input', applySection);
-$('section-flip').addEventListener('click', (e) => { e.target.dataset.flip = e.target.dataset.flip === '1' ? '0' : '1'; applySection(); });
+$('arrows').addEventListener('change', () => drawSlices(true));
 
 $('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
 $('air-speed').addEventListener('input', (e) => { air.speed = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
@@ -416,7 +444,7 @@ function applyHour() {
     $('when').textContent = results ? when : '';
     $('when').title = '';
     solveAir();
-    if (model) showInfo(view.find(selected));
+    if (model) showInfo(current());
     return;
   }
   weatherHour = outdoorAt(weather, day, hour);
@@ -427,7 +455,7 @@ function applyHour() {
   $('when').title = `${weather.location.name}, ${weather.fileName || 'weather file'}: ${weatherHour.t} °C, wind ${weatherHour.windSpeed} m/s from ${weatherHour.windDirection}°, ${(weatherHour.w * 1000).toFixed(1)} g/kg humidity`;
   solveAir();
   drawRose();
-  if (model) showInfo(view.find(selected));
+  if (model) showInfo(current());
 }
 async function loadWeather(name, read) {
   try { setWeather(parseEPW(await read(), { fileName: name })); } catch (err) {
@@ -546,10 +574,21 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
 // Details of the selected surface, window, zone or shading surface, and any checks that name it.
 function showInfo(found) {
   const box = $('info');
-  selected = found?.item?.name ?? null;
-  if (!found) { box.hidden = true; return; }
+  if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
+  if (!found) { box.hidden = true; box.dataset.kind = ''; return; }
   const { kind, item } = found;
+  box.dataset.kind = kind;
   const rows = [];
+  if (kind === 'plane') {
+    const plan = item.kind === 'plan';
+    rows.push(`<b>${esc(item.name)}</b>`,
+      plan ? `Removes what is ${item.flip ? 'below' : 'above'} it, within its bounds` : `Removes the ${compass(frameOf(item).n)} side, within its bounds`,
+      `<span class="muted">Drag its outline to move it, the gumball's arrows to move it along x, y or z (click one to type a distance), its arc to turn it, the squares to resize its bounds. Delete removes it.</span>`,
+      `<button class="quiet" data-act="plane-flip">Flip</button> <button class="quiet" data-act="plane-delete">Delete</button>`);
+    box.innerHTML = rows.map((r) => `<div>${r}</div>`).join('');
+    box.hidden = false;
+    return;
+  }
   const deg = (x) => (x === null ? '' : `${Math.round(x)}°`);
   if (kind === 'surface') {
     rows.push(`<b>${esc(item.name)}</b>`, `${esc(item.csType)} of zone ${esc(item.zone)}`,
@@ -673,7 +712,7 @@ function legend() {
     SPEED_BANDS.forEach((b, i) => items.push(chip(BAND_COLORS[i], b === Infinity ? `over ${SPEED_BANDS[i - 1]} m/s` : `${i ? SPEED_BANDS[i - 1] : 0}–${b} m/s`)));
     items.push(chip('#E0401F', 'This hour', 'The arrow points the way the wind blows; its length grows with speed.'));
   }
-  if ($('slices').value && sliceRange !== undefined && (slices.plan.visible || slices.section.visible)) {
+  if ($('slices').value && sliceRange !== undefined && slices.visible) {
     if ($('slices').value === 'speed') {
       const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
       items.push(`<span title="Slices: air speed on a log scale">${ramp(stops, 48)}Slices: speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
@@ -694,21 +733,6 @@ function legend() {
   $('legend').innerHTML = items.join('');
 }
 
-function setupCut() {
-  const [lo, hi] = view.zRange;
-  Object.assign($('cut'), { min: lo, max: hi, step: 0.1 });
-  showCut(null);
-}
-// Slider and label for a cut height in model coordinates; null = no cut. Shown above the lowest floor.
-function showCut(z) {
-  $('cut').value = z === null ? $('cut').max : z;
-  $('cut-value').textContent = z === null ? 'none' : `${fmt(z - Number($('cut').min), 1)} m`;
-}
-$('cut').addEventListener('input', (e) => {
-  const z = Number(e.target.value) >= Number(e.target.max) ? null : Number(e.target.value);
-  view.setCut(z);
-  showCut(z);
-});
 $('color-by').addEventListener('change', (e) => { view.setColorBy(e.target.value); legend(); });
 $('show-shading').addEventListener('change', (e) => view.setShadingVisible(e.target.checked));
 $('walls').addEventListener('change', (e) => view.setWalls(e.target.value));
@@ -721,7 +745,7 @@ $('room-air').addEventListener('change', () => {
 });
 $('window-depth').addEventListener('change', (e) => view.setWindowDepth(e.target.value));
 view.windowDepth = $('window-depth').value;
-$('fit').addEventListener('click', () => { view.setCut(null); showCut(null); view.frame(); });
+$('fit').addEventListener('click', () => view.frame());
 $('projection').addEventListener('click', (e) => {
   const mode = e.target.dataset?.proj;
   if (!mode) return;
@@ -817,21 +841,21 @@ function render(m) {
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   $('results-file').value = '';
   windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();
-  $('section').value = '';
-  applySection();
+  const a = ((footprintAxis(m).azimuth - m.site.northAxis) * Math.PI) / 180;
+  view.longAxis = Math.atan2(Math.cos(a), Math.sin(a)); // the footprint's long side, from model x
+  view.cube.setNorth(-m.site.northAxis);
   setResults(null); // results belong to the previous model; this also solves the network
   if ($('show-air').checked) air.play();
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);
   view.select(null);
-  setupCut();
   legend();
 }
 
 $('checks').addEventListener('click', (e) => {
   const name = e.target.dataset?.name;
   if (!name) return;
-  showCut(view.focus(name));
+  view.focus(name);
   $('viewer').scrollIntoView({ behavior: 'smooth', block: 'center' });
 });
 
