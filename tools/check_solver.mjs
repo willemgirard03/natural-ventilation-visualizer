@@ -2,7 +2,10 @@
 // Each EnergyPlus timestep's inputs (weather, zone temperatures and humidity, window opening factors)
 // go into src/solver/network.js; the flows through every crack, window and door are compared.
 //
-//   node tools/check_solver.mjs <model.epJSON> <EnergyPlus run .eso> [--no-doors]
+//   node tools/check_solver.mjs <model.epJSON> <EnergyPlus run .eso> [--no-doors] [--pivoted hopper|awning]
+//
+// --pivoted: the run's operable windows were written as pivoted openings of that sash
+// (toAirflowNetwork's sashes option), their opening factor being the sash's angle / 90 degrees.
 //
 // The .eso must come from toAirflowNetwork(model, { reporting: 'Timestep', checkOutputs: true }).
 // Zone conditions are the network's own node temperatures and humidity ratios, which are the zone
@@ -13,7 +16,8 @@ import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { readEso } from './eso.mjs';
 
 const args = process.argv.slice(2);
-const [modelFile, esoFile] = args.filter((a) => !a.startsWith('--'));
+const pivoted = args.includes('--pivoted') ? args[args.indexOf('--pivoted') + 1] : null;
+const [modelFile, esoFile] = args.filter((a, i) => !a.startsWith('--') && args[i - 1] !== '--pivoted');
 const model = importEpJSON(JSON.parse(readFileSync(modelFile, 'utf8')));
 const net = buildNetwork(model, { doors: !args.includes('--no-doors') });
 const eso = readEso(esoFile);
@@ -42,6 +46,7 @@ for (let s = 0; s < steps; s++) {
     zones: Object.fromEntries(net.zones.map((z, i) => [z, { t: zt[i][zs], w: zw[i][zs] }])),
     open: Object.fromEntries(openings.map((l) => [l.name, openSeries[l.name][s]])),
   };
+  if (pivoted) conditions.sashes = Object.fromEntries(openings.map((l) => [l.name, { type: pivoted, angle: openSeries[l.name][s] * 90 }]));
   const r = solveNetwork(net, conditions, { exactEnergyPlus: true });
   iterations += r.iterations;
   if (!r.converged) unconverged++;

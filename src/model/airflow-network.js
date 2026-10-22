@@ -59,6 +59,9 @@ export function footprintAxis(model) {
 //            control: 'zone' (follows the zone's venting control), 'open' (always) or 'closed' (never).
 // options.states: { [opening name]: true (open) | false (closed) } overrides an opening's control.
 // options.openFactors: { [window name]: fraction } overrides how far a window opens (its sash's limit).
+// options.sashes: { [window name]: { type, angle } }: hoppers and awnings are written as EnergyPlus's
+//   horizontally pivoted detailed openings, pivoting at their bottom or top, opened to `angle` degrees
+//   (their opening factor is angle / 90); other windows stay simple openings.
 export function networkElements(model, options = {}) {
   const o = { ...NETWORK_DEFAULTS, ...options };
   const links = [];
@@ -147,7 +150,7 @@ export function toAirflowNetwork(model, options = {}) {
   }
   ep['AirflowNetwork:MultiZone:Zone'] = zones;
 
-  const cracks = {}, openings = {}, surfaces = {};
+  const cracks = {}, openings = {}, detailed = {}, surfaces = {};
   for (const l of links) {
     if (l.type === 'crack') {
       cracks[`AFN Crack ${l.name}`] = { air_mass_flow_coefficient_at_reference_conditions: l.coefficient, air_mass_flow_exponent: l.exponent, reference_crack_conditions: 'AFN Reference Conditions' };
@@ -155,20 +158,41 @@ export function toAirflowNetwork(model, options = {}) {
       continue;
     }
     const component = l.door ? 'AFN Interior Door' : `AFN Window ${l.name}`;
-    openings[component] = {
-      air_mass_flow_coefficient_when_opening_is_closed: l.closedCoefficient,
-      air_mass_flow_exponent_when_opening_is_closed: l.exponent,
-      minimum_density_difference_for_two_way_flow: 0.0001,
-      discharge_coefficient: l.dischargeCoefficient,
-    };
+    const sash = !l.door && o.sashes?.[l.name];
+    let factor = l.openFactor;
+    if (sash && (sash.type === 'hopper' || sash.type === 'awning') && sash.angle > 0) {
+      // Pivoted at the hinge: the full width and height are used (EnergyPlus ignores the width and
+      // height factors for this type), and the same discharge coefficient at every opening factor, so
+      // only the angle narrows the opening.
+      const zs = l.vertices.map((p) => p[2]), height = Math.max(...zs) - Math.min(...zs);
+      const set = (k, f) => ({ [`opening_factor_${k}`]: f, [`discharge_coefficient_for_opening_factor_${k}`]: l.dischargeCoefficient, [`width_factor_for_opening_factor_${k}`]: 1, [`height_factor_for_opening_factor_${k}`]: 1, [`start_height_factor_for_opening_factor_${k}`]: 0 });
+      detailed[component] = {
+        air_mass_flow_coefficient_when_opening_is_closed: l.closedCoefficient,
+        air_mass_flow_exponent_when_opening_is_closed: l.exponent,
+        type_of_rectangular_large_vertical_opening_lvo_: 'HorizontallyPivoted',
+        extra_crack_length_or_height_of_pivoting_axis: sash.type === 'hopper' ? 0 : height,
+        number_of_sets_of_opening_factor_data: 2,
+        ...set(1, 0), ...set(2, 1),
+      };
+      factor = Math.min(1, sash.angle / 90);
+    } else {
+      openings[component] = {
+        air_mass_flow_coefficient_when_opening_is_closed: l.closedCoefficient,
+        air_mass_flow_exponent_when_opening_is_closed: l.exponent,
+        minimum_density_difference_for_two_way_flow: 0.0001,
+        discharge_coefficient: l.dischargeCoefficient,
+      };
+    }
     surfaces[`AFN Surface ${l.name}`] = {
-      surface_name: l.name, leakage_component_name: component, window_door_opening_factor_or_crack_factor: l.openFactor,
+      surface_name: l.name, leakage_component_name: component, window_door_opening_factor_or_crack_factor: factor,
       ventilation_control_mode: { zone: 'ZoneLevel', open: 'Constant', closed: 'NoVent' }[l.control],
     };
   }
   if (doors.length) writeDoors(ep, doors);
   ep['AirflowNetwork:MultiZone:Surface:Crack'] = cracks;
   ep['AirflowNetwork:MultiZone:Component:SimpleOpening'] = openings;
+  if (Object.keys(detailed).length) ep['AirflowNetwork:MultiZone:Component:DetailedOpening'] = detailed;
+  else delete ep['AirflowNetwork:MultiZone:Component:DetailedOpening'];
   ep['AirflowNetwork:MultiZone:Surface'] = surfaces;
 
   const frequency = o.reporting || 'Hourly';

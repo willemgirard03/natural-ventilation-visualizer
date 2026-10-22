@@ -268,12 +268,15 @@ test('grid solver: CO2 is carried with the air, fresher by an open window, its z
   assert.ok(grid.co2At(2, 0.3, 1.5) < grid.co2At(2, 3.5, 1.0) - 20, `${grid.co2At(2, 0.3, 1.5)} by the window, ${grid.co2At(2, 3.5, 1.0)} at the back`);
 });
 
-test('sashes in the network: a hopper passes its air near its top, an awning near its bottom', () => {
+test('sashes in the network: a hopper passes its air near its top, an awning near its bottom', async () => {
+  const { sashAngle } = await import('../src/model/sash.js');
   const model = twoRooms();
   const net = buildNetwork(model, { doors: false });
   const cond = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0.3, 'Hall:s:w': 0 }, zones: { Room: { t: 26, w: 0.008 }, Hall: { t: 26, w: 0.008 } }, outdoor: { t: 6, w: 0.004, pressure: 101325, windSpeed: 0, windDirection: 0 } };
   const at = (sashes) => solveNetwork(net, { ...cond, sashes }).links.find((r) => r.name === 'Room:s:w');
-  const rect = at(null), hopper = at({ 'Room:s:w': { type: 'hopper' } }), awning = at({ 'Room:s:w': { type: 'awning' } });
+  // Each sash at the angle that frees 30% of the window (as the page sets them).
+  const angle = (type) => sashAngle(type, 1, 1, 0.3).angle;
+  const rect = at(null), hopper = at({ 'Room:s:w': { type: 'hopper', angle: angle('hopper') } }), awning = at({ 'Room:s:w': { type: 'awning', angle: angle('awning') } });
   // Warm inside: air leaves at the top and enters at the bottom, through the neutral plane between.
   near(rect.neutral, 0.5, 0.05);
   assert.ok(hopper.neutral > rect.neutral + 0.05, `hopper neutral plane ${hopper.neutral}`);
@@ -281,3 +284,15 @@ test('sashes in the network: a hopper passes its air near its top, an awning nea
   // The same free area, bunched near the hinge's far edge, uses less of the stack: less air moves.
   for (const r of [hopper, awning]) assert.ok(r.forward < rect.forward && r.forward > 0.3 * rect.forward && r.backward > 0, `${r.forward} vs ${rect.forward}`);
 });
+
+for (const type of ['hopper', 'awning']) {
+  const run = path.join(REPO, 'runs', 'network', `week_${type}`, `example02_afn_week_${type}.eso`);
+  test(`Example_02 network week with every window a pivoted ${type}: the solver follows EnergyPlus within 1%`, { skip: existsSync(run) && existsSync(EXAMPLE02) ? false : 'EnergyPlus run not on this computer' }, () => {
+    const report = execFileSync(process.execPath, [path.join(REPO, 'tools', 'check_solver.mjs'), EXAMPLE02, run, '--pivoted', type], { encoding: 'utf8' });
+    for (const kind of ['window', 'door']) {
+      const m = report.match(new RegExp(`${kind} +flow difference ([0-9.]+)%`));
+      assert.ok(m && Number(m[1]) < 1, `${kind}: ${m && m[1]}% (${report})`);
+    }
+    assert.match(report, / 0 not converged/);
+  });
+}

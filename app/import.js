@@ -75,6 +75,7 @@ let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour 
 // The grid solver runs in a worker; `grid` is the page's copy, reading the worker's latest step.
 let worker = null, grid = null, gridLive = false;
 function startGrid(m) {
+  slices.hide(); // their particles read the room air being replaced; they start again with the next one
   worker?.terminate();
   worker = null; grid = null; gridLive = false;
   $('room-air-status').textContent = '';
@@ -382,7 +383,10 @@ async function rerun() {
   const forModel = model, label = `${da.label}–${db.label}`;
   // Windows open as far as their sashes allow; EnergyPlus's control then opens them up to that.
   const openFactors = Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, openFraction(l)]));
-  const epjson = toAirflowNetwork(model, { states: linkStates(), openFactors, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true, surfaceTemperatures: true });
+  // Hoppers and awnings run as EnergyPlus's pivoted openings, at the angle their opening amount gives.
+  const pivoted = Object.fromEntries(net.links.filter((l) => l.control === 'zone' && ['hopper', 'awning'].includes(sashOf(l.name).type))
+    .map((l) => [l.name, { type: sashOf(l.name).type, angle: amountOf(l) * maxAngleOf(l) }]));
+  const epjson = toAirflowNetwork(model, { states: linkStates(), openFactors, sashes: pivoted, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true, surfaceTemperatures: true });
   rerunning = true;
   const t0 = Date.now();
   const tick = setInterval(() => { $('stale').textContent = `Running EnergyPlus for ${label}… ${Math.round((Date.now() - t0) / 1000)} s`; }, 500);
@@ -393,6 +397,12 @@ async function rerun() {
     const eso = await fetch(out.eso);
     const week = await readZoneResultsStream(eso.body, forModel, null, { hours: (b - a + 1) * 24 });
     if (model !== forModel) return;
+    // A pivoted window reports its opening factor as angle / 90: read it as the share of the window
+    // its sash frees at that angle, as the tool's other windows are.
+    for (const [name, s] of Object.entries(pivoted)) {
+      const series = week.windows[name.toUpperCase()], l = net.links.find((x) => x.name === name);
+      if (series && l) week.windows[name.toUpperCase()] = series.map((f) => (f > 0 ? freeFraction(s.type, l.width, l.height, f * 90) : 0));
+    }
     const merged = mergeResults(results, week, hourIndex(a, 1));
     windowSet.clear(); roomSet.clear(); // the run now holds these choices
     $('windows').value = 'results';

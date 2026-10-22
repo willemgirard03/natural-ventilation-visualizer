@@ -176,34 +176,42 @@ export function simpleOpening(l, open, dp, a, b, exact = false) {
   return drho >= 0 ? { f: [-sb * fh, sa * f0], df: [sb * dfh, sa * df0], neutral } : { f: [sa * fh, -sb * f0], df: [sa * dfh, sb * df0], neutral };
 }
 
-// A window hinged along its top (awning) or bottom (hopper): its free gap is nothing at the hinge and
-// widest at the free edge, so its free area is spread up its height in that proportion (as in the room
-// air, roomflow.js), not evenly as in a simple opening. The flow is summed over horizontal strips, each
-// an orifice at its own pressure difference (the stack changes it with height), split at the neutral
-// plane into the two directions. A hopper therefore passes most of its air near its top, in and out,
-// and an awning near its bottom. The total free area is the simple opening's (open x width x height).
-// Not EnergyPlus's simple opening, so not used when matching EnergyPlus exactly.
-export const SASH_STRIPS = 24;
-export function sashOpening(l, open, dp, a, b, type) {
+// A window hinged along its top (awning) or bottom (hopper), as EnergyPlus's horizontally pivoted
+// detailed opening (AirflowNetwork:MultiZone:Component:DetailedOpening, type 2, Elements.cpp): the sash
+// turned by `angle` about an axis at the hinge leaves the full width free where it has swung clear
+// (above h4 for a hopper, below h2 for an awning) and, where it still covers the frame, only the
+// triangular gaps at its sides, 2 |axis - z| tan(angle) wide, in series with the frame. The flow is
+// summed over 20 strips (EnergyPlus's NrInt), each an orifice at its own pressure difference: dp is at
+// the window's centre (the network's link height) and the stack changes it with height. A hopper
+// therefore passes most of its air near its top, in and out, and an awning near its bottom. The tool's
+// reruns write hoppers and awnings as these openings, with the opening factor = angle / 90 degrees.
+export const PIVOT_STRIPS = 20;
+export function pivotedOpening(l, angle, dp, a, b, type) {
   let height = l.height;
   if (l.tilt < 90) height *= Math.sin((l.tilt * Math.PI) / 180);
-  const area = open * l.width * height, dz = height / SASH_STRIPS;
-  const share = (z) => Math.max(0.05, type === 'hopper' ? z / height : 1 - z / height); // 0 at the hinge, 1 at the free edge
-  let total = 0;
-  for (let i = 0; i < SASH_STRIPS; i++) total += share((i + 0.5) * dz);
-  const gdrho = 9.8 * (a.rho - b.rho), lin = 1e-4;
+  const alpha = (Math.min(90, Math.max(0, angle)) * Math.PI) / 180, cos = Math.cos(alpha), tan = Math.tan(alpha);
+  const axis = type === 'hopper' ? 0 : height;
+  let h2 = axis * (1 - cos), h4 = axis + (height - axis) * cos;
+  if (alpha >= Math.PI / 2 - 1e-9) h2 = h4 = axis;
+  const dz = height / PIVOT_STRIPS, gdrho = 9.8 * (a.rho - b.rho), lin = 1e-4, cd = l.dischargeCoefficient;
   const f = [0, 0], df = [0, 0]; // positive (a to b), negative
-  for (let i = 0; i < SASH_STRIPS; i++) {
-    const z = (i + 0.5) * dz, d = dp - gdrho * z; // the pressure difference at this height
-    const k = l.dischargeCoefficient * (area * share(z)) / total * Math.sqrt(2 * (d >= 0 ? a.rho : b.rho));
+  for (let i = 0; i < PIVOT_STRIPS; i++) {
+    const z = (i + 0.5) * dz, d = dp - gdrho * (z - height / 2); // the pressure difference at this height
+    const root = Math.sqrt(2 * (d >= 0 ? a.rho : b.rho));
+    let k = cd * l.width * dz * root; // the strip, full width
+    if (z > h2 && z < h4) { // still covered by the sash: its side gaps, in series with the frame
+      const c2 = 2 * cd * Math.abs(axis - z) * tan * dz * root;
+      k = k > 0 && c2 > 0 ? 1 / Math.sqrt(1 / (k * k) + 1 / (c2 * c2)) : 0;
+    }
     const [q, dq] = Math.abs(d) < lin ? [(k * d) / Math.sqrt(lin), k / Math.sqrt(lin)] : [Math.sign(d) * k * Math.sqrt(Math.abs(d)), k / (2 * Math.sqrt(Math.abs(d)))];
     const j = q >= 0 ? 0 : 1;
     f[j] += q; df[j] += dq;
   }
-  const neutral = Math.abs(gdrho) > 1e-9 ? Math.min(1, Math.max(0, dp / gdrho / height)) : undefined;
+  // The neutral plane: where the pressure difference changes sign, from the bottom.
+  const neutral = Math.abs(gdrho) > 1e-9 ? Math.min(1, Math.max(0, (dp / gdrho + height / 2) / height)) : undefined;
   const out = { f: [], df: [], neutral };
   for (const j of [0, 1]) if (f[j] !== 0 || df[j] !== 0) { out.f.push(f[j]); out.df.push(df[j]); }
-  if (!out.f.length) { out.f.push(0); out.df.push(df[0] + df[1] || 1e-12); }
+  if (!out.f.length) { out.f.push(0); out.df.push(1e-12); }
   return out;
 }
 
@@ -216,7 +224,8 @@ const climb = (p0, rho, h, g) => -p0 * (1 - Math.exp((-h * rho * g) / p0));
 //   conditions.open:    { [link name]: open factor 0-1 } for windows under zone control, or to open or
 //                       close any other window or door for this moment (doors are otherwise open)
 //   conditions.site:    { elevation, latitude }
-//   conditions.sashes:  { [window name]: { type } } for windows hinged at the top or bottom (sashOpening)
+//   conditions.sashes:  { [window name]: { type, angle } }: hoppers and awnings open by angle (degrees) are
+//                       pivoted openings (pivotedOpening), as the tool's reruns write them
 // Returns zone pressures (Pa, relative to outdoors at ground level) and each link's flow both ways (kg/s).
 // exactEnergyPlus: reproduce EnergyPlus also where it treats an open opening as closed (see simpleOpening).
 export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations = 100, exactEnergyPlus = false } = {}) {
@@ -242,8 +251,9 @@ export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations
     const stack = climb(outdoor.pressure, rhoA, l.z, g) - climb(outdoor.pressure, rhoB, l.z, g);
     let open = 1;
     if (l.type === 'opening') open = conditions.open?.[l.name] ?? (l.control === 'open' ? l.openFactor : 0);
-    const sash = conditions.sashes?.[l.name]?.type;
-    return { l, a, b, pOut, stack, open, hinged: sash === 'hopper' || sash === 'awning' ? sash : null };
+    const sash = conditions.sashes?.[l.name];
+    const pivoted = (sash?.type === 'hopper' || sash?.type === 'awning') && sash.angle > 0 ? sash : null;
+    return { l, a, b, pOut, stack, open, pivoted };
   });
 
   const N = net.zones.length;
@@ -254,7 +264,7 @@ export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations
     const flows = links.map((k) => {
       const dp = p[k.l.n] - (k.l.m < 0 ? k.pOut : p[k.l.m]) + k.stack;
       const r = k.l.type === 'crack' ? powerLaw(k.l.coefficient, k.l.exponent, dp, k.a, k.b)
-        : k.hinged && k.open > 0 && !exactEnergyPlus ? sashOpening(k.l, k.open, dp, k.a, k.b, k.hinged)
+        : k.pivoted && k.open > 0 ? pivotedOpening(k.l, k.pivoted.angle, dp, k.a, k.b, k.pivoted.type)
         : simpleOpening(k.l, k.open, dp, k.a, k.b, exactEnergyPlus);
       const total = r.f.reduce((s, x) => s + x, 0), d = r.df.reduce((s, x) => s + x, 0);
       sum[k.l.n] += total; scale[k.l.n] += r.f.reduce((s, x) => s + Math.abs(x), 0); J[k.l.n][k.l.n] += d;
