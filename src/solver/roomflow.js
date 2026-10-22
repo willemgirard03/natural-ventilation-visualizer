@@ -154,7 +154,9 @@ export function prepareRoomFlow(g, net) {
 // The volume flow out of each cell face that carries an opening's air (key = cell * 6 + direction,
 // m3/s; negative: in), from the network's streams, and the faces where outdoor air enters (for
 // releasing particles). skip(link): links left out (the grid solver solves flow through open doors).
-export function boundaryFluxes(prep, flows, { open = null, skip = () => false } = {}) {
+// sashes: { [window name]: { type, hinge, angle } } spreads a hinged window's air along it in proportion
+// to the sash's local gap, which grows from nothing at the hinge to its widest at the free edge.
+export function boundaryFluxes(prep, flows, { open = null, skip = () => false, sashes = null } = {}) {
   const { g, net, faces, zIndex } = prep;
   const out = new Map(), entries = [];
   for (const s of flows.streams) {
@@ -168,13 +170,19 @@ export function boundaryFluxes(prep, flows, { open = null, skip = () => false } 
       if (!fs.length) fs = all;
       // A partly open window or door passes its air through that share of its width, centred, as
       // EnergyPlus narrows a simple opening: so the air keeps its speed and the stream narrows.
-      const share = l.type === 'opening' ? open?.[l.name] ?? l.openFactor : 1;
-      if (share > 0 && share < 1 && fs.length > 1) fs = middleShare(g, fs, share);
-      const q = (sign * s.rate) / RHO / fs.length;
-      for (const f of fs) {
-        out.set(f.key, (out.get(f.key) || 0) + q);
-        if (sign < 0 && s.from < 0) entries.push({ key: f.key, c: f.c, d: f.d, q: -q, stream: s });
+      const sash = sashes?.[l.name];
+      let weights = null;
+      if (sash && fs.length > 1) weights = sashWeights(g, l, fs, sash);
+      else {
+        const share = l.type === 'opening' ? open?.[l.name] ?? l.openFactor : 1;
+        if (share > 0 && share < 1 && fs.length > 1) fs = middleShare(g, fs, share);
       }
+      const total = weights ? weights.reduce((a, b) => a + b, 0) : fs.length;
+      fs.forEach((f, i) => {
+        const q = (sign * s.rate * (weights ? weights[i] : 1)) / RHO / total;
+        out.set(f.key, (out.get(f.key) || 0) + q);
+        if (sign < 0 && s.from < 0) entries.push({ key: f.key, c: f.c, d: f.d, q: -q, stream: s, sash });
+      });
     }
   }
   return { out, entries };
@@ -185,10 +193,10 @@ export function boundaryFluxes(prep, flows, { open = null, skip = () => false } 
 // direction, m3/s; negative: in), and the faces where outdoor air enters, for releasing particles.
 // previous: an earlier result for the same model, whose potential starts the solve.
 // open: { [opening name]: open fraction } as solved (conditions.open), so partly open openings narrow.
-export function roomFlow(prep, flows, { previous = null, open = null, tolerance = 1e-4, maxIterations = 3000 } = {}) {
+export function roomFlow(prep, flows, { previous = null, open = null, sashes = null, tolerance = 1e-4, maxIterations = 3000 } = {}) {
   const { g, net, faces, zonesCSR, zIndex } = prep;
   const N = g.zone.length;
-  const { out, entries } = boundaryFluxes(prep, flows, { open });
+  const { out, entries } = boundaryFluxes(prep, flows, { open, sashes });
   // Ideal flow in each zone: potential phi with sum over neighbours (phi_c - phi_n) = -(outflow at c) / h.
   const h = g.h, phi = previous ? Float64Array.from(previous.phi) : new Float64Array(N), velocity = new Float32Array(N * 3);
   let iterations = 0;
@@ -217,6 +225,24 @@ export function roomFlow(prep, flows, { previous = null, open = null, tolerance 
     }
   }
   return { velocity, out, entries, phi, iterations };
+}
+
+// Each face's share of a hinged window's air: the sash's gap at the face, which grows in proportion
+// to the distance from the hinge (the side triangles), with a floor so no part of the opening is shut.
+function sashWeights(g, l, faces, sash) {
+  const zs = l.vertices.map((p) => p[2]), z0 = Math.min(...zs), z1 = Math.max(...zs);
+  // Along the window from left to right, seen from outside (as the sash is drawn).
+  const n = unitNormal(l.vertices), h = Math.hypot(n[0], n[1]) || 1, right = [-n[1] / h, n[0] / h];
+  const centres = faces.map((f) => cellCentre(g, f.c));
+  const along = centres.map((c) => c[0] * right[0] + c[1] * right[1]);
+  const lo = Math.min(...along), hi = Math.max(...along);
+  return centres.map((c, i) => {
+    let s; // 0 at the hinge, 1 at the free edge
+    if (sash.type === 'hopper') s = (c[2] - z0) / (z1 - z0 || 1);
+    else if (sash.type === 'awning') s = (z1 - c[2]) / (z1 - z0 || 1);
+    else s = hi > lo ? (sash.hinge === 'right' ? hi - along[i] : along[i] - lo) / (hi - lo) : 1;
+    return Math.max(0.05, Math.min(1, s));
+  });
 }
 
 // The faces in the middle `share` of an opening's width: faces sorted along the opening's horizontal

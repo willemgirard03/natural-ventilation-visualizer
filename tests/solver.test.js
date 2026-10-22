@@ -192,3 +192,19 @@ test('grid solver: warm air rises above a heated floor, a warm layer forms, and 
   for (const c of grid.fluid) worst = Math.max(worst, Math.abs(grid.divergence(c)));
   assert.ok(worst < 1e-6, `largest cell imbalance ${worst}`);
 });
+
+test('sashes: air comes in under an awning and over a hopper', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { voxelize, prepareRoomFlow, boundaryFluxes, cellCentre } = await import('../src/solver/roomflow.js');
+  const model = twoRooms();
+  const g = voxelize(model, { cell: 0.125 }), net = buildNetwork(model, { doors: false });
+  const cond = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0.5, 'Hall:s:w': 0.5 }, zones: { Room: { t: 22, w: 0.008 }, Hall: { t: 22, w: 0.008 } }, outdoor: { t: 22, w: 0.008, pressure: 101325, windSpeed: 4, windDirection: 180 } };
+  const flows = flowStreams(net, solveNetwork(net, cond), cond), prep = prepareRoomFlow(g, net);
+  const height = (type) => {
+    const { entries } = boundaryFluxes(prep, flows, { open: cond.open, sashes: { 'Room:s:w': { type, hinge: 'left', angle: 20 } } });
+    const mine = entries.filter((e) => net.links[e.stream.link].name === 'Room:s:w');
+    return mine.reduce((s, e) => s + e.q * cellCentre(g, e.c)[2], 0) / mine.reduce((s, e) => s + e.q, 0);
+  };
+  const awning = height('awning'), hopper = height('hopper'); // the window runs from 1 to 2 m
+  assert.ok(awning < 1.45 && hopper > 1.55, `air comes in at ${awning.toFixed(2)} m under an awning, ${hopper.toFixed(2)} m over a hopper`);
+});

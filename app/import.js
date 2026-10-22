@@ -128,6 +128,9 @@ function solveAir() {
       return [l.name, open ? openFraction(l) : 0];
     })),
   };
+  // Open windows' sashes, for spreading their air along them in the room air.
+  conditions.sashes = Object.fromEntries(net.links.filter((l) => l.control === 'zone' && conditions.open[l.name] > 0)
+    .map((l) => [l.name, { ...sashOf(l.name), angle: sashFor(l, conditions.open[l.name]).angle }]));
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   airflow = { solution, flows, conditions };
@@ -171,7 +174,7 @@ function solveAir() {
     clearTimeout(fieldTimer);
     fieldTimer = setTimeout(() => {
       if (!rooms || airflow?.flows !== flows) return;
-      field = roomFlow(rooms, flows, { previous: field, open: conditions.open });
+      field = roomFlow(rooms, flows, { previous: field, open: conditions.open, sashes: conditions.sashes });
       air.setField(field, conditions);
       drawSlices(true);
     }, 120);

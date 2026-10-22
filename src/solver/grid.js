@@ -46,8 +46,9 @@ export class GridFlow {
     this.ghostT = new Float32Array(N).fill(NaN);
   }
 
-  // New conditions: the network's streams and conditions (with .open), the hour index for internal
-  // gains, and each zone's known temperature (degC). Keeps the current flow as the starting point.
+  // New conditions: the network's streams and conditions (with .open, and .sashes: { [window name]:
+  // { type, hinge, angle } } for open windows), the hour index for internal gains, and each zone's
+  // known temperature (degC). Keeps the current flow as the starting point.
   setConditions(flows, conditions, { hour = 4800, open = conditions.open } = {}) {
     const { g, prep } = this, N = g.zone.length, h = g.h;
     this.outdoorT = conditions.outdoor.t;
@@ -55,7 +56,10 @@ export class GridFlow {
     if (!this.started) { for (const c of this.fluid) this.T[c] = this.targetT[g.zone[c]]; this.started = true; }
     // Openings to outdoors (and leaks) set the flow; doors between zones are solved; leaks between zones are left out.
     const skip = (l) => l.door || (l.type === 'crack' && l.to !== null);
-    const { out, entries } = boundaryFluxes(prep, flows, { open, skip });
+    const { out, entries } = boundaryFluxes(prep, flows, { open, skip, sashes: conditions.sashes });
+    // A hopper's sash is inside the room: air coming in over it is turned upwards, taken as 45 degrees
+    // (as fast upwards as inwards). An approximation, to check against OpenFOAM.
+    this.deflect = entries.filter((e) => e.sash?.type === 'hopper').map((e) => ({ c: e.c, up: e.q / (h * h) }));
     this.out = out;
     this.entries = entries;
     const doorOpen = new Set();
@@ -301,6 +305,8 @@ export class GridFlow {
       const up = this.nbr[c * 6 + 5], tr = ref[this.region[c]];
       this.U[2][c] += (dt * G * (0.5 * (this.T[c] + this.T[up]) - tr)) / (tr + 273.15);
     }
+    // Air coming in over a hopper's sash, turned upwards.
+    for (const { c, up } of this.deflect || []) if (this.kind[c * 6 + 5] === OPEN) this.U[2][c] = Math.max(this.U[2][c], up);
     // 5. Pressure: remove what would pile up or vanish.
     this.project({ tolerance: this.projectTolerance });
     this.snapshot();
