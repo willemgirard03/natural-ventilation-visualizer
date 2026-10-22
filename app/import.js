@@ -7,6 +7,8 @@ import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
 import { voxelize, prepareRoomFlow, roomFlow } from '../src/solver/roomflow.js';
 import { GridFlow } from '../src/solver/grid.js';
+import { cellAt } from '../src/solver/roomflow.js';
+import { FieldSlices, rampTemperature } from './slices.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
 import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
@@ -33,6 +35,29 @@ let model = null;
 $('version').textContent = MODEL_VERSION;
 const view = new View3D($('viewer'), { onSelect: showInfo });
 const air = new AirflowParticles(view);
+const slices = new FieldSlices(view);
+let sliceRange = null, sliceTimer = 0, sliceLast = 0;
+// Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
+// room's own temperature. Throttled, since the simulation posts several steps a second.
+function drawSlices(now = false) {
+  const kind = $('slices').value, simulated = $('room-air').value === 'grid';
+  if (!kind || !model || !rooms || (simulated ? !gridLive : !field)) { slices.hide(); sliceRange = null; legend(); return; }
+  const wait = 300 - (performance.now() - sliceLast);
+  if (!now && wait > 0) { clearTimeout(sliceTimer); sliceTimer = setTimeout(() => drawSlices(true), wait); return; }
+  sliceLast = performance.now();
+  const g = rooms.g, fluid = (x, y, z) => { const c = cellAt(g, [x, y, z]); return c >= 0 && g.zone[c] >= 0; };
+  let value;
+  if (simulated) {
+    value = kind === 'speed' ? (x, y, z) => Math.hypot(...grid.velocityAt([x, y, z])) : (x, y, z) => grid.temperatureAt(x, y, z);
+  } else {
+    const t = airflow.conditions.zones;
+    value = kind === 'speed' ? (x, y, z) => { const c = cellAt(g, [x, y, z]); return Math.hypot(field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]); }
+      : (x, y, z) => t[g.zones[g.zone[cellAt(g, [x, y, z])]]].t;
+  }
+  const colour = kind === 'speed' ? (v) => speedColor(v) : (v, range) => rampTemperature(v, range[0], range[1]);
+  sliceRange = slices.update({ inside: fluid, value }, kind, colour, g);
+  legend();
+}
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
 let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room flow, and its latest field
 let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour solved
@@ -49,6 +74,7 @@ function startGrid(m) {
     if (data.type !== 'state' || !grid) return;
     grid.FV.set(data.FV);
     grid.T.set(data.T);
+    drawSlices();
     if (!gridLive && airflow) { gridLive = true; air.clear(); air.setField(grid, airflow.conditions); }
     const pace = data.dt / (data.ms / 1000);
     $('room-air-status').textContent = `${fmt(grid.fluid.length / 1000, 0)}k cells · ${fmt(pace, 1)}× real time`;
@@ -147,6 +173,7 @@ function solveAir() {
       if (!rooms || airflow?.flows !== flows) return;
       field = roomFlow(rooms, flows, { previous: field, open: conditions.open });
       air.setField(field, conditions);
+      drawSlices(true);
     }, 120);
   }
   const volume = Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0);
@@ -298,6 +325,11 @@ function applySection() {
   view.setSection(axis || null, Number($('section-at').value), $('section-flip').dataset.flip === '1', [Math.sin(a), Math.cos(a)]);
 }
 $('section').addEventListener('change', applySection);
+$('slices').addEventListener('change', () => drawSlices(true));
+$('cut').addEventListener('input', () => drawSlices());
+$('section-at').addEventListener('input', () => drawSlices());
+$('section').addEventListener('change', () => drawSlices(true));
+$('section-flip').addEventListener('click', () => drawSlices(true));
 $('section-at').addEventListener('input', applySection);
 $('section-flip').addEventListener('click', (e) => { e.target.dataset.flip = e.target.dataset.flip === '1' ? '0' : '1'; applySection(); });
 
@@ -560,6 +592,15 @@ function legend() {
     items.push(`<span title="Petal length: how often the wind blows from that direction in ${month} (rings every 5% of hours). Shading: wind speed at the weather station.">Wind rose, ${month}:</span>`);
     SPEED_BANDS.forEach((b, i) => items.push(chip(BAND_COLORS[i], b === Infinity ? `over ${SPEED_BANDS[i - 1]} m/s` : `${i ? SPEED_BANDS[i - 1] : 0}–${b} m/s`)));
     items.push(chip('#E0401F', 'This hour', 'The arrow points the way the wind blows; its length grows with speed.'));
+  }
+  if ($('slices').value && sliceRange !== undefined && (slices.plan.visible || slices.section.visible)) {
+    if ($('slices').value === 'speed') {
+      const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
+      items.push(`<span title="Slices: air speed on a log scale">${ramp(stops, 48)}Slices: speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
+    } else if (sliceRange) {
+      const [lo, hi] = sliceRange;
+      items.push(`<span title="Slices: air temperature, from the lowest to the highest on the slices shown">${ramp([rampTemperature(lo, lo, hi), rampTemperature((lo + hi) / 2, lo, hi), rampTemperature(hi, lo, hi)], 48)}Slices: ${fmt(lo, 1)} … ${fmt(hi, 1)} °C</span>`);
+    }
   }
   if ($('show-air').checked) {
     if ($('air-color').value === 'speed') {
