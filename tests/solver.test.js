@@ -248,3 +248,22 @@ test('Example_02 network week: CO2 per zone follows EnergyPlus within 15 ppm on 
   const m = report.match(/mean \|difference\| ([0-9.]+) ppm/);
   assert.ok(m && Number(m[1]) < 15, report);
 });
+
+test('grid solver: CO2 is carried with the air, fresher by an open window, its zone mean held at the network level', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { voxelize, prepareRoomFlow } = await import('../src/solver/roomflow.js');
+  const { GridFlow } = await import('../src/solver/grid.js');
+  const model = twoRooms();
+  const g = voxelize(model, { cell: 0.25 }), net = buildNetwork(model, { doors: false });
+  const cond = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 1, 'Hall:s:w': 0 }, zones: { Room: { t: 24, w: 0.008 }, Hall: { t: 24, w: 0.008 } }, outdoor: { t: 16, w: 0.008, pressure: 101325, windSpeed: 3, windDirection: 180 } };
+  const grid = new GridFlow(prepareRoomFlow(g, net, model), model);
+  grid.setConditions(flowStreams(net, solveNetwork(net, cond), cond), cond);
+  grid.sources = grid.sources.map((s) => ({ ...s, lower: 0, upper: 0 }));
+  grid.setCO2({ targets: { Room: 800, Hall: 600 }, generation: { Room: 5e-5 }, outdoor: 400 });
+  for (let t = 0; t < 60;) t += grid.step(Math.min(0.5, grid.stableDt()));
+  const zi = g.zones.indexOf('Room'), cells = grid.fluid.filter((c) => g.zone[c] === zi);
+  const mean = cells.reduce((s, c) => s + grid.C[c], 0) / cells.length;
+  near(mean, 800, 40); // the hold (30 s) against a strong source: ten people in 48 m3
+  // Room: x 0 to 4, y 0 to 4; its window on the south wall (y = 0), 1 to 2 m up.
+  assert.ok(grid.co2At(2, 0.3, 1.5) < grid.co2At(2, 3.5, 1.0) - 20, `${grid.co2At(2, 0.3, 1.5)} by the window, ${grid.co2At(2, 3.5, 1.0)} at the back`);
+});

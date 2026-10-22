@@ -80,14 +80,31 @@ export function windRoseGroup(data, { radius, northAxis = 0, wind = null, ink = 
   return group;
 }
 
-// This hour's wind: an arrow from upwind towards the building, longer for stronger wind; null for calm.
-// Built on its own so a change of wind redraws only the arrow.
+// This hour's wind: an arrow from upwind towards the building, longer for stronger wind, with a
+// handle at its tail to drag it round (direction) and in or out (speed); null for calm. Built on its
+// own so a change of wind redraws only the arrow. The tail sits windTail(...) from the centre.
+export const WIND_MAX = 20; // m/s at the arrow's longest
+export function windTail(speed, radius) {
+  const reach = radius * 0.9;
+  return radius + reach + windLength(speed, radius);
+}
+const windLength = (speed, radius) => (Math.min(Math.max(speed, 0), WIND_MAX) / WIND_MAX) * radius * 1.2 + radius * 0.15;
+// The speed whose arrow's tail is `d` from the centre: windTail's inverse.
+export function windSpeedAt(d, radius) {
+  const free = d - radius - radius * 0.9 - radius * 0.15;
+  return Math.min(WIND_MAX, Math.max(0, (free / (radius * 1.2)) * WIND_MAX));
+}
 export function windArrow(wind, { radius, northAxis = 0 }) {
-  if (!wind || !(wind.speed > 0)) return null;
+  if (!wind) return null;
   const a = ((wind.direction - northAxis) * Math.PI) / 180, ux = Math.sin(a), uy = Math.cos(a);
-  const reach = radius * 0.9, len = Math.min(1, wind.speed / 10) * reach + radius * 0.15;
-  const start = new THREE.Vector3(ux * (radius + reach + len), uy * (radius + reach + len), radius * 0.05);
-  const arrow = new THREE.ArrowHelper(new THREE.Vector3(-ux, -uy, 0), start, len, WIND_ARROW, Math.min(len * 0.35, radius * 0.25), radius * 0.12);
-  arrow.userData.windArrow = true;
-  return arrow;
+  const len = windLength(wind.speed, radius), tail = windTail(wind.speed, radius);
+  const start = new THREE.Vector3(ux * tail, uy * tail, radius * 0.05);
+  const group = new THREE.Group();
+  if (wind.speed > 0) group.add(new THREE.ArrowHelper(new THREE.Vector3(-ux, -uy, 0), start, len, WIND_ARROW, Math.min(len * 0.35, radius * 0.25), radius * 0.12));
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(radius * 0.045, 20, 14), new THREE.MeshBasicMaterial({ color: WIND_ARROW }));
+  knob.position.copy(start);
+  group.add(knob);
+  group.userData.windArrow = true;
+  group.userData.knob = knob;
+  return group;
 }

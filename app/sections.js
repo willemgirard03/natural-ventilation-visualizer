@@ -76,9 +76,14 @@ export class Sections {
     const u = this.uniforms;
     material.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, u);
+      // The world position: from `transformed` in three.js's own materials, or from the segment's
+      // ends in the wide lines' material (LineMaterial), whose quads take one end or the other.
+      const world = shader.vertexShader.includes('#include <project_vertex>')
+        ? ['#include <project_vertex>', '#include <project_vertex>\nvSecW = (modelMatrix * vec4(transformed, 1.0)).xyz;']
+        : ['#include <fog_vertex>', '#include <fog_vertex>\nvSecW = (modelMatrix * vec4(position.y < 0.5 ? instanceStart : instanceEnd, 1.0)).xyz;'];
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vSecW;')
-        .replace('#include <project_vertex>', '#include <project_vertex>\nvSecW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+        .replace(world[0], world[1]);
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>
 varying vec3 vSecW;
@@ -106,7 +111,7 @@ for (int i = 0; i < ${MAX}; i++) {
     const visit = (o) => {
       if (o.userData.noSection) return;
       const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
-      for (const m of mats) if (m.userData.sectioned === undefined && m.onBeforeCompile && !m.isShaderMaterial) this.patch(m);
+      for (const m of mats) if (m.userData.sectioned === undefined && m.onBeforeCompile && (!m.isShaderMaterial || m.isLineMaterial)) this.patch(m);
       for (const c of o.children) visit(c);
     };
     visit(this.view.scene);
@@ -427,7 +432,6 @@ for (int i = 0; i < ${MAX}; i++) {
       if (d.moved) return;
       const deg = THREE.MathUtils.radToDeg;
       if (d.h.type === 'move') this.ask(e, 'move mm', (x) => { d.p.o.addScaledVector(d.h.axis, x / 1000); });
-      else if (d.h.type === 'slide') this.ask(e, 'move mm', (x) => { d.p.o.addScaledVector(frameOf(d.p).n, x / 1000); });
       else if (d.h.type === 'turn') this.ask(e, `angle °, now ${Math.round(deg(d.p.yaw))}`, (x) => { d.p.yaw = THREE.MathUtils.degToRad(x); }, true);
       else if (d.h.type === 'grip') {
         const k = d.h.grip.k, size = k < 2 ? d.p.b[1] - d.p.b[0] : d.p.b[3] - d.p.b[2];

@@ -6,6 +6,11 @@
 // doors are openings in the grid, so flow between rooms, two-way exchange included, comes out of the
 // solution. Each zone's mean temperature is held near its known value (results, or the indoor
 // setting), so the solver adds the pattern within the room, not a different heat balance.
+//
+// CO2 is carried with the air the same way, once setCO2 has given it each zone's known level (the
+// network's balance, co2.js): people breathe it out in the occupied layer, outdoor air brings it in at
+// inflows, any mechanical outdoor air dilutes the whole room, and each zone's mean is held near its known
+// level, so the field shows where in a room the air is stale or fresh.
 
 import { DIRS, neighbour, cellCentre, boundaryFluxes } from './roomflow.js';
 import { hourlyValues } from '../model/schedules.js';
@@ -45,6 +50,20 @@ export class GridFlow {
     this.FV = new Float32Array(N * 6);
     this.CC = new Float32Array(N * 3);
     this.ghostT = new Float32Array(N).fill(NaN);
+    this.C = new Float32Array(N); // CO2, ppm
+    this.ghostC = new Float32Array(N).fill(NaN);
+    this.co2 = null; // { targets, generation, supply, outdoor } by zone, from setCO2
+  }
+
+  // CO2 in each zone from the network's balance: targets (ppm) the zones' means are held near,
+  // generation (m3/s of CO2 from people), supply (kg/s of mechanical outdoor air), all by grid zone
+  // name, and outdoor (ppm). Zones start at their targets.
+  setCO2({ targets, generation = {}, supply = {}, outdoor = 400 }) {
+    const g = this.g, byZone = (o) => g.zones.map((z) => o[z] ?? 0);
+    const first = !this.co2;
+    this.co2 = { targets: g.zones.map((z) => targets[z] ?? outdoor), generation: byZone(generation), supply: byZone(supply), outdoor };
+    if (first) for (const c of this.fluid) this.C[c] = this.co2.targets[g.zone[c]];
+    this.inflowGhosts();
   }
 
   // New conditions: the network's streams and conditions (with .open, and .sashes: { [window name]:
@@ -156,10 +175,42 @@ export class GridFlow {
   inflowGhosts() {
     const g = this.g;
     this.ghostT.fill(NaN);
-    for (const [key, q] of this.out) if (q < 0) {
+    this.ghostC.fill(NaN);
+    for (const [key, q] of this.out || []) if (q < 0) {
       const nb = neighbour(g, (key / 6) | 0, key % 6);
-      if (nb >= 0 && g.zone[nb] < 0) this.ghostT[nb] = this.outdoorT;
+      if (nb >= 0 && g.zone[nb] < 0) { this.ghostT[nb] = this.outdoorT; this.ghostC[nb] = this.co2?.outdoor ?? NaN; }
     }
+  }
+
+  // Outdoor air entering through a face at the grid's edge, where there is no cell beyond it to hold the
+  // outdoor value for the carrying step: the volume that came in this step replaces that much of the
+  // cell's air, at the outdoor temperature and CO2.
+  mixInflows(dt) {
+    const cell = this.g.h ** 3, outC = this.co2?.outdoor;
+    for (const [key, q] of this.out || []) {
+      if (!(q < 0) || this.nbr[key] >= 0) continue;
+      const c = (key / 6) | 0, f = Math.min(1, (-q * dt) / cell);
+      this.T[c] += (this.outdoorT - this.T[c]) * f;
+      if (this.co2) this.C[c] += (outC - this.C[c]) * f;
+    }
+  }
+
+  // CO2's sources and sinks over a step, after it has been carried: people's CO2 into the occupied
+  // layer (as a volume fraction of the cells it goes into), mechanical outdoor air mixed through the whole
+  // zone, then each zone's mean drawn to its known level (the network's), the pattern within it kept.
+  stepCO2(dt) {
+    const { g, co2 } = this, cell = g.h ** 3;
+    const pull = 1 - Math.exp(-dt / HOLD_TIME);
+    this.sources.forEach((s, zi) => {
+      if (!s.cells.length) return;
+      const gen = co2.generation[zi];
+      if (gen > 0 && s.occupied.length) { const add = (gen * 1e6 * dt) / (cell * s.occupied.length); for (const c of s.occupied) this.C[c] += add; }
+      const volume = cell * s.cells.length, k = 1 - Math.exp(-(co2.supply[zi] / RHO) * dt / volume);
+      let mean = 0;
+      for (const c of s.cells) { if (k > 0) this.C[c] += (co2.outdoor - this.C[c]) * k; mean += this.C[c]; }
+      const shift = (co2.targets[zi] - mean / s.cells.length) * pull;
+      for (const c of s.cells) this.C[c] += shift;
+    });
   }
 
   // Heat from people, equipment and lights at an hour, by zone: people and equipment spread through the
@@ -232,7 +283,19 @@ export class GridFlow {
   // Temperature at (x, y, z): trilinear over fluid cell centres and the outdoor air beyond inflows.
   temperatureAt(x, y, z) {
     if (Array.isArray(x)) [x, y, z] = x;
-    const g = this.g, Z = g.zone, T = this.T, ghost = this.ghostT;
+    return this.scalarAt(this.T, this.ghostT, this.outdoorT, x, y, z);
+  }
+
+  // CO2 at (x, y, z), ppm, the same way.
+  co2At(x, y, z) {
+    if (Array.isArray(x)) [x, y, z] = x;
+    return this.scalarAt(this.C, this.ghostC, this.co2?.outdoor ?? 400, x, y, z);
+  }
+
+  // A field held at cell centres (T, with ghost values beyond inflows) at (x, y, z): trilinear over the
+  // fluid cells and ghosts around the point; `far` where there are none.
+  scalarAt(T, ghost, far, x, y, z) {
+    const g = this.g, Z = g.zone;
     const fx = (x - g.min[0]) / g.h - 0.5, fy = (y - g.min[1]) / g.h - 0.5, fz = (z - g.min[2]) / g.h - 0.5;
     const i0 = Math.floor(fx), j0 = Math.floor(fy), k0 = Math.floor(fz);
     const tx = fx - i0, ty = fy - j0, tz = fz - k0;
@@ -254,7 +317,7 @@ export class GridFlow {
         }
       }
     }
-    return wsum > 1e-9 ? sum / wsum : this.outdoorT;
+    return wsum > 1e-9 ? sum / wsum : far;
   }
 
   // Where air at (x, y, z) came from dt seconds ago, written into out: one step back along the local
@@ -283,7 +346,7 @@ export class GridFlow {
     this.snapshot();
     const F = this.FV, CC = this.CC;
     for (const c of this.fluid) for (let a = 0; a < 3; a++) CC[c * 3 + a] = 0.5 * (F[c * 6 + 2 * a] + F[c * 6 + 2 * a + 1]);
-    const U2 = this.U.map((u) => Float32Array.from(u)), T2 = Float32Array.from(this.T);
+    const U2 = this.U.map((u) => Float32Array.from(u)), T2 = Float32Array.from(this.T), C2 = this.co2 ? Float32Array.from(this.C) : null;
     for (const c of this.fluid) {
       const cx = this.cx[c], cy = this.cy[c], cz = this.cz[c];
       for (let a = 0; a < 3; a++) {
@@ -296,9 +359,13 @@ export class GridFlow {
         U2[a][c] = this.component(a, fx - vx * dt, fy - vy * dt, fz - vz * dt);
       }
       T2[c] = this.temperatureAt(cx - CC[c * 3] * dt, cy - CC[c * 3 + 1] * dt, cz - CC[c * 3 + 2] * dt);
+      if (C2) C2[c] = this.co2At(cx - CC[c * 3] * dt, cy - CC[c * 3 + 1] * dt, cz - CC[c * 3 + 2] * dt);
     }
     this.U = U2;
     this.T = T2;
+    if (C2) this.C = C2;
+    this.mixInflows(dt);
+    if (C2) this.stepCO2(dt);
     // 2. Heat from people, equipment and lights.
     this.sources.forEach((s) => {
       const add = (cells, watts) => { if (cells.length && watts) { const dT = (watts * dt) / (RHO * CP * h ** 3 * cells.length); for (const c of cells) this.T[c] += dT; } };

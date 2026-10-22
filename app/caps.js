@@ -62,8 +62,8 @@ if (mod((gl_FragCoord.x + gl_FragCoord.y) * 0.70710678, ${SPACING.toFixed(1)} * 
       if (edges.length) {
         const g = new LineSegmentsGeometry().setPositions(edges.flatMap(([a, b]) => [...to3(a).toArray(), ...to3(b).toArray()]));
         const material = new LineMaterial({ color: INK, linewidth: EDGE * dpr, resolution: size });
+        v.sections.patch(material, i); // cut by the other planes, as the fill is
         const lines = new LineSegments2(g, material);
-        lines.userData.noSection = true; // a ShaderMaterial: cut by the patch it cannot take
         lines.renderOrder = 5;
         this.group.add(lines);
       }

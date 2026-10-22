@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
 import { View3D, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE, co2Color, CO2_SCALE } from './view3d.js';
@@ -13,7 +14,7 @@ import { FieldSlices, rampTemperature } from './slices.js';
 import { frameOf } from './sections.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
-import { windRoseData, windRoseGroup, windArrow, BAND_COLORS, SPEED_BANDS } from './windrose.js';
+import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { readZoneResultsStream, zoneAt, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
@@ -52,14 +53,16 @@ function drawSlices(now = false) {
   let value;
   const velocity = simulated ? (x, y, z) => grid.velocityAt([x, y, z])
     : (x, y, z) => { const c = cellAt(g, [x, y, z]); return [field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]]; };
-  if (simulated) {
+  if (kind === 'co2') {
+    value = simulated && grid.co2 ? (x, y, z) => grid.co2At(x, y, z) : (x, y, z) => airflow.co2?.[g.zones[g.zone[cellAt(g, [x, y, z])]]] ?? 400;
+  } else if (simulated) {
     value = kind === 'speed' ? (x, y, z) => Math.hypot(...grid.velocityAt([x, y, z])) : (x, y, z) => grid.temperatureAt(x, y, z);
   } else {
     const t = airflow.conditions.zones;
     value = kind === 'speed' ? (x, y, z) => { const c = cellAt(g, [x, y, z]); return Math.hypot(field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]); }
       : (x, y, z) => t[g.zones[g.zone[cellAt(g, [x, y, z])]]].t;
   }
-  const colour = kind === 'speed' ? (v) => speedColor(v) : (v, range) => rampTemperature(v, range[0], range[1]);
+  const colour = kind === 'speed' ? (v) => speedColor(v) : kind === 'co2' ? (v) => co2Color(v) : (v, range) => rampTemperature(v, range[0], range[1]);
   sliceRange = slices.update({ inside: fluid, value, velocity }, kind, colour, g, arrows);
   legend();
 }
@@ -80,6 +83,7 @@ function startGrid(m) {
     if (data.type !== 'state' || !grid) return;
     grid.FV.set(data.FV);
     grid.T.set(data.T);
+    if (data.C) grid.C.set(data.C);
     drawSlices();
     if (!gridLive && airflow) { gridLive = true; air.clear(); air.setField(grid, airflow.conditions); }
     const pace = data.dt / (data.ms / 1000);
@@ -189,6 +193,17 @@ function solveAir() {
     if (now?.solution !== solution) return;
     now.co2 = co2History(hourAt, solution, site, outdoor);
     view.setCO2(now.co2);
+    // The grid solver carries CO2 within rooms, each zone's mean held at these levels.
+    if (grid && worker) {
+      const co2 = {
+        targets: now.co2, outdoor: outdoorCO2(model, hourAt),
+        generation: Object.fromEntries(net.zones.map((z, i) => [z, co2Generation(model, net.zones, hourAt)[i]])),
+        supply: Object.fromEntries(outdoorAirSupply(model, net.zones, hourAt, site.elevation).map((m, i) => [net.zones[i], m])),
+      };
+      grid.setCO2(co2);
+      worker.postMessage({ type: 'co2', co2 });
+    }
+    if ($('slices').value === 'co2') drawSlices(true);
     if ($('color-by').value === 'co2') legend();
     const line = document.getElementById('co2-line');
     if (line) line.outerHTML = co2Line(line.dataset.zone);
@@ -281,6 +296,49 @@ function drawRose() {
   legend();
 }
 $('show-rose').addEventListener('change', drawRose);
+
+// The wind arrow's handle, dragged in the view as the sun is in the Solar Shading Explorer: round the
+// building it sets the direction the wind comes from, in or out the speed (the tail's distance from
+// the centre). Snaps to whole degrees and tenths of a metre per second.
+{
+  const canvas = view.renderer.domElement;
+  const knobAt = (e) => {
+    const knob = view.overlay?.children.find((c) => c.userData.windArrow)?.userData.knob;
+    if (!knob || !view.overlay.visible) return null;
+    const r = canvas.getBoundingClientRect(), p = knob.getWorldPosition(new THREE.Vector3()).project(view.camera);
+    const d = Math.hypot((p.x + 1) / 2 * r.width - (e.clientX - r.left), (1 - p.y) / 2 * r.height - (e.clientY - r.top));
+    return d < 14 ? knob : null;
+  };
+  let drag = null, hovering = false;
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || view.sections.placing) return;
+    const knob = knobAt(e);
+    if (!knob) return;
+    e.stopImmediatePropagation();
+    canvas.setPointerCapture(e.pointerId);
+    drag = { z: knob.getWorldPosition(new THREE.Vector3()).z };
+  }, true);
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag) {
+      const near = !!knobAt(e);
+      if (near) canvas.style.cursor = 'grab'; else if (hovering) canvas.style.cursor = '';
+      hovering = near;
+      return;
+    }
+    const r = canvas.getBoundingClientRect(), ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), view.camera);
+    const hit = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -drag.z), new THREE.Vector3());
+    if (!hit) return;
+    const radius = view.footprintRadius() * 1.05;
+    const dir = ((THREE.MathUtils.radToDeg(Math.atan2(hit.x, hit.y)) + model.site.northAxis) % 360 + 360) % 360;
+    $('wind-dir').value = Math.round(dir) % 360;
+    $('wind').value = Math.round(windSpeedAt(Math.hypot(hit.x, hit.y), radius) * 10) / 10;
+    $('wind').dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const end = (e) => { if (drag) { drag = null; canvas.releasePointerCapture?.(e.pointerId); } };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
+}
 $('show-air').addEventListener('change', (e) => {
   air.setVisible(e.target.checked);
   if (e.target.checked) { solveAir(); air.play(); } else { air.stop(); air.clear(); }
@@ -440,7 +498,7 @@ $('slices').addEventListener('change', () => drawSlices(true));
 $('arrows').addEventListener('change', () => drawSlices(true));
 
 $('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
-$('air-speed').addEventListener('input', (e) => { air.speed = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
+$('air-speed').addEventListener('input', (e) => { air.speed = slices.timeScale = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
 let selected = null;
 
 // Weather: picking a day and hour fills in the outdoor conditions, which can still be edited.
@@ -490,7 +548,6 @@ function setResults(r, name = '') {
   if (r) $('windows').value = 'results';
   else if ($('windows').value === 'results') $('windows').value = 'open';
   $('t-in').disabled = !!r;
-  $('t-in-label').style.opacity = r ? 0.5 : 1;
   const missing = r?.missing.length ? ` (no temperatures for ${r.missing.length} zones: ${r.missing.slice(0, 3).join(', ')}${r.missing.length > 3 ? '…' : ''})` : '';
   $('results-status').textContent = r ? `Zone temperatures from ${name}${missing}` : '';
   applyHour();
@@ -732,7 +789,10 @@ function legend() {
     items.push(chip('#E0401F', 'This hour', 'The arrow points the way the wind blows; its length grows with speed.'));
   }
   if ($('slices').value && sliceRange !== undefined && slices.visible) {
-    if ($('slices').value === 'speed') {
+    if ($('slices').value === 'co2') {
+      const [lo, mid, hi] = CO2_SCALE;
+      items.push(`<span title="Cuts: CO2 in the room air, from the grid solver (each room's mean held at its balance figure) or, with ideal flow, each room's own level">${ramp([co2Color(lo), co2Color(mid), co2Color(hi)], 48)}Cuts: CO₂ ${lo} … ${hi}+ ppm</span>`);
+    } else if ($('slices').value === 'speed') {
       const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
       items.push(`<span title="Slices: air speed on a log scale">${ramp(stops, 48)}Slices: speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
     } else if (sliceRange) {
@@ -832,6 +892,66 @@ typeable($('day-value'), $('day'), parseDay);
 typeable($('when'), $('hour'), parseHour);
 typeable($('air-density-value'), $('air-density'), (t) => { const k = parseTimes(t); return k > 0 ? Math.log2(k) : null; });
 typeable($('air-speed-value'), $('air-speed'), parseTimes);
+
+// A figure set by dragging its name left or right, as at the foot of the Solar Shading Explorer's views:
+// `per` of a unit for each pixel moved, kept within min and max (or wrapped round `wrap`); its value
+// typed after a click. The input it drives stays in the page (hidden for numbers) and gets an input
+// event as if edited, so everything reading it works as before. A disabled input shows faded.
+function scrubbable(name, input, { per = 1, digits = 0, min = -Infinity, max = Infinity, wrap = 0, show = null } = {}) {
+  const clamp = (v) => (wrap ? ((v % wrap) + wrap) % wrap : Math.min(max, Math.max(min, v)));
+  const set = (v) => {
+    const f = 10 ** digits;
+    input.value = clamp(Math.round(v * f) / f);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  name.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || input.disabled) return;
+    e.preventDefault();
+    const x0 = e.clientX, v0 = Number(input.value);
+    document.body.classList.add('scrubbing');
+    const move = (m) => set(v0 + (m.clientX - x0) * per);
+    const up = () => { document.body.classList.remove('scrubbing'); window.removeEventListener('pointermove', move); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up, { once: true });
+  });
+  if (show) {
+    // The figure follows the input, whoever sets it (the weather file sets the outdoor conditions).
+    const own = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    const refresh = () => { show.textContent = Number(input.value).toFixed(digits); show.parentElement.classList.toggle('off', input.disabled); };
+    Object.defineProperty(input, 'value', { get() { return own.get.call(this); }, set(v) { own.set.call(this, v); refresh(); } });
+    const ownDisabled = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'disabled') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'disabled');
+    Object.defineProperty(input, 'disabled', { get() { return ownDisabled.get.call(this); }, set(v) { ownDisabled.set.call(this, v); refresh(); } });
+    refresh();
+    show.title = 'Click to type a value';
+    show.addEventListener('click', () => {
+      if (input.disabled) return;
+      const box = document.createElement('input');
+      box.className = 'valbox';
+      box.value = show.textContent;
+      show.hidden = true;
+      show.after(box);
+      box.focus();
+      box.select();
+      let done = false;
+      const finish = (keep) => {
+        if (done) return;
+        done = true;
+        const v = Number(box.value.replace(',', '.').trim());
+        box.remove();
+        show.hidden = false;
+        if (keep && box.value.trim() && Number.isFinite(v)) set(v);
+      };
+      box.addEventListener('keydown', (k) => { if (k.key === 'Enter') finish(true); if (k.key === 'Escape') finish(false); });
+      box.addEventListener('blur', () => finish(true));
+    });
+  }
+}
+for (const el of document.querySelectorAll('.barval[data-for]')) {
+  const d = el.dataset;
+  scrubbable(el.querySelector('.scrub'), $(d.for), { per: Number(d.per), digits: Number(d.digits), min: d.min ? Number(d.min) : -Infinity, max: d.max ? Number(d.max) : Infinity, wrap: Number(d.wrap || 0), show: el.querySelector('.val') });
+}
+// The sliders' names drag them too: a day or an hour for every 4 px.
+for (const [id, per] of [['day', 0.25], ['hour', 0.25]]) scrubbable($(id).previousElementSibling, $(id), { per, min: Number($(id).min), max: Number($(id).max) });
 
 // The settings bar folds to one line; the view takes the height left under it.
 $('tuck').addEventListener('click', () => {
