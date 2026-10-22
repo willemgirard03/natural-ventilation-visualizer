@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { area, azimuth, enclosedVolume, tilt, triangulate } from '../src/model/geometry.js';
 import { classifySurface, importEpJSON } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
-import { hourlyValues } from '../src/model/schedules.js';
+import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
 import { coefficient, footprintAxis, toAirflowNetwork } from '../src/model/airflow-network.js';
 import { doorOnWall, isCirculation } from '../src/model/interior-doors.js';
 
@@ -139,6 +139,17 @@ test('schedules expand to 8,760 hours with the right weekdays', () => {
   assert.equal(occ[5 * 24 + 9], 0); // Saturday 6 January
   assert.equal(occ.reduce((a, b) => a + b), 261 * 9); // 261 weekdays in a year starting on Monday
   assert.equal(hourlyValues(ep, 'Missing'), null);
+
+  // Daylight saving time: EnergyPlus reads schedules an hour ahead, from the 2nd Sunday in March
+  // (11 March in a year starting on Monday) to the 1st Sunday in November (4 November), inclusive.
+  ep['RunPeriodControl:DaylightSavingTime'] = { D: { start_date: '2nd Sunday in March', end_date: '1st Sunday in November' } };
+  assert.deepEqual(daylightSavingDays(ep), [69, 307]);
+  const dst = hourlyValues(ep, 'Occ');
+  assert.deepEqual([dst[63 * 24 + 7], dst[63 * 24 + 16]], [0, 1]); // Monday 5 March: standard time
+  assert.deepEqual([dst[70 * 24 + 7], dst[70 * 24 + 16]], [1, 0]); // Monday 12 March: 07:00 standard is 08:00 on the clock
+  assert.deepEqual([dst[308 * 24 + 7], dst[308 * 24 + 16]], [0, 1]); // Monday 5 November: back to standard time
+  ep['RunPeriodControl:DaylightSavingTime'].D = { start_date: '3/10', end_date: 'Last Sunday in October' };
+  assert.deepEqual(daylightSavingDays(ep), [68, 300]);
 });
 
 test('export returns the imported objects unchanged and separate from the model', () => {

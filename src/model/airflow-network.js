@@ -179,9 +179,16 @@ export function toAirflowNetwork(model, options = {}) {
   ep['Output:Variable'] = outputs;
   if (o.skipSizing) skipSizing(ep);
   if (o.runPeriod) {
+    // A shorter run starts on the weekday its first day has in the full year, so weekday schedules
+    // (occupancy, lights) line up with the year's: the original run period names 1 January's weekday.
     const [bm, bd, em, ed] = o.runPeriod;
     const [name, rp] = Object.entries(ep.RunPeriod || { 'Run Period 1': {} })[0];
-    ep.RunPeriod = { [name]: { ...rp, begin_month: bm, begin_day_of_month: bd, end_month: em, end_day_of_month: ed } };
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const jan1 = days.indexOf(rp.day_of_week_for_start_day ?? 'Sunday');
+    const before = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31].slice(0, bm - 1).reduce((a, b) => a + b, 0) + bd - 1;
+    const isYear = !(rp.begin_month > 1 || rp.begin_day_of_month > 1);
+    const start = jan1 >= 0 && isYear ? days[(jan1 + before) % 7] : rp.day_of_week_for_start_day;
+    ep.RunPeriod = { [name]: { ...rp, begin_month: bm, begin_day_of_month: bd, end_month: em, end_day_of_month: ed, ...(start ? { day_of_week_for_start_day: start } : {}) } };
   }
   return ep;
 }
