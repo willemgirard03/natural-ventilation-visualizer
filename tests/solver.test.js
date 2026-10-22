@@ -225,3 +225,26 @@ test('grid solver: a cold wall cools the air beside it, which sinks (a down-drau
   assert.ok(grid.temperatureAt(2, 3.9, 1.5) < grid.temperatureAt(2, 2, 1.5) - 0.3, 'cooler beside the cold wall');
   assert.ok(grid.velocityAt([2, 3.85, 1.5])[2] < -0.02, 'air sinks down the cold wall');
 });
+
+test('CO2: settles where generation meets fresh air, is carried between zones without loss, and a flush clears it', async () => {
+  const { steadyCO2, stepCO2 } = await import('../src/solver/co2.js');
+  // One 100 m3 room, 10 people's worth of CO2 (5e-5 m3/s), 0.1 kg/s of mechanical outdoor air.
+  const one = { zones: ['A'], links: [] }, none = { links: [] };
+  near(steadyCO2(one, none, [100], [5e-5], 400, [0.1])[0], 400 + (1.2 * 5e-5 * 1e6) / 0.1, 0.01);
+  // Two sealed rooms swapping 0.5 kg/s each way: all the CO2 made in A stays in the pair.
+  const two = { zones: ['A', 'B'], links: [{ n: 0, m: 1 }] }, swap = { links: [{ forward: 0.5, backward: 0.5 }] };
+  const C = stepCO2(two, swap, [400, 400], 600, [100, 100], [5e-5, 0], 400);
+  near((C[0] - 400) * 100 + (C[1] - 400) * 100, 5e-5 * 1e6 * 600, 1e-6);
+  assert.ok(C[0] > C[1] && C[1] > 400);
+  // A window opened for 10 minutes changes the 120 m3 room's air 7.5 times over (1.8 kg/s in and out):
+  // the excess is all but gone, as the exact answer (e^-7.5, 0.06%) says.
+  const vent = { zones: ['A'], links: [{ n: -1, m: 0 }] }, through = { links: [{ forward: 1.8, backward: 1.8 }] };
+  const after = stepCO2(vent, through, [1400], 600, [120], [0], 400);
+  assert.ok(after[0] - 400 < 10, `${after[0]} ppm left after the flush`);
+});
+
+test('Example_02 network week: CO2 per zone follows EnergyPlus within 15 ppm on average', { skip: existsSync(WEEK) && existsSync(EXAMPLE02) ? false : 'EnergyPlus week run not on this computer' }, () => {
+  const report = execFileSync(process.execPath, [path.join(REPO, 'tools', 'check_co2.mjs'), EXAMPLE02, WEEK, '182'], { encoding: 'utf8' });
+  const m = report.match(/mean \|difference\| ([0-9.]+) ppm/);
+  assert.ok(m && Number(m[1]) < 15, report);
+});
