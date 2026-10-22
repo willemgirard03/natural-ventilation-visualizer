@@ -3,7 +3,8 @@
 // through a band of the opening's height (fractions 0 = bottom, 1 = top).
 //
 // In an opening with two-way flow, the colder (denser) side's air runs along the bottom. The band
-// boundary is the neutral plane, placed so each band's share follows the flow law F ~ h^(3/2).
+// boundary is the neutral plane: as the solver found it (solution.links[i].neutral), or else placed so
+// each band's share follows a rectangle's flow law F ~ h^(3/2).
 // Cracks have no position on their surface in the network, so their streams cover the whole surface.
 
 export function flowStreams(net, solution, conditions) {
@@ -20,7 +21,7 @@ export function flowStreams(net, solution, conditions) {
     const [a, b] = ends;
     const [bottom, top] = temp(a[0]) <= temp(b[0]) ? [a, b] : [b, a];
     const wb = bottom[2] ** (2 / 3), wt = top[2] ** (2 / 3);
-    const split = wb / (wb + wt);
+    const split = r.neutral > 0 && r.neutral < 1 ? r.neutral : wb / (wb + wt);
     streams.push({ link: i, from: bottom[0], to: bottom[1], rate: bottom[2], band: [0, split] });
     streams.push({ link: i, from: top[0], to: top[1], rate: top[2], band: [split, 1] });
   });

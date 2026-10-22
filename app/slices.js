@@ -13,13 +13,17 @@
 import * as THREE from 'three';
 import { frameOf } from './sections.js';
 import { temperatureColor, speedColor } from './particles.js';
+import { co2Color } from './view3d.js';
 
 const FILL = 0.82; // the slices' opacity: a field to read, with the model still showing through
 const TINT = new THREE.Color();
 const DENSITY = 2.5; // particles per m2 of air in a plane, at density x1
 const MAX_PER_PLANE = 1500;
-const HISTORY = 10; // trail points
-const LIFE = [3, 8]; // s of air time a particle lives, before it starts again somewhere else
+const HISTORY = 8; // trail points, as the 3D particles
+const TRAIL = 6; // s of air time a trail covers, as the 3D particles
+const EVERY = TRAIL / (HISTORY - 1); // s of air time between remembered positions
+const LIFE = [8, 16]; // s of air time a particle lives, before it starts again somewhere else
+const NONE = new THREE.Color('#000000');
 
 // Temperature: blue through pale to red over the range given; speed: the particles' log scale.
 const COOL = new THREE.Color('#1F6FE0'), MID = new THREE.Color('#EEF1F4'), WARM = new THREE.Color('#E0401F');
@@ -37,7 +41,7 @@ export class FieldSlices {
     this.trails = new Map(); // by plane: its particles, kept across updates while the plane stays put
     this.timeScale = 10; // how much faster than real time the particles in the planes move
     this.density = 1; // times DENSITY
-    this.colorBy = 'temperature'; // or 'speed', as the 3D particles
+    this.colorBy = 'temperature'; // or 'speed', 'co2', or 'none' (black): their own, apart from the 3D particles'
     this.running = false;
   }
 
@@ -51,8 +55,7 @@ export class FieldSlices {
   clearTrails(keep = new Set()) {
     for (const [p, t] of this.trails) {
       if (keep.has(p)) continue;
-      t.lines.geometry.dispose(); t.lines.material.dispose();
-      this.view.scene.remove(t.lines);
+      for (const o of [t.lines, t.heads]) { o.geometry.dispose(); o.material.dispose(); this.view.scene.remove(o); }
       this.trails.delete(p);
     }
   }
@@ -160,12 +163,20 @@ export class FieldSlices {
       const lines = new THREE.LineSegments(g, material);
       lines.renderOrder = 4;
       lines.frustumCulled = false;
-      this.view.scene.add(lines);
-      t = { key, lines, n, uv: new Float32Array(n * HISTORY * 2), age: new Float32Array(n), life: new Float32Array(n), born: new Uint8Array(n), tint: new Float32Array(n * 3) };
+      // A dot at each particle, as the 3D particles have: still air shows as dots, moving air as trails.
+      const hg = new THREE.BufferGeometry();
+      hg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+      hg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 4), 4));
+      const heads = new THREE.Points(hg, new THREE.PointsMaterial({ size: 3, sizeAttenuation: false, vertexColors: true, transparent: true, depthWrite: false }));
+      heads.renderOrder = 4;
+      heads.frustumCulled = false;
+      this.view.scene.add(lines, heads);
+      t = { key, lines, heads, n, uv: new Float32Array(n * HISTORY * 2), age: new Float32Array(n), life: new Float32Array(n), since: new Float32Array(n), born: new Uint8Array(n), tint: new Float32Array(n * 3) };
       this.trails.set(p, t);
     }
     Object.assign(t, { f, i, bounds, where, step });
     this.view.sections.patch(t.lines.material, i);
+    this.view.sections.patch(t.heads.material, i);
     if (!this.running) this.run();
   }
 
@@ -188,6 +199,7 @@ export class FieldSlices {
     const { f, bounds, where, step, n } = t, o = this.view.origin, sample = this.sample;
     if (!where.length || !sample) return;
     const pos = t.lines.geometry.getAttribute('position').array, col = t.lines.geometry.getAttribute('color').array;
+    const hpos = t.heads.geometry.getAttribute('position').array, hcol = t.heads.geometry.getAttribute('color').array;
     const base = f.o.clone().addScaledVector(f.n, -0.01);
     const world = (a, b) => [base.x + f.u.x * a + f.v.x * b + o[0], base.y + f.u.y * a + f.v.y * b + o[1], base.z + f.u.z * a + f.v.z * b + o[2]];
     const H2 = HISTORY * 2;
@@ -207,13 +219,17 @@ export class FieldSlices {
         else {
           const vel = sample.velocity(x, y, z);
           // Its colour, as a 3D particle's: the air's temperature where it is, or its speed.
-          const col = this.colorBy === 'speed' ? speedColor(Math.hypot(vel[0], vel[1], vel[2]), TINT) : temperatureColor(sample.temperature(x, y, z), TINT);
+          const by = this.colorBy;
+          const col = by === 'none' ? NONE : by === 'speed' ? speedColor(Math.hypot(vel[0], vel[1], vel[2]), TINT)
+            : by === 'co2' ? co2Color(sample.co2(x, y, z), TINT) : temperatureColor(sample.temperature(x, y, z), TINT);
           t.tint[k * 3] = col.r; t.tint[k * 3 + 1] = col.g; t.tint[k * 3 + 2] = col.b;
           const du = vel[0] * f.u.x + vel[1] * f.u.y + vel[2] * f.u.z, dv = vel[0] * f.v.x + vel[1] * f.v.y + vel[2] * f.v.z;
           a += du * dt; b += dv * dt;
           if (a < bounds[0] || a > bounds[1] || b < bounds[2] || b > bounds[3]) start();
           else {
-            uv.copyWithin(at + 2, at, at + H2 - 2); // the trail shifts back by one point
+            // The head moves every frame; a position is remembered every EVERY seconds of air time.
+            t.since[k] += dt;
+            if (t.since[k] >= EVERY) { t.since[k] = 0; uv.copyWithin(at + 2, at, at + H2 - 2); }
             uv[at] = a; uv[at + 1] = b;
             t.age[k] += dt;
           }
@@ -221,6 +237,10 @@ export class FieldSlices {
       }
       // Segments from the head back, fading out along the trail and in as a particle starts.
       const fadeIn = Math.min(1, t.age[k] / 0.6);
+      hpos[k * 3] = base.x + f.u.x * uv[at] + f.v.x * uv[at + 1];
+      hpos[k * 3 + 1] = base.y + f.u.y * uv[at] + f.v.y * uv[at + 1];
+      hpos[k * 3 + 2] = base.z + f.u.z * uv[at] + f.v.z * uv[at + 1];
+      hcol[k * 4] = t.tint[k * 3]; hcol[k * 4 + 1] = t.tint[k * 3 + 1]; hcol[k * 4 + 2] = t.tint[k * 3 + 2]; hcol[k * 4 + 3] = 0.95 * fadeIn;
       for (let h = 0; h < HISTORY - 1; h++) {
         const s = (k * (HISTORY - 1) + h) * 2;
         for (let e = 0; e < 2; e++) {
@@ -232,8 +252,7 @@ export class FieldSlices {
         }
       }
     }
-    t.lines.geometry.getAttribute('position').needsUpdate = true;
-    t.lines.geometry.getAttribute('color').needsUpdate = true;
+    for (const o of [t.lines, t.heads]) { o.geometry.getAttribute('position').needsUpdate = true; o.geometry.getAttribute('color').needsUpdate = true; }
   }
 }
 

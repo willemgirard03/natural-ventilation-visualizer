@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { Tracer, MAX_AGE, EXIT_TIME } from '../src/solver/tracer.js';
+import { co2Color } from './view3d.js';
 
 const CAPACITY = 20000;
 const TARGET = 6000; // particles in view under the first conditions shown, at density x1
@@ -47,12 +48,13 @@ export class AirflowParticles {
   constructor(view) {
     this.view = view;
     const common = { vertexColors: true, transparent: true, depthWrite: false, clippingPlanes: view.clipping };
-    this.heads = layer(view, CAPACITY, 1, THREE.Points, new THREE.PointsMaterial({ size: 0.24, ...common }));
+    this.heads = layer(view, CAPACITY, 1, THREE.Points, new THREE.PointsMaterial({ size: 3.5, sizeAttenuation: false, ...common })); // px: the same in perspective and parallel
     this.trails = layer(view, CAPACITY, HISTORY * 2, THREE.LineSegments, new THREE.LineBasicMaterial(common));
     this.live = [];
     this.speed = 5; // display time runs this many times faster than real time
     this.densityScale = 1; // the Particles slider
-    this.colorBy = 'temperature'; // or 'speed'
+    this.colorBy = 'temperature'; // or 'speed', or 'co2' (with co2At(p, zone index) -> ppm)
+    this.co2At = null;
     this.density = null; // particles released per kg of outdoor air; fixed per model
     this.spawnDebt = 0;
     this.tracer = null;
@@ -118,7 +120,9 @@ export class AirflowParticles {
       }
       // Fully visible until it leaves the building or times out in a still corner, then fading.
       const alpha = q.out ? q.out.left / EXIT_TIME : Math.min(1, (MAX_AGE - q.age) / FADE);
-      if (this.colorBy === 'speed') speedColor(Math.hypot(...q.v), col); else temperatureColor(q.t, col);
+      if (this.colorBy === 'speed') speedColor(Math.hypot(...q.v), col);
+      else if (this.colorBy === 'co2') co2Color(this.co2At ? this.co2At(q.p, q.zone) : 400, col);
+      else temperatureColor(q.t, col);
       for (let i = 0; i < 3; i++) H.pos[n * 3 + i] = q.p[i] - o[i];
       H.rgba.set([col.r, col.g, col.b, alpha * 0.95], n * 4);
       // Trail: head to newest remembered position, then back through the rest, fading to nothing.

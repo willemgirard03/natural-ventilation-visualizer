@@ -267,3 +267,17 @@ test('grid solver: CO2 is carried with the air, fresher by an open window, its z
   // Room: x 0 to 4, y 0 to 4; its window on the south wall (y = 0), 1 to 2 m up.
   assert.ok(grid.co2At(2, 0.3, 1.5) < grid.co2At(2, 3.5, 1.0) - 20, `${grid.co2At(2, 0.3, 1.5)} by the window, ${grid.co2At(2, 3.5, 1.0)} at the back`);
 });
+
+test('sashes in the network: a hopper passes its air near its top, an awning near its bottom', () => {
+  const model = twoRooms();
+  const net = buildNetwork(model, { doors: false });
+  const cond = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0.3, 'Hall:s:w': 0 }, zones: { Room: { t: 26, w: 0.008 }, Hall: { t: 26, w: 0.008 } }, outdoor: { t: 6, w: 0.004, pressure: 101325, windSpeed: 0, windDirection: 0 } };
+  const at = (sashes) => solveNetwork(net, { ...cond, sashes }).links.find((r) => r.name === 'Room:s:w');
+  const rect = at(null), hopper = at({ 'Room:s:w': { type: 'hopper' } }), awning = at({ 'Room:s:w': { type: 'awning' } });
+  // Warm inside: air leaves at the top and enters at the bottom, through the neutral plane between.
+  near(rect.neutral, 0.5, 0.05);
+  assert.ok(hopper.neutral > rect.neutral + 0.05, `hopper neutral plane ${hopper.neutral}`);
+  assert.ok(awning.neutral < rect.neutral - 0.05, `awning neutral plane ${awning.neutral}`);
+  // The same free area, bunched near the hinge's far edge, uses less of the stack: less air moves.
+  for (const r of [hopper, awning]) assert.ok(r.forward < rect.forward && r.forward > 0.3 * rect.forward && r.backward > 0, `${r.forward} vs ${rect.forward}`);
+});

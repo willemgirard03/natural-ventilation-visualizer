@@ -164,15 +164,47 @@ export function simpleOpening(l, open, dp, a, b, exact = false) {
     return { f: [f], df: [f / (2 * mid)] };
   }
   const y = dp / gdrho; // neutral plane above the bottom
+  const neutral = Math.min(1, Math.max(0, y / height));
   const c = Math.SQRT2 * width * l.dischargeCoefficient;
   const df0 = (c * Math.sqrt(Math.abs(dp))) / Math.abs(gdrho);
   const f0 = (2 / 3) * c * Math.sqrt(Math.abs(gdrho * y)) * Math.abs(y);
   const dfh = c * Math.sqrt(Math.abs((height - y) / gdrho));
   const fh = (2 / 3) * dfh * Math.abs(gdrho * (height - y));
   const sa = Math.sqrt(a.rho), sb = Math.sqrt(b.rho);
-  if (y <= 0) return drho >= 0 ? { f: [-sb * Math.abs(fh - f0)], df: [sb * Math.abs(dfh - df0)] } : { f: [sa * Math.abs(fh - f0)], df: [sa * Math.abs(dfh - df0)] };
-  if (y >= height) return drho >= 0 ? { f: [sa * Math.abs(fh - f0)], df: [sa * Math.abs(dfh - df0)] } : { f: [-sb * Math.abs(fh - f0)], df: [sb * Math.abs(dfh - df0)] };
-  return drho >= 0 ? { f: [-sb * fh, sa * f0], df: [sb * dfh, sa * df0] } : { f: [sa * fh, -sb * f0], df: [sa * dfh, sb * df0] };
+  if (y <= 0) return drho >= 0 ? { f: [-sb * Math.abs(fh - f0)], df: [sb * Math.abs(dfh - df0)], neutral } : { f: [sa * Math.abs(fh - f0)], df: [sa * Math.abs(dfh - df0)], neutral };
+  if (y >= height) return drho >= 0 ? { f: [sa * Math.abs(fh - f0)], df: [sa * Math.abs(dfh - df0)], neutral } : { f: [-sb * Math.abs(fh - f0)], df: [sb * Math.abs(dfh - df0)], neutral };
+  return drho >= 0 ? { f: [-sb * fh, sa * f0], df: [sb * dfh, sa * df0], neutral } : { f: [sa * fh, -sb * f0], df: [sa * dfh, sb * df0], neutral };
+}
+
+// A window hinged along its top (awning) or bottom (hopper): its free gap is nothing at the hinge and
+// widest at the free edge, so its free area is spread up its height in that proportion (as in the room
+// air, roomflow.js), not evenly as in a simple opening. The flow is summed over horizontal strips, each
+// an orifice at its own pressure difference (the stack changes it with height), split at the neutral
+// plane into the two directions. A hopper therefore passes most of its air near its top, in and out,
+// and an awning near its bottom. The total free area is the simple opening's (open x width x height).
+// Not EnergyPlus's simple opening, so not used when matching EnergyPlus exactly.
+export const SASH_STRIPS = 24;
+export function sashOpening(l, open, dp, a, b, type) {
+  let height = l.height;
+  if (l.tilt < 90) height *= Math.sin((l.tilt * Math.PI) / 180);
+  const area = open * l.width * height, dz = height / SASH_STRIPS;
+  const share = (z) => Math.max(0.05, type === 'hopper' ? z / height : 1 - z / height); // 0 at the hinge, 1 at the free edge
+  let total = 0;
+  for (let i = 0; i < SASH_STRIPS; i++) total += share((i + 0.5) * dz);
+  const gdrho = 9.8 * (a.rho - b.rho), lin = 1e-4;
+  const f = [0, 0], df = [0, 0]; // positive (a to b), negative
+  for (let i = 0; i < SASH_STRIPS; i++) {
+    const z = (i + 0.5) * dz, d = dp - gdrho * z; // the pressure difference at this height
+    const k = l.dischargeCoefficient * (area * share(z)) / total * Math.sqrt(2 * (d >= 0 ? a.rho : b.rho));
+    const [q, dq] = Math.abs(d) < lin ? [(k * d) / Math.sqrt(lin), k / Math.sqrt(lin)] : [Math.sign(d) * k * Math.sqrt(Math.abs(d)), k / (2 * Math.sqrt(Math.abs(d)))];
+    const j = q >= 0 ? 0 : 1;
+    f[j] += q; df[j] += dq;
+  }
+  const neutral = Math.abs(gdrho) > 1e-9 ? Math.min(1, Math.max(0, dp / gdrho / height)) : undefined;
+  const out = { f: [], df: [], neutral };
+  for (const j of [0, 1]) if (f[j] !== 0 || df[j] !== 0) { out.f.push(f[j]); out.df.push(df[j]); }
+  if (!out.f.length) { out.f.push(0); out.df.push(df[0] + df[1] || 1e-12); }
+  return out;
 }
 
 // Pressure change climbing height h in air of density rho from pressure p0 (EnergyPlus psz).
@@ -184,6 +216,7 @@ const climb = (p0, rho, h, g) => -p0 * (1 - Math.exp((-h * rho * g) / p0));
 //   conditions.open:    { [link name]: open factor 0-1 } for windows under zone control, or to open or
 //                       close any other window or door for this moment (doors are otherwise open)
 //   conditions.site:    { elevation, latitude }
+//   conditions.sashes:  { [window name]: { type } } for windows hinged at the top or bottom (sashOpening)
 // Returns zone pressures (Pa, relative to outdoors at ground level) and each link's flow both ways (kg/s).
 // exactEnergyPlus: reproduce EnergyPlus also where it treats an open opening as closed (see simpleOpening).
 export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations = 100, exactEnergyPlus = false } = {}) {
@@ -209,7 +242,8 @@ export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations
     const stack = climb(outdoor.pressure, rhoA, l.z, g) - climb(outdoor.pressure, rhoB, l.z, g);
     let open = 1;
     if (l.type === 'opening') open = conditions.open?.[l.name] ?? (l.control === 'open' ? l.openFactor : 0);
-    return { l, a, b, pOut, stack, open };
+    const sash = conditions.sashes?.[l.name]?.type;
+    return { l, a, b, pOut, stack, open, hinged: sash === 'hopper' || sash === 'awning' ? sash : null };
   });
 
   const N = net.zones.length;
@@ -219,14 +253,16 @@ export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations
     const J = Array.from({ length: N }, () => new Array(N).fill(0));
     const flows = links.map((k) => {
       const dp = p[k.l.n] - (k.l.m < 0 ? k.pOut : p[k.l.m]) + k.stack;
-      const r = k.l.type === 'crack' ? powerLaw(k.l.coefficient, k.l.exponent, dp, k.a, k.b) : simpleOpening(k.l, k.open, dp, k.a, k.b, exactEnergyPlus);
+      const r = k.l.type === 'crack' ? powerLaw(k.l.coefficient, k.l.exponent, dp, k.a, k.b)
+        : k.hinged && k.open > 0 && !exactEnergyPlus ? sashOpening(k.l, k.open, dp, k.a, k.b, k.hinged)
+        : simpleOpening(k.l, k.open, dp, k.a, k.b, exactEnergyPlus);
       const total = r.f.reduce((s, x) => s + x, 0), d = r.df.reduce((s, x) => s + x, 0);
       sum[k.l.n] += total; scale[k.l.n] += r.f.reduce((s, x) => s + Math.abs(x), 0); J[k.l.n][k.l.n] += d;
       if (k.l.m >= 0) {
         sum[k.l.m] -= total; scale[k.l.m] += r.f.reduce((s, x) => s + Math.abs(x), 0);
         J[k.l.m][k.l.m] += d; J[k.l.n][k.l.m] -= d; J[k.l.m][k.l.n] -= d;
       }
-      return { dp, f: r.f };
+      return { dp, f: r.f, neutral: r.neutral };
     });
     return { sum, scale, J, flows };
   };
@@ -251,7 +287,8 @@ export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations
     links: links.map((k, i) => {
       const f = state.flows[i].f;
       return { name: k.l.name, from: k.l.from, to: k.l.to, type: k.l.type, dp: state.flows[i].dp,
-        forward: f.filter((x) => x > 0).reduce((s, x) => s + x, 0), backward: -f.filter((x) => x < 0).reduce((s, x) => s + x, 0) };
+        forward: f.filter((x) => x > 0).reduce((s, x) => s + x, 0), backward: -f.filter((x) => x < 0).reduce((s, x) => s + x, 0),
+        neutral: state.flows[i].neutral }; // an opening's neutral plane, 0 (bottom) to 1 (top), if it has one
     }),
   };
 }

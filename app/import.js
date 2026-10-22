@@ -65,7 +65,7 @@ function drawSlices(now = false) {
   const co2Ramp = (v, [lo, hi]) => co2Color(CO2_SCALE[0] + ((v - lo) / Math.max(1, hi - lo)) * (CO2_SCALE[2] - CO2_SCALE[0]));
   const colour = kind === 'speed' ? (v) => speedColor(v) : kind === 'co2' ? co2Ramp : (v, range) => rampTemperature(v, range[0], range[1]);
   const temperature = simulated ? (x, y, z) => grid.temperatureAt(x, y, z) : (x, y, z) => airflow.conditions.zones[g.zones[g.zone[cellAt(g, [x, y, z])]]]?.t ?? 20;
-  sliceRange = slices.update({ inside: fluid, value, velocity, temperature }, kind, colour, g, arrows);
+  sliceRange = slices.update({ inside: fluid, value, velocity, temperature, co2: (x, y, z) => co2Near([x, y, z]) }, kind, colour, g, arrows);
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
@@ -119,7 +119,7 @@ let results = null; // zone conditions hour by hour from a results file, for the
 function conditionsAt(hourAt, outdoor, site) {
   const tIn = Number($('t-in').value), mode = $('windows').value;
   const inside = (z) => (results && zoneAt(results, z, hourAt, outdoor.pressure)) || { t: tIn, w: 0.008, vent: null };
-  return {
+  const conditions = {
     site, outdoor,
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
     open: Object.fromEntries(net.links.filter((l) => l.control === 'zone' || l.door).map((l) => {
@@ -133,12 +133,18 @@ function conditionsAt(hourAt, outdoor, site) {
       return [l.name, open ? openFraction(l) : 0];
     })),
   };
+  // Open windows' sashes: a hopper or awning shapes its flow in the network, and every sash spreads
+  // its air along it in the room air.
+  conditions.sashes = Object.fromEntries(net.links.filter((l) => l.control === 'zone' && conditions.open[l.name] > 0)
+    .map((l) => [l.name, { ...sashOf(l.name), angle: sashFor(l, conditions.open[l.name]).angle }]));
+  return conditions;
 }
 
 // CO2 in each zone (ppm), the mean over the hour picked, as EnergyPlus reports it. It builds up over
-// hours, so the balance steps through the two days before from outdoor levels: each hour with its own weather (this hour's held
-// without a weather file), the results' room temperatures, the windows and doors as set now, people
-// from the model's schedules and the outdoor air its ventilation equipment supplies.
+// hours, so the balance steps through the two days before from outdoor levels: each hour with its own
+// weather (this hour's held without a weather file), the results' room temperatures, the windows and
+// doors as set now, people from the model's schedules and the outdoor air its ventilation equipment
+// supplies.
 const CO2_HOURS = 48;
 function co2History(hourAt, solutionNow, site, outdoorNow) {
   const volumes = net.zones.map((z) => model.zones[z].volume.value);
@@ -182,9 +188,6 @@ function solveAir() {
       if (t !== null) conditions.surfaceT[name] = t;
     }
   }
-  // Open windows' sashes, for spreading their air along them in the room air.
-  conditions.sashes = Object.fromEntries(net.links.filter((l) => l.control === 'zone' && conditions.open[l.name] > 0)
-    .map((l) => [l.name, { ...sashOf(l.name), angle: sashFor(l, conditions.open[l.name]).angle }]));
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   // CO2 keeps the last figures until its history (up to a few seconds in large models) is redone once the controls settle.
@@ -499,7 +502,17 @@ for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { 
 $('slices').addEventListener('change', () => drawSlices(true));
 $('arrows').addEventListener('change', () => drawSlices(true));
 
-$('air-color').addEventListener('change', (e) => { air.colorBy = slices.colorBy = e.target.value; legend(); });
+$('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
+$('cut-color').addEventListener('change', (e) => { slices.colorBy = e.target.value; legend(); });
+// CO2 at a point (model coordinates): the grid solver's field, or with ideal flow its room's level.
+function co2Near(p, zoneIndex = null) {
+  if ($('room-air').value === 'grid' && grid?.co2) return grid.co2At(p);
+  const g = rooms?.g;
+  if (!g) return 400;
+  const zi = zoneIndex ?? g.zone[cellAt(g, p)];
+  return airflow?.co2?.[g.zones[zi]] ?? 400;
+}
+air.co2At = (p, zi) => co2Near(p, zi);
 // The particles in the cuts: their own density and speed.
 $('cut-density').addEventListener('input', (e) => {
   const k = 2 ** Number(e.target.value);
@@ -810,13 +823,21 @@ function legend() {
       items.push(`<span title="Slices: air temperature, from the lowest to the highest on the slices shown">${ramp([rampTemperature(lo, lo, hi), rampTemperature((lo + hi) / 2, lo, hi), rampTemperature(hi, lo, hi)], 48)}Slices: ${fmt(lo, 1)} … ${fmt(hi, 1)} °C</span>`);
     }
   }
-  if ($('show-air').checked) {
-    if ($('air-color').value === 'speed') {
+  // Particles: the 3D ones and those in the cuts, each by its own colour setting; one entry when they agree.
+  const particleKey = (mode, who) => {
+    if (mode === 'speed') {
       const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
-      items.push(`<span title="Particle colour: air speed, on a log scale (each step ten times faster)">${ramp(stops, 48)}Air speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
-    } else {
-      items.push(`<span title="Particle colour: the temperature of the air they carry">${ramp([temperatureColor(14), temperatureColor(22), temperatureColor(30)])}Air 14–30 °C</span>`);
+      return `<span title="${who} colour: air speed, on a log scale (each step ten times faster)">${ramp(stops, 48)}${who}: speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`;
     }
+    if (mode === 'co2') return `<span title="${who} colour: the CO2 of the air they carry; amber from 1000 ppm, where rooms feel stuffy">${ramp(CO2_SCALE.map((c) => co2Color(c)), 48)}${who}: CO₂ ${CO2_SCALE[0]} … ${CO2_SCALE[2]}+ ppm</span>`;
+    if (mode === 'none') return chip('#000000', `${who}: black`);
+    return `<span title="${who} colour: the temperature of the air they carry">${ramp([temperatureColor(14), temperatureColor(22), temperatureColor(30)])}${who}: 14–30 °C</span>`;
+  };
+  const cutsShown = $('arrows').checked && view.sections.planes.length > 0;
+  if ($('show-air').checked && cutsShown && $('air-color').value === $('cut-color').value) items.push(particleKey($('air-color').value, 'Particles'));
+  else {
+    if ($('show-air').checked) items.push(particleKey($('air-color').value, 'Particles'));
+    if (cutsShown) items.push(particleKey($('cut-color').value, 'In the cuts'));
   }
   if (view.problems.length) items.push(chip(PROBLEM, 'Named by a model check', 'The arrow shows the way EnergyPlus takes as outward, from the order of the corner points.'));
   $('legend').innerHTML = items.join('');
