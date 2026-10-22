@@ -50,7 +50,9 @@ export class GridFlow {
   // New conditions: the network's streams and conditions (with .open, and .sashes: { [window name]:
   // { type, hinge, angle } } for open windows), the hour index for internal gains, and each zone's
   // known temperature (degC). Keeps the current flow as the starting point.
-  setConditions(flows, conditions, { hour = 4800, open = conditions.open } = {}) {
+  // copy: for a copy that only reads a worker's steps (the page's): just which faces are open and the
+  // outdoor air beyond inflows, without the pressure solve's setup (a few hundred milliseconds).
+  setConditions(flows, conditions, { hour = 4800, open = conditions.open, copy = false } = {}) {
     const { g, prep } = this, N = g.zone.length, h = g.h;
     this.outdoorT = conditions.outdoor.t;
     this.targetT = g.zones.map((z) => conditions.zones[z].t);
@@ -82,6 +84,7 @@ export class GridFlow {
         if (nb >= 0 && g.zone[nb] >= 0 && (g.zone[nb] === g.zone[c] || doorOpen.has(key))) this.kind[key] = OPEN;
       }
     }
+    if (copy) { this.inflowGhosts(); return; }
     this.connect();
     this.gains(hour);
     // Surfaces with a known inside temperature (conditions.surfaceT, by surface or window name, any
@@ -146,7 +149,12 @@ export class GridFlow {
     this.levels = buildHierarchy(start, this.csr.adj, pos, Int32Array.from(this.fluid, (c) => region[c]));
     // No flow through faces that are not open.
     for (const c of this.fluid) for (let a = 0; a < 3; a++) if (this.kind[c * 6 + 2 * a + 1] !== OPEN) this.U[a][c] = 0;
-    // Outdoor air comes in at the outdoor temperature: the cells beyond inflow faces hold it.
+    this.inflowGhosts();
+  }
+
+  // Outdoor air comes in at the outdoor temperature: the cells beyond inflow faces hold it.
+  inflowGhosts() {
+    const g = this.g;
     this.ghostT.fill(NaN);
     for (const [key, q] of this.out) if (q < 0) {
       const nb = neighbour(g, (key / 6) | 0, key % 6);

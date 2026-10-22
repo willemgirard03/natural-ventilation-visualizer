@@ -13,7 +13,7 @@ import { FieldSlices, rampTemperature } from './slices.js';
 import { frameOf } from './sections.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
-import { windRoseData, windRoseGroup, BAND_COLORS, SPEED_BANDS } from './windrose.js';
+import { windRoseData, windRoseGroup, windArrow, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { readZoneResultsStream, zoneAt, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
@@ -224,7 +224,7 @@ function solveAir() {
     // Simulated: the background solver takes the new conditions; the page's copy of the grid follows.
     if (grid && worker) {
       const hour = hourIndex(Number($('day').value), Number($('hour').value));
-      grid.setConditions(flows, conditions, { hour });
+      grid.setConditions(flows, conditions, { hour, copy: true });
       worker.postMessage({ type: 'conditions', conditions, hour });
       if (gridLive) air.setField(grid, conditions);
     }
@@ -262,12 +262,22 @@ function drawRose() {
   if (!model) return;
   if (!weather || !$('show-rose').checked) { view.setGroundOverlay(null); legend(); return; }
   const month = dateOf(Number($('day').value)).month;
-  const data = windRoseData(weather.hours.filter((h) => h.month === month));
-  const ink = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#1D2124';
-  view.setGroundOverlay(windRoseGroup(data, {
-    radius: view.footprintRadius() * 1.05, northAxis: model.site.northAxis, ink,
-    wind: { direction: Number($('wind-dir').value), speed: Number($('wind').value) },
-  }));
+  const radius = view.footprintRadius() * 1.05, northAxis = model.site.northAxis;
+  const wind = { direction: Number($('wind-dir').value), speed: Number($('wind').value) };
+  // The rose is built once for a month; a change of wind redraws only its arrow.
+  const key = `${weather.fileName}|${weather.location?.name}|${month}|${radius}|${northAxis}`, rose = view.overlay;
+  if (rose?.userData.key === key) {
+    for (const o of rose.children.filter((c) => c.userData.windArrow)) { o.traverse((x) => { x.geometry?.dispose(); x.material?.dispose(); }); rose.remove(o); }
+    const arrow = windArrow(wind, { radius, northAxis });
+    if (arrow) rose.add(arrow);
+    view.render();
+  } else {
+    const data = windRoseData(weather.hours.filter((h) => h.month === month));
+    const ink = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#1D2124';
+    const group = windRoseGroup(data, { radius, northAxis, ink, wind });
+    group.userData.key = key;
+    view.setGroundOverlay(group);
+  }
   legend();
 }
 $('show-rose').addEventListener('change', drawRose);
@@ -385,6 +395,15 @@ $('info').addEventListener('click', (e) => {
   solveAir();
   showInfo(current());
   legend();
+});
+// A window's opening amount, typed: a click on the figure beside its slider.
+$('info').addEventListener('click', (e) => {
+  const out = e.target.closest('output[data-for]');
+  if (!out || out.classList.contains('typeable')) return;
+  const slider = $('info').querySelector(`input[data-act=amount][data-name="${CSS.escape(out.dataset.for)}"]`);
+  if (!slider) return;
+  typeable(out, slider, parseTimes);
+  out.click();
 });
 // Sashes: one window's type or hinge from its details, or all of them from the Sashes setting.
 $('info').addEventListener('change', (e) => {
@@ -761,6 +780,59 @@ function setFull(on) {
 }
 $('full').addEventListener('click', () => setFull(!$('view3d').classList.contains('full')));
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('view3d').classList.contains('full')) setFull(false); });
+// A figure beside a slider can be typed over: a click turns it into a box; Enter or leaving the box
+// sets the slider (within its range) as if dragged, Esc cancels. parse(text) gives the slider's value
+// or null when the text cannot be read.
+function typeable(out, slider, parse) {
+  out.classList.add('typeable');
+  out.title = 'Click to type a value';
+  out.addEventListener('click', () => {
+    if (slider.disabled || out.hidden) return;
+    const box = document.createElement('input');
+    box.className = 'valbox';
+    box.value = out.textContent.replace(/\s*\(.*\)$/, '');
+    out.hidden = true;
+    out.after(box);
+    box.focus();
+    box.select();
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      const v = keep ? parse(box.value.trim()) : null;
+      box.remove();
+      out.hidden = false;
+      if (v === null || !Number.isFinite(v)) return;
+      slider.value = Math.min(Number(slider.max), Math.max(Number(slider.min), v));
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    box.addEventListener('keydown', (k) => { if (k.key === 'Enter') finish(true); if (k.key === 'Escape') finish(false); });
+    box.addEventListener('blur', () => finish(true));
+  });
+}
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const DAYS_BEFORE = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+// A date as "15 Jul", "Jul 15", "15/7" (day/month) or a day of the year.
+function parseDay(t) {
+  const s = t.toLowerCase();
+  if (/^\d+$/.test(s)) return Number(s);
+  let m = s.match(/^(\d{1,2})\s*\/\s*(\d{1,2})$/);
+  if (m) return DAYS_BEFORE[Number(m[2]) - 1] + Number(m[1]);
+  m = s.match(/^(\d{1,2})\s*([a-z]{3})/) || s.match(/^([a-z]{3})[a-z]*\s*(\d{1,2})/);
+  if (!m) return null;
+  const [day, mon] = /^\d/.test(m[1]) ? [m[1], m[2]] : [m[2], m[1]];
+  const i = MONTH_NAMES.indexOf(mon.slice(0, 3));
+  return i < 0 ? null : DAYS_BEFORE[i] + Number(day);
+}
+// An hour as "14", "14:00" or "14:00-15:00": the hour starting then, standard time (the slider holds
+// the hour ending).
+const parseHour = (t) => { const m = t.match(/^(\d{1,2})/); return m ? Number(m[1]) + 1 : null; };
+const parseTimes = (t) => { const m = t.replace(',', '.').match(/[\d.]+/); return m ? Number(m[0]) : null; };
+typeable($('day-value'), $('day'), parseDay);
+typeable($('when'), $('hour'), parseHour);
+typeable($('air-density-value'), $('air-density'), (t) => { const k = parseTimes(t); return k > 0 ? Math.log2(k) : null; });
+typeable($('air-speed-value'), $('air-speed'), parseTimes);
+
 // The settings bar folds to one line; the view takes the height left under it.
 $('tuck').addEventListener('click', () => {
   const on = document.body.classList.toggle('bartucked');

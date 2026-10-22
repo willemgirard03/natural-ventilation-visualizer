@@ -190,10 +190,15 @@ export class View3D {
     this.render();
   }
 
+  // Draws the scene at the next frame: many changes in one event (or one frame) draw it once.
   render() {
-    this.sections?.beforeRender();
-    this.renderer.render(this.scene, this.camera);
-    this.cube?.render();
+    if (this.pending) return;
+    this.pending = requestAnimationFrame(() => {
+      this.pending = 0;
+      this.sections?.beforeRender();
+      this.renderer.render(this.scene, this.camera);
+      this.cube?.render();
+    });
   }
 
   // The parallel camera's frustum for a half height (m, before its zoom), at the view's proportions.

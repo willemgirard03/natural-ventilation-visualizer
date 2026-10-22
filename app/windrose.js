@@ -74,14 +74,20 @@ export function windRoseGroup(data, { radius, northAxis = 0, wind = null, ink = 
   const n = label('N', ink, radius * 0.18);
   n.position.set(nx * (radius + reach + radius * 0.22), ny * (radius + reach + radius * 0.22), radius * 0.1);
   group.add(n);
-  // This hour's wind: an arrow from upwind towards the building, longer for stronger wind.
-  if (wind && wind.speed > 0) {
-    const [ux, uy] = dirVec(wind.direction);
-    const len = Math.min(1, wind.speed / 10) * reach + radius * 0.15;
-    const start = new THREE.Vector3(ux * (radius + reach + len), uy * (radius + reach + len), radius * 0.05);
-    const dir = new THREE.Vector3(-ux, -uy, 0);
-    group.add(new THREE.ArrowHelper(dir, start, len, WIND_ARROW, Math.min(len * 0.35, radius * 0.25), radius * 0.12));
-  }
+  const arrow = windArrow(wind, { radius, northAxis });
+  if (arrow) group.add(arrow);
   group.renderOrder = 0;
   return group;
+}
+
+// This hour's wind: an arrow from upwind towards the building, longer for stronger wind; null for calm.
+// Built on its own so a change of wind redraws only the arrow.
+export function windArrow(wind, { radius, northAxis = 0 }) {
+  if (!wind || !(wind.speed > 0)) return null;
+  const a = ((wind.direction - northAxis) * Math.PI) / 180, ux = Math.sin(a), uy = Math.cos(a);
+  const reach = radius * 0.9, len = Math.min(1, wind.speed / 10) * reach + radius * 0.15;
+  const start = new THREE.Vector3(ux * (radius + reach + len), uy * (radius + reach + len), radius * 0.05);
+  const arrow = new THREE.ArrowHelper(new THREE.Vector3(-ux, -uy, 0), start, len, WIND_ARROW, Math.min(len * 0.35, radius * 0.25), radius * 0.12);
+  arrow.userData.windArrow = true;
+  return arrow;
 }

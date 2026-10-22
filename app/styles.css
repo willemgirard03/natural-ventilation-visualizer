@@ -159,3 +159,11 @@ body.placing .viewer, body.placing .viewer *{cursor:crosshair !important}
 body.placedrag, body.placedrag *{cursor:copy !important; user-select:none}
 /* a distance typed after a click on a gumball arrow */
 .floatedit{position:absolute; z-index:80; width:7em; font-family:var(--mono); font-size:12px; padding:1px 4px; border:1px solid var(--glass); border-radius:2px; background:var(--panel); color:var(--ink); box-shadow:0 2px 8px rgba(0,0,0,.15)}
+
+/* a view's bar stays on screen under the settings bar until the view scrolls past */
+.view>.v3dbar{position:sticky; top:var(--cbh, 0px)}
+.view.full>.v3dbar{position:relative; top:0}
+/* figures beside sliders that can be typed over */
+.typeable{cursor:text; border-bottom:1px dotted var(--rule)}
+.typeable:hover{border-bottom-color:var(--glass); color:var(--ink)}
+.valbox{width:9ch; padding:0 3px; font-family:var(--mono); font-size:12px; border:1px solid var(--glass); border-radius:2px; background:var(--panel); color:var(--ink)}

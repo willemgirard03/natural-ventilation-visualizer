@@ -17,6 +17,7 @@ const GLASS = '#2F6F68', SUN = '#D9821A';
 const GUMBALL_PX = 72; // arrow length on screen
 const GRIP_PX = 9, PICK_PX = 7, GRIP_HIT = 11;
 const SNAP = 0.05; // m, moves by arrow
+const SQUARE_PULL = 10; // degrees: a turned plane snaps to the world's axes this close to them
 const MARGIN = 1; // m, around the building for new bounds
 
 // The plane's frame: normal n (towards the side removed), u along it, v across it (up for a section).
@@ -134,26 +135,29 @@ for (int i = 0; i < ${MAX}; i++) {
     return [Math.min(...us) - MARGIN, Math.max(...us) + MARGIN, Math.min(...vs) - MARGIN, Math.max(...vs) + MARGIN];
   }
 
-  // A new plane through a point. A section runs along the building's long side or across it,
-  // whichever faces the camera more, and removes the side towards the camera; a plan cut removes what
-  // is above it.
-  make(kind, at) {
-    const p = { id: ++this.count, kind, o: at.clone(), yaw: 0, flip: false, b: [0, 0, 0, 0] };
-    p.name = `${kind === 'plan' ? 'Plan cut' : 'Section'} ${p.id}`;
+  // A new plane through a point. A section runs along `along` (a horizontal direction: the normal of
+  // the wall pointed at, so the section stands square to that wall) or else along the building's long
+  // side or across it, whichever faces the camera more; it removes the side towards the camera. A plan
+  // cut removes what is above it.
+  make(kind, at, along = null) {
+    const p = { kind, o: at.clone(), yaw: 0, flip: false, b: [0, 0, 0, 0] };
     const axis = this.view.longAxis || 0; // radians, the footprint's long side from model x
+    const look = this.view.camera.position.clone().sub(at).setZ(0).normalize();
+    const facing = (y) => Math.sin(y) * look.x - Math.cos(y) * look.y; // n = (sin yaw, -cos yaw) towards the camera
     if (kind === 'section') {
-      const look = this.view.camera.position.clone().sub(at).setZ(0).normalize();
-      const options = [axis, axis + Math.PI / 2, axis + Math.PI, axis - Math.PI / 2];
-      // n = (sin yaw, -cos yaw): pick the yaw whose normal points most at the camera.
-      p.yaw = options.reduce((best, y) => (Math.sin(y) * look.x - Math.cos(y) * look.y > Math.sin(best) * look.x - Math.cos(best) * look.y ? y : best));
+      const a = along ? Math.atan2(along.y, along.x) : null;
+      const options = along ? [a, a + Math.PI] : [axis, axis + Math.PI / 2, axis + Math.PI, axis - Math.PI / 2];
+      p.yaw = options.reduce((best, y) => (facing(y) > facing(best) ? y : best));
     } else p.yaw = axis;
     p.b = this.fullBounds(p);
     return p;
   }
 
-  add(kind, at) {
+  add(kind, at, along = null) {
     if (this.planes.length >= MAX) return null;
-    const p = this.make(kind, at);
+    const p = this.make(kind, at, along);
+    p.id = ++this.count;
+    p.name = `${kind === 'plan' ? 'Plan cut' : 'Section'} ${p.id}`;
     this.planes.push(p);
     this.select(p);
     this.changed();
@@ -190,6 +194,8 @@ for (int i = 0; i < ${MAX}; i++) {
     if (!p) {
       const c = this.box().getCenter(new THREE.Vector3());
       p = this.make('plan', c.setZ(z));
+      p.id = ++this.count;
+      p.name = `Plan cut ${p.id}`;
       p.forChecks = true;
       if (this.planes.length >= MAX) this.planes.shift();
       this.planes.push(p);
@@ -405,7 +411,9 @@ for (int i = 0; i < ${MAX}; i++) {
         const a = this.angleAt(e, p);
         if (a !== null && drag.a0 !== null) {
           const step = e.shiftKey ? 15 : 1;
-          const deg = Math.round(THREE.MathUtils.radToDeg(drag.yaw + a - drag.a0) / step) * step;
+          let deg = Math.round(THREE.MathUtils.radToDeg(drag.yaw + a - drag.a0) / step) * step;
+          const square = Math.round(deg / 90) * 90; // the world's axes pull within SQUARE_PULL
+          if (Math.abs(deg - square) <= SQUARE_PULL) deg = square;
           p.yaw = THREE.MathUtils.degToRad(deg); // the bounds turn with it, about its origin
         }
       }
@@ -416,7 +424,19 @@ for (int i = 0; i < ${MAX}; i++) {
       el.releasePointerCapture?.(e.pointerId);
       const d = drag;
       drag = null;
-      if (!d.moved && d.h.type === 'move') this.askMove(e, d.p, d.h.axis);
+      if (d.moved) return;
+      const deg = THREE.MathUtils.radToDeg;
+      if (d.h.type === 'move') this.ask(e, 'move mm', (x) => { d.p.o.addScaledVector(d.h.axis, x / 1000); });
+      else if (d.h.type === 'slide') this.ask(e, 'move mm', (x) => { d.p.o.addScaledVector(frameOf(d.p).n, x / 1000); });
+      else if (d.h.type === 'turn') this.ask(e, `angle °, now ${Math.round(deg(d.p.yaw))}`, (x) => { d.p.yaw = THREE.MathUtils.degToRad(x); }, true);
+      else if (d.h.type === 'grip') {
+        const k = d.h.grip.k, size = k < 2 ? d.p.b[1] - d.p.b[0] : d.p.b[3] - d.p.b[2];
+        this.ask(e, `${k < 2 ? 'width' : 'height'} mm, now ${Math.round(size * 1000)}`, (x) => {
+          if (!(x >= 500)) return;
+          const grow = x / 1000 - size; // moves the side clicked, keeps the other
+          if (k % 2) d.p.b[k] += grow; else d.p.b[k] -= grow;
+        });
+      }
     };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
@@ -442,23 +462,24 @@ for (int i = 0; i < ${MAX}; i++) {
     el.style.cursor = !h ? '' : h.type === 'turn' ? 'alias' : h.type === 'slide' ? 'move' : 'grab';
   }
 
-  // A distance typed after a click on an arrow: the plane moves by it (mm, as in the Solar Shading
-  // Explorer) along that axis.
-  askMove(e, p, axis) {
+  // A figure typed after a click on a handle, as in the Solar Shading Explorer: a move in mm on an
+  // arrow or the outline, an angle on the arc, a size on a grip. apply(number) changes the plane;
+  // zero is ignored unless zeroOk. Enter or leaving the box applies it, Esc cancels.
+  ask(e, placeholder, apply, zeroOk = false) {
     const input = document.createElement('input');
     input.className = 'floatedit';
-    input.placeholder = 'move mm';
+    input.placeholder = placeholder;
     const r = this.view.container.getBoundingClientRect();
     Object.assign(input.style, { left: `${e.clientX - r.left + 10}px`, top: `${e.clientY - r.top - 12}px` });
     this.view.container.appendChild(input);
-    input.focus();
+    setTimeout(() => input.focus()); // after the click that opened it
     let done = false;
     const finish = (keep) => {
       if (done) return;
       done = true;
-      const mm = Number(input.value);
+      const text = input.value.trim(), x = Number(text.replace(',', '.'));
       input.remove();
-      if (keep && Number.isFinite(mm) && mm) { p.o.addScaledVector(axis, mm / 1000); this.changed(); }
+      if (keep && text && Number.isFinite(x) && (x || zeroOk)) { apply(x); this.changed(); }
     };
     input.addEventListener('keydown', (k) => { if (k.key === 'Enter') finish(true); if (k.key === 'Escape') finish(false); k.stopPropagation(); });
     input.addEventListener('blur', () => finish(true));
@@ -476,26 +497,27 @@ for (int i = 0; i < ${MAX}; i++) {
     const hit = ray.intersectObjects([v.front, v.back].filter(Boolean), false).find((h) => !this.removed(h.point));
     if (hit) {
       const item = hit.object.userData.items?.[hit.object.geometry.userData.owner?.[hit.faceIndex]];
-      return { point: hit.point.clone(), zone: v.model?.zones[item?.zone] };
+      return { point: hit.point.clone(), zone: v.model?.zones[item?.zone], normal: hit.face?.normal.clone() };
     }
     const b = this.box();
     const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -b.min.z), new THREE.Vector3());
     return point ? { point } : null;
   }
 
-  // Where a new plane goes for what is under the pointer: a section through the middle of the room
-  // pointed at (or through the point, on the ground), a plan cut 1.5 m above that room's floor (the
-  // usual plan height) or the ground.
-  placeAt(kind, { point, zone }) {
+  // Where a new plane goes for what is under the pointer, as [point, along]. On a wall: a section
+  // through the pointer, square to the wall (so pointing at a building's short side gives a long
+  // section), or a plan cut at the pointer's height. On a floor, a roof or the ground: a section facing
+  // the camera, or a plan cut 1.5 m above the room's floor (the usual plan height).
+  placeAt(kind, { point, zone, normal }) {
     const at = point.clone(), o = this.view.origin;
-    const box = zone ? new THREE.Box3() : null;
-    if (zone) for (const n of zone.surfaces) for (const q of this.view.model.surfaces[n].vertices) box.expandByPoint(new THREE.Vector3(q[0] - o[0], q[1] - o[1], q[2] - o[2]));
-    if (kind === 'plan') at.z = (box ? box.min.z : point.z) + 1.5;
-    else if (box) {
-      const n = frameOf(this.make('section', at)).n;
-      at.addScaledVector(n, box.getCenter(new THREE.Vector3()).sub(at).dot(n));
+    const wall = normal && Math.hypot(normal.x, normal.y) > 0.7;
+    if (kind === 'section') return [at, wall ? new THREE.Vector3(normal.x, normal.y, 0).normalize() : null];
+    if (!wall) {
+      let floor = point.z;
+      if (zone) floor = Math.min(...zone.surfaces.flatMap((n) => this.view.model.surfaces[n].vertices.map((q) => q[2] - o[2])));
+      at.z = floor + 1.5;
     }
-    return at;
+    return [at, null];
   }
 
   // Starts placing: the ghost follows the pointer over the view until a click (or release, when
@@ -507,12 +529,12 @@ for (int i = 0; i < ${MAX}; i++) {
     document.body.classList.add(dragged ? 'placedrag' : 'placing');
     const move = (e) => {
       const pt = this.pointAt(e);
-      this.showGhost(pt ? this.make(kind, this.placeAt(kind, pt)) : null);
+      this.showGhost(pt ? this.make(kind, ...this.placeAt(kind, pt)) : null);
     };
     const put = (e) => {
       const pt = this.pointAt(e);
       this.stopPlacing();
-      if (pt) this.add(kind, this.placeAt(kind, pt));
+      if (pt) this.add(kind, ...this.placeAt(kind, pt));
     };
     const down = (e) => { if (e.button === 0 && !dragged) { e.stopImmediatePropagation(); put(e); } };
     const up = (e) => { if (dragged) put(e); };
