@@ -40,6 +40,10 @@ $('version').textContent = MODEL_VERSION;
 const view = new View3D($('viewer'), { onSelect: showInfo });
 const air = new AirflowParticles(view);
 const slices = new FieldSlices(view);
+// The layer settings as the page opens them.
+air.setVisible($('show-air').checked);
+slices.timeScale = Number($('cut-speed').value);
+view.setProjection($('projection').querySelector('[aria-pressed="true"]').dataset.proj);
 let sliceRange = null, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
 // room's own temperature. Throttled, since the simulation posts several steps a second.
