@@ -65,6 +65,7 @@
     <span class="barsel"><span class="tipped" title="How every window opens: casement (hinged at one side, opening out), awning (hinged at the top, opening out) or hopper (hinged at the bottom, opening in). The sash opens as far as needed for the window's operable fraction, within its limit. Select a window to set its own.">Sashes</span><select id="sash-type"><option value="casement">Casement</option><option value="awning">Awning</option><option value="hopper">Hopper</option></select></span>
     <button type="button" id="windows-reset" class="minibtn" hidden title="Undo the windows and doors opened or closed one by one, back to the Windows and Doors settings">Reset windows</button>
     <span class="barsel"><span class="tipped" title="How air moves inside rooms. Simulated: the grid solver, with buoyancy from heat and temperature differences, jets that carry momentum, and air between rooms through open doors; it runs in the background and takes a moment to settle after a change. Ideal flow: the smoothest path between openings, instant but with no buoyancy or momentum.">Room air</span><select id="room-air"><option value="grid">Simulated</option><option value="ideal">Ideal flow</option></select></span>
+    <button type="button" id="restart-air" class="minibtn" disabled title="Start the air again from still, with the current settings: the particles clear and the simulated room air builds up from the beginning">Restart air</button>
     <output id="room-air-status" class="cbnote"></output>
   </div>
   <div class="cbrow airrow">

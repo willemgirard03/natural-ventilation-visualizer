@@ -858,13 +858,16 @@ function legend() {
 $('color-by').addEventListener('change', (e) => { view.setColorBy(e.target.value); legend(); });
 $('show-shading').addEventListener('change', (e) => view.setShadingVisible(e.target.checked));
 $('walls').addEventListener('change', (e) => view.setWalls(e.target.value));
-$('room-air').addEventListener('change', () => {
+// Room air from the start: the particles clear and the grid solver begins again from still air.
+function restartAir() {
   if (!model) return;
   air.clear();
   startGrid(model);
   if ($('room-air').value !== 'grid') field = null;
   solveAir();
-});
+}
+$('room-air').addEventListener('change', restartAir);
+$('restart-air').addEventListener('click', restartAir);
 $('window-depth').addEventListener('change', (e) => view.setWindowDepth(e.target.value));
 view.windowDepth = $('window-depth').value;
 $('fit').addEventListener('click', () => view.frame());
@@ -1133,6 +1136,7 @@ function render(m) {
   rooms = prepareRoomFlow(voxelize(m), net, m);
   field = null;
   startGrid(m);
+  $('restart-air').disabled = false;
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   $('results-file').value = '';
   windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();
