@@ -508,7 +508,7 @@ Running EnergyPlus is central to the tool, not an extra: it is how a design chan
 | C. Cloud runner | A container with EnergyPlus (Cloud Run, Fly.io or a Lambda container; 125 MB fits) behind an HTTPS endpoint the page posts to. | No install for anyone. | Hosting account and cost, abuse limits, a run queue, and models leaving the user's computer. |
 | D. EnergyPlus in the browser (WebAssembly) | Compile EnergyPlus's C++ with Emscripten. | No install, no server. | Unknown feasibility and speed; a large job. Not attempted yet (decided 26 Oct). |
 
-**Step A, in order:**
+**Step A, in order** (1–3 built 26 Oct: the runner's answers checked with curl from the demo's address and from another site; the demo's own call to localhost still to be checked in a normal Chrome, since the Claude app's built-in browser blocks public pages from reaching localhost):
 
 1. The page looks for a runner: on its own server as now, otherwise at `http://localhost:8000/status`, which answers with the EnergyPlus version and weather files. The button's tooltip says which runner it found, or how to start one.
 2. The runner answers cross-origin calls from `https://willemgirard03.github.io` only (CORS), including Chrome's private-network preflight (`Access-Control-Allow-Private-Network: true`) and its local-network permission prompt. Firefox and Chrome treat `http://localhost` as secure, so it is not blocked as mixed content; Safari needs testing.
