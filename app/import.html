@@ -41,6 +41,8 @@
     <span class="barsel"><span class="tipped" title="Zone temperatures, ventilation and CO₂, hour by hour, from an EnergyPlus results file (.eso), such as the one in a ClimateStudio results folder">Results</span>
       <select id="results-file"><option value="">none</option></select>
       <label class="linkbtn" title="Load a results file (.eso) from this computer">.eso<input type="file" id="results-load" accept=".eso"></label></span>
+    <span class="barsel"><button type="button" class="minibtn" id="run-eplus" disabled>Run EnergyPlus</button>
+      <select id="run-period" title="The week ending on the date picked, laid over the results loaded; or the whole year, which replaces them (a few minutes)"><option value="week">Week to date</option><option value="year">Whole year</option></select></span>
     <output id="results-status" class="cbnote"></output>
   </div>
   <div class="cbrow timerow">

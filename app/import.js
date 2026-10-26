@@ -232,7 +232,8 @@ function solveAir() {
   if (differs && !rerunning) {
     const [a, b] = rerunWeek();
     $('stale').innerHTML = `Windows differ from ${esc(results.name)}. Room temperatures are still the ones it recorded with its own windows, so the stack effect and two-way flows use temperatures that these windows would change over the following hours. `
-      + `<button class="quiet" id="rerun">Rerun ${esc(dateOf(a).label)}–${esc(dateOf(b).label)} in EnergyPlus</button> (about 20 s, with these windows and doors)`;
+      + (runner ? `<button class="quiet" id="rerun">Rerun ${esc(dateOf(a).label)}–${esc(dateOf(b).label)} in EnergyPlus</button> (about 20 s, with these windows and doors)`
+        : 'Running EnergyPlus again, with these windows and doors, needs the tool on this computer.');
   }
   // Pressure difference across every surface with a crack, seen from its own zone (its partner's is opposite).
   const dps = {};
@@ -377,15 +378,12 @@ function linkStates() {
   }
   return states;
 }
-async function rerun() {
-  if (rerunning || !results || !weather) return;
-  const file = $('weather-file').value;
-  if (!file || $('weather-file').selectedOptions[0].file) {
-    $('stale').textContent = 'A rerun needs one of the weather files the server offers; pick one under Weather.';
-    return;
-  }
-  const [a, b] = rerunWeek(), da = dateOf(a), db = dateOf(b);
-  const forModel = model, label = `${da.label}–${db.label}`;
+// year: the whole year, replacing the results; otherwise the week ending on the date picked, laid over them.
+async function rerun(year = false) {
+  if (rerunning || !weather || !runner || (!year && !results)) return;
+  const file = $('weather-file').value, local = $('weather-file').selectedOptions[0]?.file;
+  const [a, b] = year ? [1, 365] : rerunWeek(), da = dateOf(a), db = dateOf(b);
+  const forModel = model, label = year ? 'whole year' : `${da.label}–${db.label}`;
   // Windows open as far as their sashes allow; EnergyPlus's control then opens them up to that.
   const openFactors = Object.fromEntries(net.links.filter((l) => l.control === 'zone').map((l) => [l.name, openFraction(l)]));
   // Hoppers and awnings run as EnergyPlus's pivoted openings, at the angle their opening amount gives.
@@ -393,10 +391,14 @@ async function rerun() {
     .map((l) => [l.name, { type: sashOf(l.name).type, angle: amountOf(l) * maxAngleOf(l) }]));
   const epjson = toAirflowNetwork(model, { states: linkStates(), openFactors, sashes: pivoted, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true, surfaceTemperatures: true });
   rerunning = true;
+  updateRun();
+  $('stale').hidden = false;
   const t0 = Date.now();
   const tick = setInterval(() => { $('stale').textContent = `Running EnergyPlus for ${label}… ${Math.round((Date.now() - t0) / 1000)} s`; }, 500);
   try {
-    const res = await fetch('/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ epjson, weather: file }) });
+    // A weather file loaded from this computer goes with the model; the server's own go by name.
+    const weatherBody = local ? { weatherText: await local.text() } : { weather: file };
+    const res = await fetch('/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ epjson, ...weatherBody }) });
     const out = await res.json();
     if (!res.ok) throw new Error(out.error);
     const eso = await fetch(out.eso);
@@ -408,20 +410,24 @@ async function rerun() {
       const series = week.windows[name.toUpperCase()], l = net.links.find((x) => x.name === name);
       if (series && l) week.windows[name.toUpperCase()] = series.map((f) => (f > 0 ? freeFraction(s.type, l.width, l.height, f * 90) : 0));
     }
-    const merged = mergeResults(results, week, hourIndex(a, 1));
+    const merged = year ? week : mergeResults(results, week, hourIndex(a, 1));
     windowSet.clear(); roomSet.clear(); // the run now holds these choices
     $('windows').value = 'results';
     clearInterval(tick);
     rerunning = false;
-    setResults(merged, `${results.name.replace(/; rerun .*$/, '')}; rerun ${label} (${Math.round(out.seconds)} s)`);
+    $('stale').hidden = true;
+    setResults(merged, year ? `EnergyPlus run, whole year (${Math.round(out.seconds)} s)` : `${results.name.replace(/; rerun .*$/, '')}; rerun ${label} (${Math.round(out.seconds)} s)`);
   } catch (err) {
     $('stale').textContent = `The rerun did not finish: ${err.message}`;
   } finally {
     clearInterval(tick);
     rerunning = false;
+    updateRun();
   }
 }
 $('stale').addEventListener('click', (e) => { if (e.target.id === 'rerun') rerun(); });
+$('run-period').addEventListener('change', (e) => { yearPicked = e.target.value === 'year'; });
+$('run-eplus').addEventListener('click', () => rerun($('run-period').value === 'year'));
 
 // The compass direction (true north) a horizontal direction in model axes points to, in words.
 function compass(d) {
@@ -545,7 +551,20 @@ function setWeather(w) {
   weatherHour = null;
   applyHour();
 }
+// Running EnergyPlus needs the tool's local server (tools/serve.mjs), which runs it on this computer.
+let runner = false, yearPicked = false;
+function updateRun() {
+  const b = $('run-eplus'), week = $('run-period').querySelector('option[value=week]');
+  // Without results only the whole year can run; the week comes back once there are some, unless a year was picked.
+  week.disabled = !results;
+  $('run-period').value = results && !yearPicked ? 'week' : 'year';
+  b.disabled = !runner || !model || !weather || rerunning;
+  b.title = !runner ? 'Running EnergyPlus needs the tool on this computer: start it with node tools/serve.mjs, with EnergyPlus 23.1 installed'
+    : !model ? 'Load a model first' : !weather ? 'Pick a weather file first'
+    : 'Run EnergyPlus on this model with the windows, doors and sashes as set now, and read its results in';
+}
 function applyHour() {
+  updateRun();
   for (const id of ['day', 'hour', 'play']) $(id).disabled = !weather && !results;
   if (!weather && !results && $('play').classList.contains('on')) setPlaying(false);
   const day = Number($('day').value), hour = Number($('hour').value);
@@ -650,7 +669,7 @@ $('weather-load').addEventListener('change', (e) => {
   loadWeather(file.name, () => file.text());
 });
 // The dev server offers the course weather files; the one ClimateStudio's runs used is picked first.
-fetch('/weather/').then((r) => (r.ok ? r.json() : [])).then((files) => {
+fetch('/weather/').then((r) => { runner = r.ok; updateRun(); return r.ok ? r.json() : []; }).then((files) => {
   for (const f of files) $('weather-file').add(new Option(f, f));
   const first = files.find((f) => f.includes('TDY-CWEC2020v2')) || null;
   if (first) { $('weather-file').value = first; $('weather-file').dispatchEvent(new Event('change')); }
@@ -1141,6 +1160,7 @@ function render(m) {
   field = null;
   startGrid(m);
   $('restart-air').disabled = false;
+  updateRun();
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   $('results-file').value = '';
   windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();

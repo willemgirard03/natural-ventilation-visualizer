@@ -40,16 +40,20 @@ async function runEnergyPlus(req, res) {
   for await (const chunk of req) { body += chunk; if (body.length > 50e6) return json(413, { error: 'Model too large.' }); }
   let input;
   try { input = JSON.parse(body); } catch { return json(400, { error: 'Not JSON.' }); }
-  if (!weatherFiles().includes(input.weather)) return json(400, { error: 'Pick one of the weather files the server offers.' });
+  // A weather file the server offers, by name, or one loaded in the page, sent with the model.
+  const own = typeof input.weatherText === 'string';
+  if (!own && !weatherFiles().includes(input.weather)) return json(400, { error: 'Pick a weather file first.' });
   running = true;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dir = path.join(ROOT, 'runs', 'live', stamp);
   try {
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, 'run.epJSON'), JSON.stringify(input.epjson));
+    const epw = own ? path.join(dir, 'weather.epw') : path.join(WEATHER, input.weather);
+    if (own) await writeFile(epw, input.weatherText);
     const start = Date.now();
     const code = await new Promise((resolve) => {
-      const p = spawn(EPLUS, ['-w', path.join(WEATHER, input.weather), '-d', dir, '-p', 'run', '-s', 'C', path.join(dir, 'run.epJSON')], { stdio: 'ignore' });
+      const p = spawn(EPLUS, ['-w', epw, '-d', dir, '-p', 'run', '-s', 'C', path.join(dir, 'run.epJSON')], { stdio: 'ignore' });
       p.on('error', () => resolve(-1));
       p.on('close', resolve);
     });
