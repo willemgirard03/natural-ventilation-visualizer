@@ -493,6 +493,37 @@ Aligning with ClimateStudio's engine: the network solver should follow EnergyPlu
 - **Example\_01:** four 24 m stair and elevator shafts with no windows.
 - **An atrium variant of Example\_02** (for example, opening the stairwell to the office and adding a roof vent) can be validated against EnergyPlus through the tool's own export, though not against ClimateStudio.
 
+## EnergyPlus runner (planned 26 Oct)
+
+Running EnergyPlus is central to the tool, not an extra: it is how a design change gets its own room temperatures, surface temperatures and CO₂, instead of reusing results recorded with other windows.
+
+**Now (built 23–26 Oct).** Run EnergyPlus sits in the calculation settings, with the week ending on the date picked (laid over the results loaded) or the whole year (replacing them; the only choice before any results are loaded). The tool writes its airflow network model with the windows, doors and sashes as set, and the local server (`tools/serve.mjs`) runs EnergyPlus 23.1 from `C:\EnergyPlus-23.1.0` with one of A2's weather files or one loaded in the page. On Example\_02 a week takes about 20 s and the year 3½–6 min. On the web demo the button is off: GitHub Pages only serves files.
+
+**Where EnergyPlus can run, for the web demo:**
+
+| Option | How | For | Against |
+| --- | --- | --- | --- |
+| A. Local runner (next) | The Pages site calls a small runner on the user's computer at `http://localhost:8000`, the same server as now. | Smallest change; everything already works locally; models stay on the computer. | Each user installs Node and EnergyPlus and starts the runner. Browsers guard calls from a public site to localhost (see below). |
+| B. Desktop app | Electron or Tauri around the same page, with EnergyPlus bundled (BSD licence allows it). | One install; offline; full years. | About 200 MB per platform; a Windows and a Mac build; the web demo stays viewer-only. |
+| C. Cloud runner | A container with EnergyPlus (Cloud Run, Fly.io or a Lambda container; 125 MB fits) behind an HTTPS endpoint the page posts to. | No install for anyone. | Hosting account and cost, abuse limits, a run queue, and models leaving the user's computer. |
+| D. EnergyPlus in the browser (WebAssembly) | Compile EnergyPlus's C++ with Emscripten. | No install, no server. | Unknown feasibility and speed; a large job. Not attempted yet (decided 26 Oct). |
+
+**Step A, in order:**
+
+1. The page looks for a runner: on its own server as now, otherwise at `http://localhost:8000/status`, which answers with the EnergyPlus version and weather files. The button's tooltip says which runner it found, or how to start one.
+2. The runner answers cross-origin calls from `https://willemgirard03.github.io` only (CORS), including Chrome's private-network preflight (`Access-Control-Allow-Private-Network: true`) and its local-network permission prompt. Firefox and Chrome treat `http://localhost` as secure, so it is not blocked as mixed content; Safari needs testing.
+3. The runner strips objects that run code before running a model it was sent (`PythonPlugin:*`, `ExternalInterface:*`, `EnergyManagementSystem:Program*`), since any page the user visits could try to post one.
+4. Results come back as the `.eso`, streamed as now; a Save results button keeps a copy.
+5. One command to start it: `npx` from the repository, later a single packaged program (Node's single executable) that finds or downloads EnergyPlus 23.1 into `C:\EnergyPlus-23.1.0` after asking.
+
+**What changes in the tool's structure:**
+
+- **One runner interface.** `run(model, weather, period) -> results`, with progress from EnergyPlus's output and a cancel. The page does not know whether the runner is local, desktop, cloud or WebAssembly, so B, C or D can replace A later without restructuring.
+- **The `.epJSON` is the source of truth; results are made by the tool.** A loaded `.eso` becomes a shortcut (ClimateStudio's run), not a requirement.
+- **Results belong to a design state.** Each run is stored under the model and settings it came from. A change of windows marks the results stale, and two runs can be compared.
+- **Outputs the tool asks for.** Every run requests exactly what the tool reads: zone and surface temperatures, CO₂, network flows and opening factors.
+- **Project files.** Export becomes Save: the edited `.epJSON`, its runs and the weather file together.
+
 ## Workflow and constraints
 
 No ClimateStudio license is available, so validation works only from the two runs already provided, and the project moves between computers on a removable drive with GitHub as the shared copy.
