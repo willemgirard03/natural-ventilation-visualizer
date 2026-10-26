@@ -398,10 +398,10 @@ async function rerun(year = false) {
   try {
     // A weather file loaded from this computer goes with the model; the server's own go by name.
     const weatherBody = local ? { weatherText: await local.text() } : { weather: file };
-    const res = await fetch('/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ epjson, ...weatherBody }) });
+    const res = await fetch(`${runnerBase}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ epjson, ...weatherBody }) });
     const out = await res.json();
     if (!res.ok) throw new Error(out.error);
-    const eso = await fetch(out.eso);
+    const eso = await fetch(runnerBase + out.eso);
     const week = await readZoneResultsStream(eso.body, forModel, null, { hours: (b - a + 1) * 24 });
     if (model !== forModel) return;
     // A pivoted window reports its opening factor as angle / 90: read it as the share of the window
@@ -551,15 +551,18 @@ function setWeather(w) {
   weatherHour = null;
   applyHour();
 }
-// Running EnergyPlus needs the tool's local server (tools/serve.mjs), which runs it on this computer.
-let runner = false, yearPicked = false;
+// Running EnergyPlus needs a runner on this computer (tools/serve.mjs): the server this page came
+// from, or, for the web demo, one started at RUNNER. runnerBase: where the runner is; runnerStatus: its answer.
+const RUNNER = 'http://localhost:8000';
+let runner = false, runnerBase = '', runnerStatus = null, yearPicked = false;
 function updateRun() {
   const b = $('run-eplus'), week = $('run-period').querySelector('option[value=week]');
   // Without results only the whole year can run; the week comes back once there are some, unless a year was picked.
   week.disabled = !results;
   $('run-period').value = results && !yearPicked ? 'week' : 'year';
-  b.disabled = !runner || !model || !weather || rerunning;
-  b.title = !runner ? 'Running EnergyPlus needs the tool on this computer: start it with node tools/serve.mjs, with EnergyPlus 23.1 installed'
+  b.disabled = !runner || !runnerStatus?.energyplus || !model || !weather || rerunning;
+  b.title = !runner ? `Running EnergyPlus needs the runner on this computer: in the tool's folder, run npm run serve (with Node.js and EnergyPlus 23.1 installed). This page then finds it at ${RUNNER.replace('http://', '')}.`
+    : !runnerStatus?.energyplus ? 'The runner on this computer has no EnergyPlus 23.1: install it, or run tools/run_alignment.py once to set it up.'
     : !model ? 'Load a model first' : !weather ? 'Pick a weather file first'
     : 'Run EnergyPlus on this model with the windows, doors and sashes as set now, and read its results in';
 }
@@ -658,7 +661,7 @@ $('weather-file').addEventListener('change', (e) => {
   const name = e.target.value;
   if (!name) return setWeather(null);
   const local = e.target.selectedOptions[0].file;
-  loadWeather(name, local ? () => local.text() : () => fetch(`/weather/${encodeURIComponent(name)}`).then((r) => r.text()));
+  loadWeather(name, local ? () => local.text() : () => fetch(`${runnerBase}/weather/${encodeURIComponent(name)}`).then((r) => r.text()));
 });
 $('weather-load').addEventListener('change', (e) => {
   const file = e.target.files[0];
@@ -669,11 +672,24 @@ $('weather-load').addEventListener('change', (e) => {
   loadWeather(file.name, () => file.text());
 });
 // The dev server offers the course weather files; the one ClimateStudio's runs used is picked first.
-fetch('/weather/').then((r) => { runner = r.ok; updateRun(); return r.ok ? r.json() : []; }).then((files) => {
-  for (const f of files) $('weather-file').add(new Option(f, f));
-  const first = files.find((f) => f.includes('TDY-CWEC2020v2')) || null;
-  if (first) { $('weather-file').value = first; $('weather-file').dispatchEvent(new Event('change')); }
-}).catch(() => {});
+// The runner: the page's own server first, then one on this computer for a page served elsewhere.
+const askStatus = (base) => fetch(`${base}/status`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+async function findRunner() {
+  let base = '', s = await askStatus('');
+  if (!s?.runner && location.origin !== RUNNER) { base = RUNNER; s = await askStatus(RUNNER); }
+  const found = !!s?.runner, first = !runner && found;
+  runner = found; runnerBase = found ? base : ''; runnerStatus = found ? s : null;
+  updateRun();
+  // The runner's weather files, offered by name; the one ClimateStudio's runs used is picked first.
+  if (!first) return;
+  const files = s.weather || [], have = new Set([...$('weather-file').options].map((o) => o.value));
+  for (const f of files) if (!have.has(f)) $('weather-file').add(new Option(f, f));
+  const pick = files.find((f) => f.includes('TDY-CWEC2020v2'));
+  if (pick && !weather) { $('weather-file').value = pick; $('weather-file').dispatchEvent(new Event('change')); }
+}
+findRunner();
+// A runner started after the page opened is found when the page is next looked at.
+addEventListener('focus', () => { if (!runner || runnerBase) findRunner(); });
 
 const load = (file) => loadText(file.name, () => file.text());
 

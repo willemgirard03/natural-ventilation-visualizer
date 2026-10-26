@@ -7,6 +7,7 @@ import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
 import { coefficient, footprintAxis, toAirflowNetwork } from '../src/model/airflow-network.js';
 import { doorOnWall, isCirculation } from '../src/model/interior-doors.js';
+import { stripCode } from '../src/model/strip-code.js';
 
 const near = (a, b, tol = 1e-9) => assert.ok(Math.abs(a - b) <= tol, `${a} is not within ${tol} of ${b}`);
 const v = (x, y, z) => ({ vertex_x_coordinate: x, vertex_y_coordinate: y, vertex_z_coordinate: z });
@@ -223,4 +224,13 @@ test('sashes: free area grows with the angle, awnings open through their side tr
   assert.equal(hopper.reachable, false);
   assert.equal(hopper.angle, 35);
   near(hopper.fraction, freeFraction('hopper', 2, 0.5, 35), 1e-12);
+});
+
+test('models for the runner lose the objects that run code, and nothing else', () => {
+  const { epjson, removed } = stripCode({
+    Zone: { A: {} }, 'PythonPlugin:Instance': { p: {} }, 'EnergyManagementSystem:Program': { q: {} },
+    'ExternalInterface:FunctionalMockupUnitImport': { f: {} }, 'Output:Variable': { o: {} },
+  });
+  assert.deepEqual(Object.keys(epjson), ['Zone', 'Output:Variable']);
+  assert.deepEqual(removed, ['PythonPlugin:Instance', 'EnergyManagementSystem:Program', 'ExternalInterface:FunctionalMockupUnitImport']);
 });

@@ -1,4 +1,5 @@
-// Serves the repository on http://localhost:8000 for development.
+// Serves the repository on http://localhost:8000 for development, and is the runner that runs
+// EnergyPlus for the page: this one, or the web demo on GitHub Pages, which calls it here.
 // Browsers only load JavaScript modules over http, not from file:// paths.
 //
 //   node tools/serve.mjs [port]
@@ -9,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { createReadStream, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripCode } from '../src/model/strip-code.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.argv[2]) || 8000;
@@ -40,6 +42,8 @@ async function runEnergyPlus(req, res) {
   for await (const chunk of req) { body += chunk; if (body.length > 50e6) return json(413, { error: 'Model too large.' }); }
   let input;
   try { input = JSON.parse(body); } catch { return json(400, { error: 'Not JSON.' }); }
+  if (!input || typeof input.epjson !== 'object') return json(400, { error: 'No model.' });
+  input.epjson = stripCode(input.epjson).epjson;
   // A weather file the server offers, by name, or one loaded in the page, sent with the model.
   const own = typeof input.weatherText === 'string';
   if (!own && !weatherFiles().includes(input.weather)) return json(400, { error: 'Pick a weather file first.' });
@@ -67,9 +71,36 @@ async function runEnergyPlus(req, res) {
   }
 }
 
+// The web demo calls the runner from its own address: it may use the runner's paths, nothing else.
+// Other sites get no CORS headers, so their pages cannot read the answers, and a run they post is
+// refused. RUNNER_ORIGINS adds addresses (comma separated), for a copy of the tool hosted elsewhere.
+const ORIGINS = new Set(['https://willemgirard03.github.io', ...(process.env.RUNNER_ORIGINS || '').split(',').filter(Boolean)]);
+const RUNNER_PATH = /^\/(status|run|weather\/.*|runs\/live\/.*)$/;
+function status(res) {
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify({ runner: 1, energyplus: existsSync(EPLUS) ? '23.1' : null, busy: running, weather: weatherFiles() }));
+}
+
 createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/run' && req.method === 'POST') return runEnergyPlus(req, res);
+  const origin = req.headers.origin, own = !origin || origin === `http://localhost:${PORT}` || origin === `http://127.0.0.1:${PORT}`;
+  if (!own) {
+    if (!ORIGINS.has(origin) || !RUNNER_PATH.test(url.pathname)) { res.writeHead(403); return res.end(); }
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    if (req.method === 'OPTIONS') {
+      // The preflight, with Chrome's private-network header for a public page calling this computer.
+      res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Private-Network': 'true', 'Access-Control-Max-Age': '600' });
+      return res.end();
+    }
+  }
+  if (url.pathname === '/status') return status(res);
+  if (url.pathname === '/run' && req.method === 'POST') {
+    // Only as JSON, which a page elsewhere cannot send without the preflight above.
+    if (!String(req.headers['content-type']).startsWith('application/json')) { res.writeHead(415); return res.end(); }
+    return runEnergyPlus(req, res);
+  }
   // ClimateStudio's results for each example (zone temperatures), streamed: they run to 150 MB.
   if (url.pathname === '/results/') {
     const found = EXAMPLES.map((e) => ({ ...e, results: e.file.replace(/\.epJSON$/, 'out.eso') })).filter((e) => existsSync(e.results))
