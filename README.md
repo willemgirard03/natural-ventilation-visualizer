@@ -6,6 +6,12 @@ ClimateStudio reports zone temperatures and ventilation rates but shows no airfl
 
 Not in scope: annual energy simulation, HVAC, or validated quantitative CFD.
 
+## Try it
+
+**Web demo: <https://willemgirard03.github.io/natural-ventilation-visualizer/>**
+
+Open a model's `.epJSON`, and optionally its EnergyPlus results (`.eso`) and a weather file (`.epw`); ClimateStudio writes the first two into its results folder. Nothing is uploaded: the files stay in the browser. The web demo has no example models, and Run EnergyPlus is off there: running EnergyPlus needs the tool on your own computer (see Development below), with EnergyPlus 23.1 installed.
+
 ## Status
 
 Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findings and schedule.
@@ -36,7 +42,7 @@ Needs [Node.js](https://nodejs.org) 22 or later (development only; the tool itse
 
 ```
 npm test        # run the tests; the example-model tests are skipped if E:\ARCH 540\A2 is not present
-npm run serve   # serve the repository at http://localhost:8000 and open the import page; offers the two course examples when A2 is present
+npm run serve   # serve the repository at http://localhost:8000 and open the import page; offers the two course examples when A2 is present, and runs EnergyPlus for Run EnergyPlus
 ```
 
 Browsers load JavaScript modules only over http, so open the pages through `npm run serve` rather than by double-clicking them.
