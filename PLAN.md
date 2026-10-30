@@ -524,13 +524,32 @@ Running EnergyPlus is central to the tool, not an extra: it is how a design chan
 - **Outputs the tool asks for.** Every run requests exactly what the tool reads: zone and surface temperatures, CO₂, network flows and opening factors.
 - **Project files.** Export becomes Save: the edited `.epJSON`, its runs and the weather file together.
 
+## Modelling and editing (planned 30 Oct)
+
+**Decided 30 Oct.** ClimateStudio is never a dependency: it is a validation reference during development, and compatibility is one way (the tool reads ClimateStudio's `.epJSON`, `.eso` and `.epw`; nothing goes back). The tool must model from scratch and write its own `.epJSON`, and an imported model must be editable the same way. Modelling stays simple: masses and planes, with settings assigned to them (assemblies, zones, occupancy, mechanical ventilation). Complex HVAC is out of scope; heating, cooling and mechanical ventilation are EnergyPlus's ideal loads with outdoor air, as ClimateStudio writes them.
+
+**The `.epJSON` is the one model.** An edit changes the `.epJSON` objects; the tool's views of it (zones, surfaces, windows), the airflow network, the interior doors and the room-air cells are rebuilt from it, in that order. Window and opening edits rebuild the network in milliseconds and restart the room air (a few seconds to settle); EnergyPlus results go stale and are offered a rerun, while room temperatures carry over by zone name. Exporting writes the edited `.epJSON`.
+
+**Writing from scratch.** The format is the easy part; a valid, complete model is the work. Run settings, materials, constructions, zones, occupancy, schedules and ideal loads are straightforward objects. The hard step is geometry: masses that touch must have their shared faces split into matching pairs (counterclockwise from outside, each piece with one zone on each side), with windows inside their face. OpenStudio's `intersectSurfaces` and `matchSurfaces` (BSD-style licence) are the reference for that step; OpenStudio itself is not a dependency, since it cannot run in a browser and the tool's scope does not need its HVAC. Defaults ship from public sources (ASHRAE 90.1, NECB, DOE prototype buildings, openstudio-standards); ClimateStudio's library values are used only privately, to compare.
+
+**Stages:**
+
+1. **Editing an imported model (started 30 Oct, on Example\_02).**
+   - Zone labels in the 3D view: a label selects the whole zone (highlighted) and opens its settings; a click on a wall, floor or roof selects that surface and opens its menu.
+   - Assemblies: a surface's construction can be swapped or edited (layers, materials, thicknesses); shared walls and slabs keep their partner's reversed construction.
+   - Zone settings: occupancy (people per m², schedule), lights, equipment, outdoor air, infiltration, natural ventilation controls.
+   - Windows: dragged across their wall, and pushed or pulled at sill, head and jambs, from the shading tool's window pop-up (Edit window in 3D), without its shading devices. The pop-up also sets the window type and opening amount, with Apply to all sides and Apply to all levels.
+   - Occupancy shown: each zone's schedule through the day, and the people in the rooms at the hour picked.
+2. **Masses and planes from scratch:** box masses and floor plates drawn in the tool, split into zones and matching surfaces, written to `.epJSON`, run in EnergyPlus and checked against the same building made in ClimateStudio.
+3. **Openings and doors placed directly**, replacing the tool-added interior doors where the model has its own.
+
 ## Workflow and constraints
 
 No ClimateStudio license is available, so validation works only from the two runs already provided, and the project moves between computers on a removable drive with GitHub as the shared copy.
 
 | Constraint | Consequence |
 | --- | --- |
-| No ClimateStudio license | Validate only against Example\_01 and Example\_02 and their files. ClimateStudio's Grasshopper components can be inspected but their settings cannot be changed or re-run. The licensed capture experiments planned earlier (component dump, network-mode run, Intersector test set) are dropped unless a license becomes available. |
+| ClimateStudio licence regained (30 Oct) | ClimateStudio is a validation reference only, never a dependency. New test models aimed at single strategies (atrium, stack, cross ventilation, double height) can be run in it and compared with the tool's own model of the same building; ClimateStudio's network-mode run and an Intersector test set (how it splits and classifies surfaces) are possible again. Files from it stay out of the public repository. |
 | Project on a removable drive | Everything lives under `E:\ARCH 540`. Files shared in this chat are in `E:\ARCH 540\A2`; treat that folder as read-only reference data, except the repository folder `A2\natural-ventilation-visualizer` and two session files beside it: `A2\SWITCH_MACHINE.md` (read before moving the drive; records the handoff state) and `A2\SESSION_CHECK.md` (read when starting on a computer; checks and fixes the setup, records each machine's status). Both stay local and are rewritten at every switch and check. |
 | Several computers | The code repository sits on the drive and is pushed to GitHub, so any computer can continue. |
 | Context does not travel | This plan is exported to `PLAN.md` in the repository; Claude Code reads it at the start of each session. Decisions made later are added to it. |
