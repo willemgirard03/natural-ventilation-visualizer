@@ -47,11 +47,13 @@ export class HoverPick {
 
   setEnabled(on) { this.enabled = on; if (!on) this.clear(); }
 
-  // The pointer moved: what is under it now. The one offered stays offered while it is still there.
+  // The pointer moved: what is under it now. The likeliest is offered (a window over its wall, the wall
+  // between windows); a choice made with Tab holds only while the likeliest stays the same.
   hover(e) {
     if (!this.enabled || this.view.sections.placing || this.view.busy?.(e)) { this.clear(); return; }
-    const list = this.candidatesAt(e);
-    const now = this.current, keep = now ? list.findIndex((c) => c.kind === now.kind && c.name === now.name) : -1;
+    const list = this.candidatesAt(e), key = (c) => (c ? `${c.kind}:${c.name}` : '');
+    const now = this.current, same = key(list[0]) === key(this.list[0]);
+    const keep = same && now ? list.findIndex((c) => key(c) === key(now)) : -1;
     this.list = list;
     this.index = keep >= 0 ? keep : 0;
     this.at = [e.clientX, e.clientY];

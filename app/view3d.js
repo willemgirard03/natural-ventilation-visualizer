@@ -215,7 +215,7 @@ export class View3D {
   // What the view orbits about (view coordinates): the selected thing's middle, a section plane
   // being moved, or the middle of the building's ground plane (the origin).
   pivot() {
-    if (this.sections?.selected) return this.sections.selected.o.clone();
+    if (this.sections?.selected) return this.sections.centre(this.sections.selected);
     if (this.selectedPolys?.length) {
       const b = bounds(this.selectedPolys.flatMap((p) => p.vertices));
       return new THREE.Vector3(...[0, 1, 2].map((i) => (b.min[i] + b.max[i]) / 2 - this.origin[i]));

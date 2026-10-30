@@ -275,3 +275,7 @@ svg.asm .side{font:500 9px var(--mono); fill:var(--ink3)}
 /* drags in the view orbit and pan; they do not select the page's text */
 .viewer{user-select:none}
 .viewer input,.viewer select{user-select:text}
+
+/* a rule between groups in a menu */
+.laysep{border-top:1px solid var(--rule2); margin:5px 0 3px}
+#play-dd .minibtn + .minibtn{margin-left:4px}

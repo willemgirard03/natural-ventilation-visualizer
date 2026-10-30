@@ -1,6 +1,8 @@
 // Runs the grid solver (src/solver/grid.js) in the background, so the page stays responsive: it builds
 // the same model, network and cells as the page, steps continuously, and posts each step's face
-// velocities and temperatures, which the page's copy of the grid reads for the particles.
+// velocities and temperatures, which the page's copy of the grid reads for the particles. Or it bakes
+// a day: each hour in turn, carried on from the hour before, for its air time, posting the fields
+// it ends with.
 
 import { importEpJSON } from '../src/model/import-epjson.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
@@ -24,8 +26,25 @@ self.onmessage = ({ data: m }) => {
     grid.setCO2(m.co2);
   } else if (m.type === 'stop') {
     running = false;
+  } else if (m.type === 'bake' && grid) {
+    running = false;
+    bake(m);
   }
 };
+
+// Each hour's conditions (and CO2), simulated for `air` seconds of air time from where the hour before
+// left the air (the first hour, from still air, for twice that), then its fields posted.
+function bake({ hours, air }) {
+  hours.forEach((H, i) => {
+    const flows = flowStreams(net, solveNetwork(net, H.conditions), H.conditions);
+    grid.setConditions(flows, H.conditions, { hour: H.hour });
+    if (H.co2) grid.setCO2(H.co2);
+    const until = grid.time + air * (i ? 1 : 2);
+    while (grid.time < until) grid.step();
+    self.postMessage({ type: 'baked', i, FV: grid.FV.slice(), T: grid.T.slice(), C: grid.co2 ? grid.C.slice() : null });
+  });
+  self.postMessage({ type: 'bake-done' });
+}
 
 function loop() {
   if (!running) return;

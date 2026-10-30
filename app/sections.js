@@ -5,9 +5,10 @@
 //
 // Adding a section or a plan cut only sets how a plane is first placed (upright and square to a wall,
 // or level at plan height); after that it turns any way. Picked by its outline, a plane shows a
-// gumball: arrows along the model's x, y and z, as in the Solar Shading Explorer, and three arcs that
-// turn it about its own axes (snapping square to the world's within a few degrees), with a grip on each
-// side of its bounds. Its outline drags it along its normal; a click on an arrow or an arc (without
+// gumball at its middle, set to the plane's own axes: arrows along them, as in the Solar Shading
+// Explorer, and three arcs that turn it about them (snapping square to the world's within a few
+// degrees), with a grip on each side of its bounds. Every move, turn, resize, addition and removal
+// is passed to onCommit, so it can be undone. Its outline drags it along its normal; a click on an arrow or an arc (without
 // dragging) asks for a distance or an angle. Planes are kept in view coordinates (the model's, shifted
 // by the view's origin); a plane's orientation is a quaternion, q, taking x, y, z to its u, v, n.
 
@@ -179,12 +180,13 @@ for (int i = 0; i < ${MAX}; i++) {
 
   add(kind, at, along = null) {
     if (this.planes.length >= MAX) return null;
-    const p = this.make(kind, at, along);
+    const before = this.state(), p = this.make(kind, at, along);
     p.id = ++this.count;
     p.name = `Clipping plane ${p.id}`;
     this.planes.push(p);
     this.select(p);
     this.changed();
+    this.commit(before, 'clipping plane added');
     return p;
   }
 
@@ -293,12 +295,32 @@ for (int i = 0; i < ${MAX}; i++) {
     }
     this.gumball.visible = !!this.selected;
     if (this.selected) {
-      this.gumball.position.copy(this.selected.o);
-      this.gumball.userData.rings.quaternion.copy(this.selected.q);
+      this.gumball.position.copy(this.centre(this.selected));
+      this.gumball.quaternion.copy(this.selected.q);
     }
   }
 
-  // Arrows along x, y and z and an arc about z, sized to a unit; scaled to GUMBALL_PX each frame.
+  // The middle of a plane's bounds, where its gumball sits and about which it turns.
+  centre(p) {
+    const { o, u, v } = frameOf(p);
+    return o.clone().addScaledVector(u, (p.b[0] + p.b[1]) / 2).addScaledVector(v, (p.b[2] + p.b[3]) / 2);
+  }
+
+  // The planes as they are, to put back (undo, redo).
+  state() {
+    return this.planes.map((p) => ({ ...p, o: p.o.clone(), q: p.q.clone(), b: [...p.b] }));
+  }
+  setState(list) {
+    const id = this.selected?.id;
+    this.planes = list.map((p) => ({ ...p, o: p.o.clone(), q: p.q.clone(), b: [...p.b] }));
+    this.selected = this.planes.find((p) => p.id === id) || null;
+    this.changed();
+    this.onSelect(this.selected);
+  }
+  commit(before, what) { this.onCommit?.(before, this.state(), what); }
+
+  // Arrows along the plane's u, v and n and an arc about each, sized to a unit; the whole gumball
+  // takes the plane's orientation, and is scaled to GUMBALL_PX each frame.
   makeGumball() {
     const g = new THREE.Group();
     g.userData.noSection = true;
@@ -341,7 +363,7 @@ for (int i = 0; i < ${MAX}; i++) {
       arc.rotation.copy(turn); // the ring's own z onto the plane's u, v or n
       rings.add(arc);
     });
-    g.add(rings);
+    g.add(rings); // in the gumball's own axes, which are the plane's
     const knob = new THREE.Mesh(new THREE.SphereGeometry(0.06, 16, 12), mat('#4B5855'));
     g.add(knob);
     g.userData.rings = rings;
@@ -416,8 +438,9 @@ for (int i = 0; i < ${MAX}; i++) {
       el.setPointerCapture(e.pointerId);
       const p = h.plane;
       if (p !== this.selected) this.select(p);
-      drag = { h, p, x: e.clientX, y: e.clientY, o: p.o.clone(), q: p.q.clone(), b: [...p.b], moved: false };
+      drag = { h, p, x: e.clientX, y: e.clientY, o: p.o.clone(), q: p.q.clone(), b: [...p.b], c: this.centre(p), moved: false, before: this.state() };
       if (h.type === 'turn') { drag.axis = this.turnAxis(p, h.axis); drag.a0 = this.angleAt(e, p, drag.axis); }
+      if (h.type === 'move') drag.dir = h.axis.clone().applyQuaternion(p.q).normalize(); // the plane's own axis
     }, true);
     el.addEventListener('pointermove', (e) => {
       if (!drag) { this.hover(e); return; }
@@ -427,8 +450,8 @@ for (int i = 0; i < ${MAX}; i++) {
       const { h, p } = drag, delta = new THREE.Vector2(dx, dy);
       const along = (from, dir) => { const s = this.screenAxis(from, dir); return s.lengthSq() > 1e-6 ? delta.dot(s) / s.lengthSq() : 0; };
       if (h.type === 'move') {
-        const t = Math.round(along(drag.o, h.axis) / SNAP) * SNAP;
-        p.o.copy(drag.o).addScaledVector(h.axis, t);
+        const t = Math.round(along(drag.c, drag.dir) / SNAP) * SNAP;
+        p.o.copy(drag.o).addScaledVector(drag.dir, t);
       } else if (h.type === 'slide') {
         const n = frameOf(p).n;
         p.o.copy(drag.o).addScaledVector(n, along(drag.o, n));
@@ -443,7 +466,11 @@ for (int i = 0; i < ${MAX}; i++) {
         let turn = a !== null && drag.a0 !== null ? a - drag.a0 : (dx - dy) * 0.01;
         const step = THREE.MathUtils.degToRad(e.shiftKey ? 15 : 1);
         turn = Math.round(turn / step) * step;
-        p.q = squared(new THREE.Quaternion().setFromAxisAngle(drag.axis, turn).multiply(drag.q)); // the bounds turn with it
+        // About the gumball at the middle of its bounds: the bounds turn with it.
+        const r = new THREE.Quaternion().setFromAxisAngle(drag.axis, turn);
+        p.q = squared(r.clone().multiply(drag.q));
+        const turned = p.q.clone().multiply(drag.q.clone().invert());
+        p.o.copy(drag.o).sub(drag.c).applyQuaternion(turned).add(drag.c);
       }
       this.changed();
     });
@@ -452,28 +479,32 @@ for (int i = 0; i < ${MAX}; i++) {
       el.releasePointerCapture?.(e.pointerId);
       const d = drag;
       drag = null;
-      if (d.moved) return;
-      const deg = THREE.MathUtils.radToDeg;
-      if (d.h.type === 'move') this.ask(e, 'move mm', (x) => { d.p.o.addScaledVector(d.h.axis, x / 1000); });
+      const what = { move: 'clipping plane moved', slide: 'clipping plane moved', grip: 'clipping plane resized', turn: 'clipping plane turned' }[d.h.type];
+      if (d.moved) { this.commit(d.before, what); return; }
+      const typed = (fn) => (x) => { fn(x); this.changed(); this.commit(d.before, what); };
+      if (d.h.type === 'move') askNumber(this.view.container, e, 'move mm', typed((x) => { d.p.o.addScaledVector(d.dir, x / 1000); }));
       else if (d.h.type === 'turn') {
-        this.ask(e, `turn about its ${'uvn'[d.h.axis]} axis, °`, (x) => {
-          d.p.q = squared(new THREE.Quaternion().setFromAxisAngle(this.turnAxis(d.p, d.h.axis), THREE.MathUtils.degToRad(x)).multiply(d.p.q));
-        });
+        askNumber(this.view.container, e, `turn about its ${'uvn'[d.h.axis]} axis, °`, typed((x) => {
+          const c = this.centre(d.p), r = new THREE.Quaternion().setFromAxisAngle(this.turnAxis(d.p, d.h.axis), THREE.MathUtils.degToRad(x));
+          const q0 = d.p.q.clone();
+          d.p.q = squared(r.multiply(q0));
+          d.p.o.sub(c).applyQuaternion(d.p.q.clone().multiply(q0.invert())).add(c);
+        }));
       }
       else if (d.h.type === 'grip') {
         const k = d.h.grip.k, size = k < 2 ? d.p.b[1] - d.p.b[0] : d.p.b[3] - d.p.b[2];
-        this.ask(e, `${k < 2 ? 'width' : 'height'} mm, now ${Math.round(size * 1000)}`, (x) => {
+        askNumber(this.view.container, e, `${k < 2 ? 'width' : 'height'} mm, now ${Math.round(size * 1000)}`, typed((x) => {
           if (!(x >= 500)) return;
           const grow = x / 1000 - size; // moves the side clicked, keeps the other
           if (k % 2) d.p.b[k] += grow; else d.p.b[k] -= grow;
-        });
+        }));
       }
     };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
     window.addEventListener('keydown', (e) => {
       if (e.target.closest?.('input, select, textarea')) return;
-      if ((e.key === 'Delete' || e.key === 'Backspace') && this.selected) { this.remove(this.selected); e.preventDefault(); }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && this.selected) { const before = this.state(); this.remove(this.selected); this.commit(before, 'clipping plane removed'); e.preventDefault(); }
       else if (e.key === 'Escape' && this.selected) this.select(null);
     });
   }
@@ -503,12 +534,6 @@ for (int i = 0; i < ${MAX}; i++) {
     el.style.cursor = !h ? '' : h.type === 'turn' ? 'alias' : h.type === 'slide' ? 'move' : 'grab';
   }
 
-  // A figure typed after a click on a handle, as in the Solar Shading Explorer: a move in mm on an
-  // arrow or the outline, an angle on the arc, a size on a grip. apply(number) changes the plane;
-  // zero is ignored unless zeroOk. Enter or leaving the box applies it, Esc cancels.
-  ask(e, placeholder, apply, zeroOk = false) {
-    askNumber(this.view.container, e, placeholder, (x) => { apply(x); this.changed(); }, zeroOk);
-  }
 
   // ---------- placing a new plane: dragged in from the bar, or a click on the button then on the view ----------
 

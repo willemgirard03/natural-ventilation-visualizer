@@ -124,8 +124,10 @@ let sliceRange = null, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
 // room's own temperature. Throttled, since the simulation posts several steps a second.
 function drawSlices(now = false) {
-  const kind = $('slices').value, arrows = $('arrows').checked, simulated = $('room-air').value === 'grid';
-  if ((!kind && !arrows) || !model || !rooms || !view.sections.planes.length || (simulated ? !gridLive : !field)) { slices.hide(); sliceRange = null; legend(); return; }
+  // While a baked day plays, its blended fields; otherwise the live room air.
+  const kind = $('slices').value, arrows = $('arrows').checked, simulated = bakedPlay ? bakedPlay.kind === 'grid' : $('room-air').value === 'grid';
+  const grid = bakedPlay?.grid || liveGrid(), field = bakedPlay?.live || liveField();
+  if ((!kind && !arrows) || !model || !rooms || !view.sections.planes.length || (simulated ? !(bakedPlay || gridLive) : !field)) { slices.hide(); sliceRange = null; legend(); return; }
   const wait = 300 - (performance.now() - sliceLast);
   if (!now && wait > 0) { clearTimeout(sliceTimer); sliceTimer = setTimeout(() => drawSlices(true), wait); return; }
   sliceLast = performance.now();
@@ -149,6 +151,7 @@ function drawSlices(now = false) {
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
+const liveGrid = () => grid, liveField = () => field;
 let co2Timer = 0;
 let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room flow, and its latest field
 let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour solved
@@ -274,20 +277,17 @@ function solveAir() {
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   // CO2 keeps the last figures until its history (up to a few seconds in large models) is redone once the controls settle.
-  airflow = { solution, flows, conditions, co2: airflow?.co2 ?? null };
+  airflow = { solution, flows, conditions, co2: airflow?.co2 ?? null, site, outdoor, hourAt };
   clearTimeout(co2Timer);
   co2Timer = setTimeout(() => {
+    if (baking || bakedPlay) return; // a bake has its own CO2
     const now = airflow;
     if (now?.solution !== solution) return;
     now.co2 = co2History(hourAt, solution, site, outdoor);
     view.setCO2(now.co2);
     // The grid solver carries CO2 within rooms, each zone's mean held at these levels.
     if (grid && worker) {
-      const co2 = {
-        targets: now.co2, outdoor: outdoorCO2(model, hourAt),
-        generation: Object.fromEntries(net.zones.map((z, i) => [z, co2Generation(model, net.zones, hourAt)[i]])),
-        supply: Object.fromEntries(outdoorAirSupply(model, net.zones, hourAt, site.elevation).map((m, i) => [net.zones[i], m])),
-      };
+      const co2 = co2Message(hourAt, now.co2, site);
       grid.setCO2(co2);
       worker.postMessage({ type: 'co2', co2 });
     }
@@ -324,6 +324,8 @@ function solveAir() {
   pressureRange = [0.5, 1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100].find((x) => x >= top) || Math.ceil(top);
   view.setPressures(dps, pressureRange);
   if ($('color-by').value === 'pressure' || $('color-by').value === 'co2') legend();
+  // Baking, or playing a bake: the hour's network only; the bake has its own room air.
+  if (baking || bakedPlay) { airTotals(flows, conditions); return; }
   if ($('room-air').value === 'grid') {
     // Simulated: the background solver takes the new conditions; the page's copy of the grid follows.
     if (grid && worker) {
@@ -342,6 +344,10 @@ function solveAir() {
       drawSlices(true);
     }, 120);
   }
+  airTotals(flows, conditions);
+}
+// The outdoor air entering, as a line under the settings.
+function airTotals(flows, conditions) {
   const volume = Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0);
   const m3h = (flows.outdoorIn / 1.2) * 3600;
   // Which rooms have windows open this hour, so a still room is not mistaken for a fault.
@@ -593,9 +599,19 @@ $('arrows').addEventListener('change', () => drawSlices(true));
 
 $('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
 $('cut-color').addEventListener('change', (e) => { slices.colorBy = e.target.value; legend(); });
+// What the grid solver needs for CO2 in an hour: each zone's level from the balance, the outdoor
+// level, and the CO2 people breathe out and the outdoor air supplied, by zone.
+function co2Message(hourAt, targets, site) {
+  return {
+    targets, outdoor: outdoorCO2(model, hourAt),
+    generation: Object.fromEntries(net.zones.map((z, i) => [z, co2Generation(model, net.zones, hourAt)[i]])),
+    supply: Object.fromEntries(outdoorAirSupply(model, net.zones, hourAt, site.elevation).map((m, i) => [net.zones[i], m])),
+  };
+}
 // CO2 at a point (model coordinates): the grid solver's field, or with ideal flow its room's level.
 function co2Near(p, zoneIndex = null) {
-  if ($('room-air').value === 'grid' && grid?.co2) return grid.co2At(p);
+  const G = bakedPlay?.grid || grid, sim = bakedPlay ? bakedPlay.kind === 'grid' : $('room-air').value === 'grid';
+  if (sim && G?.co2) return G.co2At(p);
   const g = rooms?.g;
   if (!g) return 400;
   const zi = zoneIndex ?? g.zone[cellAt(g, p)];
@@ -636,6 +652,7 @@ function updateRun() {
 }
 function applyHour() {
   updateRun();
+  if (!baking && !bakedPlay) bakeStatus();
   for (const id of ['day', 'hour', 'play']) $(id).disabled = !weather && !results;
   if (!weather && !results && $('play').classList.contains('on')) setPlaying(false);
   const day = Number($('day').value), hour = Number($('hour').value);
@@ -1355,9 +1372,11 @@ function playSpan() {
 function setPlaying(on) {
   clearInterval(playTimer);
   playTimer = 0;
+  if (bakedPlay) stopBaked();
   $('play').classList.toggle('on', on);
-  $('play').textContent = on ? '❚❚ Pause' : '▶ Play day';
+  $('play').textContent = on ? '❚❚ Pause' : bakeReady() ? '▶ Play baked' : '▶ Play day';
   if (!on) { applyHour(); return; } // the label back to the whole hour
+  if (bakeReady()) { playBaked(); return; }
   const [from, to] = playSpan(), start = Number($('hour').value) - 1; // the hour's start, standard time
   if (start < from || start >= to) setHour(from); // start from the beginning unless already within
   let began = airClock(), source = airSource();
@@ -1375,6 +1394,156 @@ function setPlaying(on) {
     showMinutes(0);
   }, 100);
 }
+// ---------- Play day, baked ----------
+// A day worked out before it is played, so it plays smoothly at any speed: each hour's network, and
+// its room air, either ideal flow (seconds) or the grid solver run for each hour's air time in a
+// worker of its own (minutes). Playing blends each hour's fields into the next as its clock runs; the
+// particles move through the blend and the cuts are drawn from it, so clipping planes still cut it
+// live. A bake holds while the model, the day, the hours and the window settings are as they were.
+let bake = null, baking = null, bakedPlay = null, edits = 0;
+function bakeKey(kind) {
+  return JSON.stringify([kind, edits, model?.source.fileName, results?.name || null, weather?.fileName || null, $('day').value, playSpan(),
+    $('windows').value, $('doors').value, $('sash-type').value, [...windowSet], [...roomSet], [...sashSet], [...amountSet],
+    weather ? null : [$('t-out').value, $('t-in').value, $('wind').value, $('wind-dir').value], kind === 'grid' ? $('play-hold').value : null]);
+}
+const bakeReady = () => !!bake && bake.key === bakeKey(bake.kind);
+function bakeStatus(text) {
+  if (text === undefined) {
+    const day = dateOf(Number($('day').value)).label, [f, t] = bake?.span || [];
+    text = !bake ? '' : bakeReady() ? `Baked: ${bake.kind === 'grid' ? 'simulated' : 'ideal flow'}, ${day} ${pad2(f)}:00–${pad2(t)}:00. Play day plays it.`
+      : 'The bake no longer matches the settings: bake again, or Play day plays live.';
+    if (!baking && !$('play').classList.contains('on')) $('play').textContent = bakeReady() ? '▶ Play baked' : '▶ Play day';
+  }
+  $('bake-status').textContent = text;
+  $('bake-quick').textContent = baking?.kind === 'ideal' ? 'Cancel' : 'Ideal flow';
+  $('bake-full').textContent = baking?.kind === 'grid' ? 'Cancel' : 'Simulated';
+  $('bake-quick').disabled = !model || (baking && baking.kind !== 'ideal');
+  $('bake-full').disabled = !model || (baking && baking.kind !== 'grid');
+}
+
+async function bakeDay(kind) {
+  if (baking) { baking.cancel(); return; }
+  if (!model || !rooms) return;
+  setPlaying(false);
+  const [from, to] = playSpan(), keep = Number($('hour').value) - 1, frames = [];
+  const job = baking = { kind, cancelled: false, cancel() { this.cancelled = true; this.stop?.(); } };
+  if (kind === 'grid') worker?.postMessage({ type: 'stop' }); // the live room air rests meanwhile
+  bakeStatus('Baking: the network, hour by hour…');
+  let prev = null;
+  for (let h = from; h < to && !job.cancelled; h++) {
+    setHour(h); // the hour's weather, temperatures and network, as Play day steps it
+    const a = airflow, co2 = co2History(a.hourAt, a.solution, a.site, a.outdoor);
+    const f = { hour: h, conditions: a.conditions, flows: a.flows, co2 };
+    if (kind === 'ideal') { prev = roomFlow(rooms, a.flows, { previous: prev, open: a.conditions.open, sashes: a.conditions.sashes }); f.field = prev; }
+    else f.co2msg = co2Message(a.hourAt, co2, a.site);
+    frames.push(f);
+    bakeStatus(`Baking: hour ${h - from + 1} of ${to - from}${kind === 'grid' ? ', network' : ''}…`);
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  if (kind === 'grid' && !job.cancelled) {
+    const w = new Worker(new URL('./grid-worker.js', import.meta.url), { type: 'module' }), t0 = performance.now();
+    await new Promise((resolve) => {
+      job.stop = () => { w.terminate(); resolve(); };
+      w.onmessage = ({ data }) => {
+        if (data.type === 'baked') {
+          Object.assign(frames[data.i], { FV: data.FV, T: data.T, C: data.C });
+          const left = ((performance.now() - t0) / (data.i + 1)) * (frames.length - data.i - 1) / 1000;
+          bakeStatus(`Baking the room air: hour ${data.i + 1} of ${frames.length} done, about ${Math.ceil(left / 60)} min left…`);
+        } else if (data.type === 'bake-done') { w.terminate(); resolve(); }
+      };
+      w.postMessage({ type: 'model', epjson: model.epjson });
+      w.postMessage({ type: 'bake', air: Number($('play-hold').value), hours: frames.map((f) => ({ conditions: f.conditions, hour: hourIndex(Number($('day').value), f.hour + 1), co2: f.co2msg })) });
+    });
+  }
+  baking = null;
+  if (!job.cancelled) {
+    bake = { kind, span: [from, to], frames, key: null };
+    if (kind === 'grid') { bake.grid = new GridFlow(rooms, model); bake.grid.setCO2(frames[0].co2msg); }
+  }
+  setHour(keep); // back to the hour shown before, with the live room air
+  if (bake && !job.cancelled) bake.key = bakeKey(kind);
+  bakeStatus(job.cancelled ? 'Bake cancelled.' : undefined);
+}
+$('bake-quick').addEventListener('click', () => bakeDay('ideal'));
+$('bake-full').addEventListener('click', () => bakeDay('grid'));
+
+// Plays the bake: each hour blends into the next over the seconds it is given; the last is held.
+function playBaked() {
+  const B = bake, n = B.frames.length, now = Number($('hour').value) - 1;
+  worker?.postMessage({ type: 'stop' });
+  const P = bakedPlay = { kind: B.kind, t: Math.max(0, Math.min(n - 1, now - B.span[0])), k: -1 };
+  if (B.kind === 'grid') P.grid = B.grid;
+  else {
+    const f0 = B.frames[0].field;
+    P.live = { phi: Float64Array.from(f0.phi), velocity: Float32Array.from(f0.velocity), out: new Map(f0.out), entries: f0.entries };
+  }
+  let last = performance.now();
+  const frame = (time) => {
+    if (bakedPlay !== P) return;
+    P.t += Math.max(0, Math.min(0.1, (time - last) / 1000)) / Math.max(0.1, Number($('play-sec').value) || 4); // a frame's time can come before playing began
+    last = time;
+    if (P.t >= n) {
+      if (!$('play-loop').checked) { setPlaying(false); return; }
+      P.t = 0;
+    }
+    const k = Math.min(n - 1, Math.floor(P.t)), f = P.t - k;
+    if (k !== P.k) enterBakedHour(P, k);
+    blendBaked(P, k, k < n - 1 ? f : 0);
+    showMinutes(Math.floor(f * 60));
+    drawSlices();
+    P.raf = requestAnimationFrame(frame);
+  };
+  P.raf = requestAnimationFrame(frame);
+}
+// An hour of the bake begins: its network drawn (open windows, pressures) and the particles' sources.
+function enterBakedHour(P, k) {
+  const B = bake, F = B.frames[k], G = B.frames[Math.min(k + 1, B.frames.length - 1)];
+  P.k = k;
+  setHour(F.hour);
+  airflow.co2 = F.co2;
+  view.setCO2(F.co2);
+  const zones = rooms.g.zones;
+  P.za = zones.map((z) => F.conditions.zones[z].t);
+  P.zb = zones.map((z) => G.conditions.zones[z].t);
+  P.oa = F.conditions.outdoor.t; P.ob = G.conditions.outdoor.t;
+  if (P.grid) {
+    P.grid.setConditions(F.flows, F.conditions, { copy: true });
+    if (F.co2msg) P.grid.setCO2(F.co2msg);
+    air.setField(P.grid, F.conditions);
+  } else {
+    P.live.entries = F.field.entries;
+    P.keys = [...new Set([...F.field.out.keys(), ...G.field.out.keys()])];
+    P.live.out = new Map(P.keys.map((key) => [key, 0]));
+    air.setField(P.live, F.conditions);
+  }
+  P.zoneT = P.za.slice();
+}
+// The fields between two hours, f of the way from the first to the second.
+function blendBaked(P, k, f) {
+  const B = bake, A = B.frames[k], Z = B.frames[Math.min(k + 1, B.frames.length - 1)], g = 1 - f;
+  const mix = (out, a, b) => { for (let i = 0; i < out.length; i++) out[i] = a[i] * g + b[i] * f; };
+  if (P.grid) {
+    mix(P.grid.FV, A.FV, Z.FV);
+    mix(P.grid.T, A.T, Z.T);
+    if (A.C && Z.C && P.grid.C) mix(P.grid.C, A.C, Z.C);
+  } else {
+    mix(P.live.phi, A.field.phi, Z.field.phi);
+    mix(P.live.velocity, A.field.velocity, Z.field.velocity);
+    for (const key of P.keys) P.live.out.set(key, (A.field.out.get(key) || 0) * g + (Z.field.out.get(key) || 0) * f);
+  }
+  for (let i = 0; i < P.zoneT.length; i++) P.zoneT[i] = P.za[i] * g + P.zb[i] * f;
+  air.tracer.zoneT = P.zoneT;
+  air.tracer.outdoorT = P.oa * g + P.ob * f;
+}
+function stopBaked() {
+  if (!bakedPlay) return;
+  cancelAnimationFrame(bakedPlay.raf);
+  bakedPlay = null;
+  air.clear();
+  solveAir(); // the live room air again
+  if ($('room-air').value === 'grid' && grid && airflow) air.setField(grid, airflow.conditions);
+}
+
 // The time label with minutes, while the day plays: standard time, and the clock's on daylight-saving days.
 function showMinutes(minute) {
   const day = Number($('day').value), start = Number($('hour').value) - 1;
@@ -1470,6 +1639,9 @@ function render(m) {
   fillDetails(m);
   winEdit.stop();
   undoStack.length = 0; redoStack.length = 0; modelEdited = false; axisCache = null; schedCache.clear();
+  if (bakedPlay) stopBaked();
+  if (baking) baking.cancel();
+  bake = null; edits = 0;
   $('edited').hidden = true;
   $('lib-open').disabled = false;
   libOpen = null;
@@ -1517,8 +1689,15 @@ function applyEdit(change, what, { geometry = false } = {}) {
   refreshModel(geometry);
   return true;
 }
-function undo() { const e = undoStack.pop(); if (!e) return; e.undo(); redoStack.push(e); refreshModel(e.geometry); }
-function redo() { const e = redoStack.pop(); if (!e) return; e.redo(); undoStack.push(e); refreshModel(e.geometry); }
+function undo() { const e = undoStack.pop(); if (!e) return; e.undo(); redoStack.push(e); if (!e.view) refreshModel(e.geometry); }
+function redo() { const e = redoStack.pop(); if (!e) return; e.redo(); undoStack.push(e); if (!e.view) refreshModel(e.geometry); }
+// Clipping planes moved, turned, resized, added or removed: undone like the model's edits, but they
+// change only the view.
+view.sections.onCommit = (before, after, what) => {
+  undoStack.push({ undo: () => view.sections.setState(before), redo: () => view.sections.setState(after), what, view: true });
+  if (undoStack.length > 100) undoStack.shift();
+  redoStack.length = 0;
+};
 function popMessage(text) {
   const body = $('info').querySelector('.popbody');
   if (body) body.insertAdjacentHTML('afterbegin', `<div class="error-text popmsg">${esc(text)}</div>`);
@@ -1528,6 +1707,7 @@ function refreshModel(geometry = true) {
   const m = importEpJSON(model.epjson, { fileName: model.source.fileName });
   model = m;
   modelEdited = true;
+  edits++;
   axisCache = null; schedCache.clear();
   fillDetails(m);
   view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value, keep: true });
