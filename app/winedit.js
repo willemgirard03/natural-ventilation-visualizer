@@ -14,9 +14,10 @@ const LINE = '#F2A900', BAD = '#D93025';
 export class WindowEditor {
   // rectOf(name) -> { s0, s1, z0, z1, frame: { right, out, plane } } in building coordinates;
   // problem(name, rect) -> null or why the wall will not take it; clamp(name, rect) -> rect kept in the
-  // wall's bounds; floorOf(name) -> the height of its room's floor; onCommit(name, rect).
-  constructor(view, { rectOf, problem, clamp, floorOf, onCommit }) {
-    Object.assign(this, { view, rectOf, problem, clamp, floorOf, onCommit });
+  // wall's bounds; floorOf(name) -> the height of its room's floor; depthOf(name) -> how far the glass
+  // is drawn from the wall's modelled plane (thick walls); onCommit(name, rect).
+  constructor(view, { rectOf, problem, clamp, floorOf, depthOf = () => 0, onCommit }) {
+    Object.assign(this, { view, rectOf, problem, clamp, floorOf, depthOf, onCommit });
     this.name = null;
     this.layer = new THREE.Group();
     this.layer.userData.noSection = true;
@@ -67,9 +68,9 @@ export class WindowEditor {
     for (const o of [...this.layer.children]) { o.geometry?.dispose(); o.material?.dispose(); this.layer.remove(o); }
   }
 
-  // A point in the wall's frame (s along it, z up) in view coordinates, just proud of the wall.
+  // A point in the wall's frame (s along it, z up) in view coordinates, just proud of the glass as drawn.
   at(s, z) {
-    const { right, out, plane } = this.rect.frame, o = this.view.origin, d = plane + 0.04;
+    const { right, out, plane } = this.rect.frame, o = this.view.origin, d = plane + this.depthOf(this.name) + 0.03;
     return new THREE.Vector3(right[0] * s + out[0] * d - o[0], right[1] * s + out[1] * d - o[1], z - o[2]);
   }
 

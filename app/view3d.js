@@ -3,8 +3,9 @@
 // (models are often placed far from it, e.g. Example_01 near x = 1,550 m), which keeps the
 // graphics card's single-precision numbers exact enough.
 //
-// Mouse: left click selects, right drag orbits, middle drag pans, wheel zooms. The camera can be
-// perspective or parallel, and a view cube in the corner turns it to look from any side.
+// Mouse: left click selects, right drag orbits, middle drag pans, wheel zooms. The view orbits about
+// the selection, or about the middle of the building's ground plane when nothing is selected. The
+// camera can be perspective or parallel, and a view cube in the corner turns it to look from any side.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -143,7 +144,7 @@ export class View3D {
     this.scene.add(this.sun);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+    this.controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: null }; // orbiting is this view's own (orbit())
     this.controls.zoomToCursor = true;
     this.controls.addEventListener('change', () => this.render());
     this.renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -158,6 +159,7 @@ export class View3D {
     this.highlight = null;
     this.colorBy = 'type';
 
+    this.orbit();
     // A click is a left press and release without moving; a drag pans or orbits instead.
     let down = null;
     this.renderer.domElement.addEventListener('pointerdown', (e) => { if (e.button === 0) down = [e.clientX, e.clientY]; });
@@ -167,6 +169,8 @@ export class View3D {
       down = null;
       if (moved < 5) this.pickAt(e);
     });
+    // A double click selects the zone of what is under the pointer.
+    this.renderer.domElement.addEventListener('dblclick', (e) => { const z = this.zoneAt?.(e); if (z) this.select(z); });
 
     this.cube = new ViewCube(this, (dir) => this.lookFrom(dir));
     this.sections = new Sections(this);
@@ -174,6 +178,51 @@ export class View3D {
     new ResizeObserver(() => this.resize()).observe(container);
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyTheme());
     this.applyTheme();
+  }
+
+  // Right drag turns the camera about the pivot: the selection's middle, or the middle of the
+  // building on the ground. Unlike OrbitControls, the pivot need not be at the middle of the screen,
+  // so the view does not jump when the selection changes: the camera and its target turn together.
+  orbit() {
+    const el = this.renderer.domElement;
+    let drag = null;
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 2) return;
+      drag = { x: e.clientX, y: e.clientY, pivot: this.pivot() };
+      try { el.setPointerCapture(e.pointerId); } catch { /* a pointerdown passed on from a tag */ }
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.x = e.clientX; drag.y = e.clientY;
+      const c = this.camera, P = drag.pivot, k = 0.008;
+      const yaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -dx * k);
+      // Pitch about the camera's right, kept short of straight up or down.
+      const fwd = c.getWorldDirection(new THREE.Vector3()), right = new THREE.Vector3().crossVectors(fwd, c.up).normalize();
+      const now = Math.acos(THREE.MathUtils.clamp(fwd.z, -1, 1)), to = THREE.MathUtils.clamp(now + dy * k, 0.02, Math.PI - 0.02);
+      const pitch = new THREE.Quaternion().setFromAxisAngle(right, now - to);
+      const q = yaw.multiply(pitch);
+      const turn = (v) => v.sub(P).applyQuaternion(q).add(P);
+      turn(c.position);
+      turn(this.controls.target);
+      c.quaternion.premultiply(q);
+      this.controls.update();
+      this.render();
+    });
+    const end = (e) => { if (drag) { drag = null; try { el.releasePointerCapture(e.pointerId); } catch { /* not captured */ } } };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  }
+
+  // What the view orbits about (view coordinates): the selected thing's middle, a section plane
+  // being moved, or the middle of the building's ground plane (the origin).
+  pivot() {
+    if (this.sections?.selected) return this.sections.selected.o.clone();
+    if (this.selectedPolys?.length) {
+      const b = bounds(this.selectedPolys.flatMap((p) => p.vertices));
+      return new THREE.Vector3(...[0, 1, 2].map((i) => (b.min[i] + b.max[i]) / 2 - this.origin[i]));
+    }
+    return new THREE.Vector3(0, 0, 0);
   }
 
   applyTheme() {
@@ -573,6 +622,7 @@ export class View3D {
       this.highlight = null;
     }
     const found = name ? this.find(name) : null;
+    this.selectedPolys = found?.polys || null;
     if (found) {
       const h = new THREE.Group();
       h.add(new THREE.Mesh(polygonGeometry(found.polys, this.origin, null, found.kind === 'window' ? 0.03 : 0),
@@ -587,23 +637,30 @@ export class View3D {
     this.render();
   }
 
-  pickAt(e) {
-    this.sections.select(null);
-    const box = this.container.getBoundingClientRect();
-    this.lastPick = [e.clientX - box.left, e.clientY - box.top]; // where the selection's pop-up opens
+  // What is under the pointer: { kind, item, point (view coordinates), dir (the ray's) }, or null.
+  // Shading is drawn see-through, so the building behind it wins; shading is found only on its own.
+  hitAt(e) {
+    if (!this.front) return null;
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, this.camera);
     const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.shading.visible ? [this.shading] : [])];
-    // Shading is drawn see-through, so the building behind it wins; shading is picked only on its own.
     const hits = ray.intersectObjects(targets, false).filter((h) => !this.sections.removed(h.point));
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];
-    if (!hit) return this.select(null);
+    if (!hit) return null;
     const { kind, items } = hit.object.userData;
-    const item = items[hit.object.geometry.userData.owner[hit.faceIndex]];
-    if (kind === 'shading') { this.select(null); return this.onSelect({ kind, item, polys: [item] }); }
-    this.select(item.name);
+    return { kind, item: items[hit.object.geometry.userData.owner[hit.faceIndex]], point: hit.point, dir: ray.ray.direction.clone() };
+  }
+
+  pickAt(e) {
+    this.sections.select(null);
+    const box = this.container.getBoundingClientRect();
+    this.lastPick = [e.clientX - box.left, e.clientY - box.top]; // where the selection's pop-up opens
+    const h = this.hitAt(e);
+    if (!h) return this.select(null);
+    if (h.kind === 'shading') { this.select(null); return this.onSelect({ kind: h.kind, item: h.item, polys: [h.item] }); }
+    this.select(h.item.name);
   }
 
   // Shows a surface, window or zone in context: a plan cut 1.5 m above its lowest point (the usual

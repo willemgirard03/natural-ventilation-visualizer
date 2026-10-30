@@ -196,7 +196,7 @@ export function copyConstruction(tx, name, newName) {
   return newName;
 }
 
-const MATERIAL_TYPES = ['Material', 'Material:NoMass', 'Material:AirGap', 'WindowMaterial:SimpleGlazingSystem', 'WindowMaterial:Glazing', 'WindowMaterial:Gas'];
+export const MATERIAL_TYPES = ['Material', 'Material:NoMass', 'Material:AirGap', 'WindowMaterial:SimpleGlazingSystem', 'WindowMaterial:Glazing', 'WindowMaterial:Gas'];
 export function materialType(epjson, name) {
   return MATERIAL_TYPES.find((t) => epjson[t]?.[name]) || null;
 }
@@ -251,6 +251,115 @@ export function removeLayer(tx, construction, index) {
   layers.splice(index, 1);
   setLayers(c, layers);
   syncFlipped(tx, base);
+}
+
+// Moves a layer outwards (by -1) or inwards (by +1).
+export function moveLayer(tx, construction, index, by) {
+  const base = baseConstruction(construction), c = tx.get('Construction', base), layers = layersOf(c), to = index + by;
+  if (index < 0 || index >= layers.length || to < 0 || to >= layers.length) return;
+  [layers[index], layers[to]] = [layers[to], layers[index]];
+  setLayers(c, layers);
+  syncFlipped(tx, base);
+}
+
+// ---------- the library: materials and assemblies ----------
+
+// The fields each kind of material is defined by: [field, label, unit, shown per stored unit].
+export const MATERIAL_FIELDS = {
+  Material: [['thickness', 'Thickness', 'mm', 1000], ['conductivity', 'Conductivity', 'W/m·K', 1], ['density', 'Density', 'kg/m³', 1], ['specific_heat', 'Specific heat', 'J/kg·K', 1]],
+  'Material:NoMass': [['thermal_resistance', 'Resistance', 'm²·K/W', 1]],
+  'Material:AirGap': [['thermal_resistance', 'Resistance', 'm²·K/W', 1]],
+  'WindowMaterial:SimpleGlazingSystem': [['u_factor', 'U-factor', 'W/m²·K', 1], ['solar_heat_gain_coefficient', 'SHGC', '', 1], ['visible_transmittance', 'Visible transmittance', '', 1]],
+};
+export const MATERIAL_KINDS = { Material: 'With mass', 'Material:NoMass': 'Resistance only', 'Material:AirGap': 'Air gap', 'WindowMaterial:SimpleGlazingSystem': 'Glazing (simple)' };
+const NEW_MATERIAL = {
+  Material: { roughness: 'MediumRough', thickness: 0.1, conductivity: 1, density: 1000, specific_heat: 1000, thermal_absorptance: 0.9, solar_absorptance: 0.7, visible_absorptance: 0.7 },
+  'Material:NoMass': { roughness: 'MediumRough', thermal_resistance: 1, thermal_absorptance: 0.9, solar_absorptance: 0.7, visible_absorptance: 0.7 },
+  'Material:AirGap': { thermal_resistance: 0.18 },
+  'WindowMaterial:SimpleGlazingSystem': { u_factor: 1.4, solar_heat_gain_coefficient: 0.4, visible_transmittance: 0.6 },
+};
+
+// A name not taken yet by any object of these types.
+export function freeName(epjson, types, name) {
+  let n = name, i = 2;
+  while (types.some((t) => epjson[t]?.[n])) n = `${name} ${i++}`;
+  return n;
+}
+
+export function setMaterialField(tx, name, field, value) {
+  const type = materialType(tx.epjson, name);
+  if (!type || !(MATERIAL_FIELDS[type] || []).some(([f]) => f === field)) throw new Error(`${name} has no ${field}.`);
+  if (!(value > 0)) throw new Error('The value must be above 0.');
+  tx.get(type, name)[field] = value;
+}
+
+export function newMaterial(tx, type, name) {
+  if (!NEW_MATERIAL[type]) throw new Error(`No material type ${type}.`);
+  const n = freeName(tx.epjson, MATERIAL_TYPES, name);
+  Object.assign(tx.get(type, n, true), structuredClone(NEW_MATERIAL[type]));
+  return n;
+}
+
+export function newConstruction(tx, name, layers) {
+  if (!layers.length || !layers.every((m) => materialType(tx.epjson, m))) throw new Error('An assembly needs layers of materials the model has.');
+  const n = freeName(tx.epjson, ['Construction'], name);
+  setLayers(tx.get('Construction', n, true), layers);
+  return n;
+}
+
+// How many assemblies use a material; how many surfaces and windows use an assembly (or its reversed one).
+export function materialUses(epjson, name) {
+  return Object.entries(epjson.Construction || {}).filter(([n, c]) => !n.endsWith(FLIPPED) && layersOf(c).includes(name)).length;
+}
+export function constructionUses(epjson, name) {
+  const base = baseConstruction(name);
+  let n = 0;
+  for (const type of ['BuildingSurface:Detailed', 'FenestrationSurface:Detailed']) {
+    for (const o of Object.values(epjson[type] || {})) if (baseConstruction(o.construction_name) === base) n++;
+  }
+  return n;
+}
+
+// Renames a material or an assembly (kind 'material' or 'construction') everywhere it is used; an
+// assembly's reversed one follows.
+export function rename(tx, kind, from, to) {
+  to = String(to).trim();
+  if (!to || to === from) return from;
+  const ep = tx.epjson;
+  if (kind === 'material') {
+    const type = materialType(ep, from);
+    if (!type) throw new Error(`No material ${from}.`);
+    if (materialType(ep, to)) throw new Error(`There is already a material ${to}.`);
+    Object.assign(tx.get(type, to, true), structuredClone(ep[type][from]));
+    tx.remove(type, from);
+    for (const [n, c] of Object.entries(ep.Construction || {})) {
+      if (layersOf(c).includes(from)) setLayers(tx.get('Construction', n), layersOf(c).map((m) => (m === from ? to : m)));
+    }
+    return to;
+  }
+  const base = baseConstruction(from);
+  if (ep.Construction?.[to] || to.endsWith(FLIPPED)) throw new Error(`There is already an assembly ${to}.`);
+  const pairs = [[base, to], ...(ep.Construction[base + FLIPPED] ? [[base + FLIPPED, to + FLIPPED]] : [])];
+  for (const [a, b] of pairs) { Object.assign(tx.get('Construction', b, true), structuredClone(ep.Construction[a])); tx.remove('Construction', a); }
+  const map = Object.fromEntries(pairs);
+  for (const [type, objs] of Object.entries(ep)) {
+    if (type === 'Construction') continue;
+    for (const [n, o] of Object.entries(objs)) {
+      for (const [f, v] of Object.entries(o)) if (f.includes('construction') && map[v]) tx.get(type, n)[f] = map[v];
+    }
+  }
+  return to;
+}
+
+export function removeMaterial(tx, name) {
+  if (materialUses(tx.epjson, name)) throw new Error(`${name} is used by an assembly; take it out of them first.`);
+  tx.remove(materialType(tx.epjson, name), name);
+}
+export function removeConstruction(tx, name) {
+  const base = baseConstruction(name);
+  if (constructionUses(tx.epjson, base)) throw new Error(`${base} is used by surfaces; give them another assembly first.`);
+  tx.remove('Construction', base);
+  if (tx.epjson.Construction?.[base + FLIPPED]) tx.remove('Construction', base + FLIPPED);
 }
 
 // ---------- zone settings ----------
@@ -314,11 +423,15 @@ export function zoneSettings(epjson, zone) {
 }
 
 // The schedules a setting can pick from: those of the given limits type (e.g. "Fraction"), by name.
-export function schedulesOfType(epjson, limits) {
-  const names = [];
+// Schedules a zone has of its own (ClimateStudio's availability and control schedules, named after
+// the zone: HeatAvail_<zone>, <zone>PeopleActivity, ...) are left out, but for keep.
+export function schedulesOfType(epjson, limits, keep = null) {
+  const zones = Object.keys(epjson.Zone || {}), names = [];
   for (const type of ['Schedule:Year', 'Schedule:Constant', 'Schedule:Compact']) {
     for (const [n, o] of Object.entries(epjson[type] || {})) {
-      if (!limits || String(o.schedule_type_limits_name || '').toLowerCase().includes(limits.toLowerCase())) names.push(n);
+      if (limits && !String(o.schedule_type_limits_name || '').toLowerCase().includes(limits.toLowerCase())) continue;
+      if (n !== keep && zones.some((z) => n.includes(z))) continue;
+      names.push(n);
     }
   }
   return names.sort();

@@ -22,7 +22,8 @@ import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
 import { constructionProperties } from '../src/model/constructions.js';
 import {
   edit, windowRect, rectProblem, clampRect, setWindowRect, setSurfaceConstruction, copyConstruction, setLayer, addLayer, removeLayer,
-  layersOf, baseConstruction, materialType, setZoneSetting, zoneSettings, schedulesOfType,
+  moveLayer, layersOf, baseConstruction, materialType, setZoneSetting, zoneSettings, schedulesOfType, MATERIAL_FIELDS, MATERIAL_KINDS,
+  setMaterialField, newMaterial, newConstruction, rename, removeMaterial, removeConstruction, materialUses, constructionUses,
 } from '../src/model/edit.js';
 import { ZoneLabels } from './zonelabels.js';
 import { WindowEditor } from './winedit.js';
@@ -51,8 +52,22 @@ const slices = new FieldSlices(view);
 air.setVisible($('show-air').checked);
 slices.timeScale = Number($('cut-speed').value);
 view.setProjection($('projection').querySelector('[aria-pressed="true"]').dataset.proj);
-// Zone labels select a whole zone; a click on a surface selects the surface.
-const labels = new ZoneLabels(view, (zone) => view.select(zone));
+// Zone tags select a whole zone; a click on a surface selects the surface, a double click its zone.
+// The zone under the pointer is the room the pointer looks into: the room-air cell just in front of
+// the surface hit (a floor and the ceiling below it share a place, so the surface alone is ambiguous).
+function zoneUnder(e) {
+  const h = view.hitAt(e);
+  if (!h || !rooms) return null;
+  const g = rooms.g, o = view.origin;
+  for (const back of [0.3, 0.6, 0.9]) {
+    const p = h.point.clone().addScaledVector(h.dir, -back);
+    const c = cellAt(g, [p.x + o[0], p.y + o[1], p.z + o[2]]);
+    if (c >= 0 && g.zone[c] >= 0) return g.zones[g.zone[c]];
+  }
+  return null;
+}
+view.zoneAt = zoneUnder;
+const labels = new ZoneLabels(view, { onPick: (zone) => view.select(zone), zoneAt: zoneUnder });
 labels.setVisible($('show-labels').checked);
 $('show-labels').addEventListener('change', (e) => labels.setVisible(e.target.checked));
 // A window's sill, head and jambs pushed and pulled in the view, and the window dragged across its wall.
@@ -61,9 +76,10 @@ const winEdit = new WindowEditor(view, {
   problem: (name, r) => rectProblem(model, name, r),
   clamp: (name, r) => clampRect(model, name, r),
   floorOf: (name) => model.zones[model.windows[name].zone].bottom,
+  depthOf: (name) => view.windowOffset(model.windows[name]),
   onCommit: (name, r) => applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true }),
 });
-view.onRender = () => labels.update();
+view.onRender = () => followPop();
 view.beforeRender = () => winEdit.beforeRender();
 let sliceRange = null, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
@@ -747,8 +763,9 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
 
 // The selected surface, window, zone, door or section plane, in a pop-up beside where it was picked
 // (as the Solar Shading Explorer's): its settings to change, the air through it, and any checks that
-// name it. The pop-up stays where it is (or where it was dragged) while the same thing is selected.
-let popKey = null, popMin = false, layersOpen = false;
+// name it. The pop-up keeps beside its selection on screen, clear of it, as the view turns, until it
+// is dragged somewhere; then it stays there while the same thing is selected.
+let popKey = null, popMin = false, layersOpen = false, popPinned = false;
 function showInfo(found) {
   const box = $('info');
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
@@ -765,7 +782,7 @@ function showInfo(found) {
     + '<button type="button" data-pop="close" title="Close (Esc)">×</button></span></div>'
     + `<div class="popbody"${popMin ? ' hidden' : ''}>${rows.map((r) => (r.startsWith('<div') ? r : `<div>${r}</div>`)).join('')}</div>`;
   box.hidden = false;
-  if (key !== popKey) { popKey = key; placePop(); }
+  if (key !== popKey) { popKey = key; popPinned = false; placePop(); }
 }
 
 // Beside the point picked, inside the view.
@@ -780,10 +797,28 @@ $('info').addEventListener('pointerdown', (e) => {
   const hd = e.target.closest('.pophd');
   if (!hd || e.target.closest('button') || e.button !== 0) return;
   const box = $('info'), x0 = e.clientX - box.offsetLeft, y0 = e.clientY - box.offsetTop;
-  const move = (m) => Object.assign(box.style, { left: `${m.clientX - x0}px`, top: `${m.clientY - y0}px`, bottom: '' });
+  const move = (m) => { popPinned = true; Object.assign(box.style, { left: `${m.clientX - x0}px`, top: `${m.clientY - y0}px`, bottom: '' }); };
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', () => window.removeEventListener('pointermove', move), { once: true });
 });
+// After each frame: the pop-up beside the selection's outline on screen (right of it, else left, else
+// below), never over it; a window being edited keeps room for its figures.
+function followPop() {
+  const box = $('info');
+  if (popPinned || box.hidden || !model || !view.selectedPolys?.length || box.dataset.kind === 'plane') return;
+  const pts = view.selectedPolys.flatMap((p) => p.vertices), o = view.origin, q = new THREE.Vector3();
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const p of pts) {
+    const s2 = view.sections.screen(q.set(p[0] - o[0], p[1] - o[1], p[2] - o[2]));
+    x0 = Math.min(x0, s2.x); x1 = Math.max(x1, s2.x); y0 = Math.min(y0, s2.y); y1 = Math.max(y1, s2.y);
+  }
+  const pad = winEdit.active ? 64 : 14, v = $('viewer'), W = v.clientWidth, H = v.clientHeight, w = box.offsetWidth, h = box.offsetHeight;
+  let x = x1 + pad, y = Math.max(8, Math.min((y0 + y1) / 2 - h / 2, H - h - 8));
+  if (x + w > W - 8) x = x0 - pad - w;
+  if (x < 8) { x = Math.max(8, Math.min((x0 + x1) / 2 - w / 2, W - w - 8)); y = y1 + pad + h < H - 8 ? y1 + pad : Math.max(8, y0 - pad - h); }
+  const l = `${Math.round(x)}px`, t = `${Math.round(y)}px`;
+  if (box.style.left !== l || box.style.top !== t) Object.assign(box.style, { left: l, top: t, bottom: '' });
+}
 $('info').addEventListener('click', (e) => {
   const b = e.target.closest('[data-pop]');
   if (!b) return;
@@ -857,36 +892,118 @@ const dirWord = (az) => (az === null || az === undefined ? 'skylight' : ['north'
 const FILMS = { wall: 0.13 + 0.04, floor: 0.17 + 0.04, roof: 0.1 + 0.04, ceiling: 0.1 + 0.04 };
 const materialNames = () => ['Material', 'Material:NoMass', 'Material:AirGap'].flatMap((t) => Object.keys(model.epjson[t] || {})).sort();
 
-// A surface's assembly: the construction it takes (any of the model's opaque ones), its R and U, and
-// its layers to change, outside first. Changing a layer changes every surface with that assembly;
-// a copy gives this surface one of its own.
+// A surface's assembly: the construction it takes (any of the model's opaque ones), drawn in section
+// with its two sides named, and its layers to change (outside first). Changing a layer changes every
+// surface with that assembly; a copy gives this surface one of its own.
 function assemblyRows(s) {
-  const ep = model.epjson, base = baseConstruction(s.construction), c = constructionProperties(ep, base);
-  const users = Object.values(model.surfaces).filter((x) => baseConstruction(x.construction) === base).length;
+  const ep = model.epjson, base = baseConstruction(s.construction);
+  const users = constructionUses(ep, base);
   const opts = Object.keys(ep.Construction || {}).filter((n) => !n.endsWith('_FLIPPED') && !constructionProperties(ep, n)?.glazing).sort()
     .map((n) => `<option${n === base ? ' selected' : ''}>${esc(n)}</option>`).join('');
-  const rows = [popSec('Assembly', 'The construction of this surface. Partitions and slabs shared by two zones take it on both sides, reversed on the other.'),
-    `<select class="popsel wide" data-act="construction" title="Give this surface another of the model's assemblies">${opts}</select>`];
-  if (c) {
-    const film = FILMS[String(s.surfaceType).toLowerCase()] ?? 0.17;
-    rows.push(`R ${fmt(c.R, 2)} m²·K/W · U ${c.R === null ? '–' : fmt(1 / (c.R + film), 3)} W/m²·K · ${fmt((c.thickness || 0) * 1000, 0)} mm · <span title="Surfaces with this assembly (both sides of shared ones count)">${users} surface${users === 1 ? '' : 's'}</span>`);
-    rows.push(`<button class="pbtn more" data-act="layers" aria-expanded="${layersOpen}">${layersOpen ? 'Layers ▴' : 'Layers ▸'}</button>`);
-    if (layersOpen) {
-      const mats = materialNames();
-      layersOf(ep.Construction[base]).forEach((m, i) => {
-        const thick = materialType(ep, m) === 'Material';
-        rows.push(`<div class="poplayer"><span class="lnum" title="${i ? `Layer ${i + 1} from outside` : 'Outside layer'}">${i + 1}</span>`
-          + `<select class="popsel" data-act="layer-mat" data-i="${i}" title="${esc(m)}">${mats.map((n) => `<option${n === m ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`
-          + (thick ? `<input class="popnum" data-act="layer-thk" data-i="${i}" value="${+(ep.Material[m].thickness * 1000).toFixed(1)}" title="Thickness, mm"> mm` : '<span class="muted" title="A layer without mass: a resistance only">R only</span>')
-          + `<button type="button" class="pbtn x" data-act="layer-del" data-i="${i}" title="Take this layer out">×</button></div>`);
-      });
-      rows.push(`<div class="poprow"><button class="pbtn" data-act="layer-add" title="A layer added on the inside, a copy of the innermost one's material">Add layer</button>`
-        + `<span class="muted">${users > 1 ? `Changes all ${users} surfaces with this assembly` : 'Outside layer first'}</span></div>`,
-        `<div class="poprow"><input class="popname" data-act="copy-name" placeholder="${esc(base)} copy" title="A name for the copy: Tab takes the one suggested"><button class="pbtn" data-act="copy" title="A copy of this assembly, with its own materials, given to this surface only (and its other side)">Copy for this surface</button></div>`);
-    }
-  }
+  // The construction's outside layer faces the other side of the surface; on a shared surface that
+  // takes the reversed one, the construction's outside faces this zone.
+  const other = s.boundary === 'Surface' ? `Zone ${s.adjacentZone}` : s.boundary === 'Outdoors' ? 'Exterior' : /ground/i.test(s.boundary) ? 'Ground' : s.boundary;
+  const mine = s.boundary === 'Surface' ? `Zone ${s.zone}` : 'Interior';
+  const [outside, inside] = s.construction.endsWith('_FLIPPED') ? [mine, other] : [other, mine];
+  const along = String(s.surfaceType).toLowerCase() === 'wall' ? 'wall' : String(s.surfaceType).toLowerCase() === 'floor' ? 'floor' : 'roof';
+  return [popSec('Assembly', 'The construction of this surface. Partitions and slabs shared by two zones take it on both sides, reversed on the other.'),
+    `<select class="popsel wide" data-act="construction" title="Give this surface another of the model's assemblies">${opts}</select>`,
+    ...assemblyEditor(base, { outside, inside, along, users, film: FILMS[String(s.surfaceType).toLowerCase()] ?? 0.17, open: layersOpen, copy: true })];
+}
+
+// Layers of an assembly, drawn and listed, for the pop-up and the Materials and assemblies window.
+// along: 'wall' (outside left), 'roof' (outside on top) or 'floor' (outside below).
+function assemblyEditor(base, { outside = 'Exterior', inside = 'Interior', along = 'wall', users = constructionUses(model.epjson, base), film = 0.17, open = true, copy = false } = {}) {
+  const ep = model.epjson, c = constructionProperties(ep, base);
+  if (!c) return [];
+  const rows = [`<div class="popdraw" data-c="${esc(base)}">${assemblyDrawing(base, { outside, inside, along })}</div>`,
+    `R ${fmt(c.R, 2)} m²·K/W · U ${c.R === null ? '–' : fmt(1 / (c.R + film), 3)} W/m²·K · ${fmt((c.thickness || 0) * 1000, 0)} mm · <span title="Surfaces and windows with this assembly (both sides of shared ones count)">${users} surface${users === 1 ? '' : 's'}</span>`];
+  if (copy) rows.push(`<button class="pbtn more" data-act="layers" aria-expanded="${open}">${open ? 'Layers ▴' : 'Layers ▸'}</button>`);
+  if (!open) return rows;
+  const mats = materialNames(), layers = layersOf(ep.Construction[base]);
+  rows.push(`<div class="lside" data-c="${esc(base)}">▲ ${esc(outside)} side</div>`);
+  layers.forEach((m, i) => {
+    const thick = materialType(ep, m) === 'Material';
+    rows.push(`<div class="poplayer" data-c="${esc(base)}"><span class="lnum" title="${i ? `Layer ${i + 1} from the ${esc(outside)} side` : `Outermost, on the ${esc(outside)} side`}">${i + 1}</span>`
+      + `<select class="popsel" data-act="layer-mat" data-i="${i}" title="${esc(m)}">${mats.map((n) => `<option${n === m ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`
+      + (thick ? `<input class="popnum" data-act="layer-thk" data-i="${i}" value="${+(ep.Material[m].thickness * 1000).toFixed(1)}" title="Thickness, mm"> mm` : '<span class="muted" title="A layer without mass: a resistance only">R only</span>')
+      + `<button type="button" class="pbtn x" data-act="layer-up" data-i="${i}" title="Move it one layer towards the ${esc(outside)} side"${i ? '' : ' disabled'}>↑</button>`
+      + `<button type="button" class="pbtn x" data-act="layer-down" data-i="${i}" title="Move it one layer towards the ${esc(inside)} side"${i < layers.length - 1 ? '' : ' disabled'}>↓</button>`
+      + `<button type="button" class="pbtn x" data-act="layer-del" data-i="${i}" title="Take this layer out">×</button></div>`);
+  });
+  rows.push(`<div class="lside" data-c="${esc(base)}">▼ ${esc(inside)} side</div>`,
+    `<div class="poprow" data-c="${esc(base)}"><button class="pbtn" data-act="layer-add" title="A layer added on the ${esc(inside)} side, a copy of the innermost one's material">Add layer</button>`
+    + `<span class="muted">${users > 1 ? `Changes all ${users} surfaces with this assembly` : ''}</span></div>`);
+  if (copy) rows.push(`<div class="poprow" data-c="${esc(base)}"><input class="popname" data-act="copy-name" placeholder="${esc(base)} copy" title="A name for the copy: Tab takes the one suggested"><button class="pbtn" data-act="copy" title="A copy of this assembly, with its own materials, given to this surface only (and its other side)">Copy for this surface</button></div>`);
   return rows;
 }
+
+// What a material looks like in section, from what it is made of: insulation (low conductivity),
+// masonry and concrete (dense), timber, a board, a resistance-only layer or an air gap.
+function materialLook(ep, name) {
+  const type = materialType(ep, name), m = ep[type]?.[name] || {};
+  if (type === 'Material:AirGap' || /air ?(gap|space|cavity)/i.test(name)) return 'gap';
+  if (type !== 'Material') return 'res';
+  // By name first: densities overlap (a hollow clay block weighs what timber does).
+  const n = name.toLowerCase();
+  if (/insul|wool|eps|xps|polystyrene|polyiso|pir|foam|fibre|fiber|cellulose|batt|cork|hemp/.test(n)) return 'ins';
+  if (/plaster|gypsum|board|render|stucco|tile|carpet|screed|membrane/.test(n)) return 'board';
+  if (/concrete|brick|block|clay|porotherm|masonry|stone|mortar|cement|terrazzo/.test(n)) return 'mas';
+  if (/wood|timber|ply|osb|clt|lumber|glulam|lvl|oak|pine|spruce|fir/.test(n)) return 'wood';
+  if (/steel|metal|alumin|copper|zinc/.test(n)) return 'metal';
+  if (m.conductivity <= 0.07) return 'ins';
+  if (m.density >= 1500) return 'mas';
+  if (m.density >= 350 && m.density <= 900 && m.conductivity <= 0.3) return 'wood';
+  if (m.density > 4000) return 'metal';
+  return 'board';
+}
+
+// The assembly in section: each layer as wide as it is thick (thin ones kept visible), patterned by
+// what it is, numbered as listed, the two sides named.
+function assemblyDrawing(base, { outside, inside, along }) {
+  const ep = model.epjson, layers = layersOf(ep.Construction[base]);
+  const t = layers.map((m) => (materialType(ep, m) === 'Material' ? ep.Material[m].thickness : 0));
+  const total = t.reduce((a, b) => a + b, 0) || 1, wall = along === 'wall';
+  const span = wall ? 200 : 74, minW = 5;
+  const raw = t.map((x) => Math.max(minW, (x / total) * span)), k = span / raw.reduce((a, b) => a + b, 0);
+  const size = raw.map((x) => Math.max(minW * Math.min(1, k * 1.6), x * k));
+  const W = wall ? 300 : 300, H = wall ? 74 : size.reduce((a, b) => a + b, 0) + 30;
+  let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" class="asm" role="img" aria-label="${esc(base)} in section">${ASM_DEFS}`;
+  let at = wall ? 50 : 15;
+  // Layers in their order from the outside side: left to right in a wall, top down in a roof,
+  // bottom up in a floor.
+  const order = layers.map((m, i) => i);
+  if (along === 'floor') { at = 15 + size.reduce((a, b) => a + b, 0); }
+  order.forEach((i) => {
+    const look = materialLook(ep, layers[i]), w = size[i];
+    const tip = `${i + 1}. ${layers[i]}${t[i] ? `, ${fmt(t[i] * 1000, 0)} mm` : ''}${ep.Material?.[layers[i]] ? `, k ${ep.Material[layers[i]].conductivity} W/m·K` : ''}`;
+    let x, y, bw, bh;
+    if (wall) { x = at; y = 10; bw = w; bh = 48; at += w; }
+    else if (along === 'roof') { x = 60; y = at; bw = 180; bh = w; at += w; }
+    else { at -= w; x = 60; y = at; bw = 180; bh = w; }
+    s += `<g><title>${esc(tip)}</title><rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" class="ly ${look}" fill="url(#asm-${look})"/>`;
+    if ((wall ? bw : bh) >= 12) s += `<text x="${(x + bw / 2).toFixed(1)}" y="${(y + bh / 2 + 3).toFixed(1)}" class="lyn">${i + 1}</text>`;
+    s += '</g>';
+  });
+  if (wall) {
+    s += `<text x="45" y="38" class="side" text-anchor="end">${esc(short(outside))}</text><text x="${at + 5}" y="38" class="side">${esc(short(inside))}</text>`;
+  } else {
+    const top = along === 'roof' ? outside : inside, bottom = along === 'roof' ? inside : outside, y1 = 15 + size.reduce((a, b) => a + b, 0);
+    s += `<text x="150" y="11" class="side" text-anchor="middle">${esc(short(top))}</text><text x="150" y="${y1 + 12}" class="side" text-anchor="middle">${esc(short(bottom))}</text>`;
+  }
+  return s + '</svg>';
+}
+const short = (t) => (t.length > 16 ? t.slice(0, 15) + '…' : t);
+// Patterns for the section's layers, in the drawings' greys.
+const ASM_DEFS = `<defs>
+  <pattern id="asm-ins" width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#FBF6EA"/><path d="M0 6 Q2 0 4 4 T8 2" fill="none" stroke="#C9A85C" stroke-width=".8"/></pattern>
+  <pattern id="asm-mas" width="5" height="5" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="#E2E4E1"/><line x1="0" y1="0" x2="0" y2="5" stroke="#7D8A87" stroke-width=".8"/></pattern>
+  <pattern id="asm-wood" width="6" height="6" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="#EFE2CC"/><path d="M0 2 h6 M0 5 h6" stroke="#B48A55" stroke-width=".5"/></pattern>
+  <pattern id="asm-board" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="#F1F2EF"/><circle cx="2" cy="2" r=".45" fill="#9AA5A2"/></pattern>
+  <pattern id="asm-metal" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="#9AA5A2"/></pattern>
+  <pattern id="asm-res" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="#FDFDFC"/></pattern>
+  <pattern id="asm-gap" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="#FDFDFC"/></pattern>
+</defs>`;
 
 // A zone's settings, read from its objects, each typed over: occupancy with its schedule through the
 // day picked, lights, equipment, outdoor air, infiltration and when its windows open.
@@ -897,7 +1014,7 @@ function zoneRows(z) {
   rows.push(`${popNum('peoplePerArea', s.peoplePerArea, 'people/m²', 'Peak people per square metre of floor', 4)}`
     + (z.people ? ` · ${fmt(s.peoplePerArea ? 1 / s.peoplePerArea : null, 1)} m²/person` : ''));
   if (s.peopleSchedule) {
-    const opts = schedulesOfType(ep, 'Fraction').map((n) => `<option${n === s.peopleSchedule ? ' selected' : ''}>${esc(n)}</option>`).join('');
+    const opts = schedulesOfType(ep, 'Fraction', s.peopleSchedule).map((n) => `<option${n === s.peopleSchedule ? ' selected' : ''}>${esc(n)}</option>`).join('');
     rows.push(`<select class="popsel wide" data-zset="peopleSchedule" title="The fraction of the peak present each hour">${opts}</select>`);
     const values = scheduleValues(s.peopleSchedule);
     if (values) {
@@ -1333,6 +1450,9 @@ function render(m) {
   winEdit.stop();
   undoStack.length = 0; redoStack.length = 0; modelEdited = false; axisCache = null; schedCache.clear();
   $('edited').hidden = true;
+  $('lib-open').disabled = false;
+  libOpen = null;
+  renderLibrary();
   $('results').hidden = false;
   view.resize();
   view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value });
@@ -1407,6 +1527,7 @@ function refreshModel(geometry = true) {
   if ($('show-air').checked) air.play();
   winEdit.refresh();
   if (keepPlane) view.sections.select(keepPlane); else view.select(keep);
+  renderLibrary();
   legend();
 }
 document.addEventListener('keydown', (e) => {
@@ -1420,49 +1541,131 @@ document.addEventListener('keydown', (e) => {
 });
 $('edited').addEventListener('click', undo);
 
-// Settings typed in the pop-up: a zone's, a layer's thickness; Tab in a name box takes its suggestion.
-$('info').addEventListener('change', (e) => {
-  const t = e.target, zone = selected && model.zones[selected] ? selected : null;
+// Settings typed in the pop-up and in the Materials and assemblies window: a zone's, an assembly's
+// layers, a material's figures, names. Tab in a name box takes its suggestion.
+const assemblyOf = (t) => t.closest('[data-c]')?.dataset.c;
+function onChange(e) {
+  const t = e.target, zone = selected && model?.zones[selected] ? selected : null;
+  if (!model) return;
   if (t.dataset.zset && zone) {
     const v = t.tagName === 'SELECT' ? t.value : Number(String(t.value).replace(',', '.')) * Number(t.dataset.scale || 1);
     if (t.tagName !== 'SELECT' && !(Number.isFinite(v) && v >= 0)) { showInfo(current()); return; }
     applyEdit((tx) => setZoneSetting(tx, zone, t.dataset.zset, v), `zone ${zone} ${t.dataset.zset}`);
     return;
   }
-  const s = selected && model.surfaces[selected];
-  if (!s) return;
-  const base = baseConstruction(s.construction);
-  if (t.dataset.act === 'construction') applyEdit((tx, m) => setSurfaceConstruction(tx, m, s.name, t.value), `assembly of ${s.name}`);
-  else if (t.dataset.act === 'layer-mat') applyEdit((tx) => setLayer(tx, base, Number(t.dataset.i), { material: t.value }), `layer of ${base}`);
-  else if (t.dataset.act === 'layer-thk') {
-    const mm = Number(String(t.value).replace(',', '.'));
-    if (mm > 0) applyEdit((tx) => setLayer(tx, base, Number(t.dataset.i), { thickness: mm / 1000 }), `layer of ${base}`);
-    else showInfo(current());
+  const s = selected && model.surfaces[selected], base = assemblyOf(t);
+  const num = () => Number(String(t.value).replace(',', '.'));
+  const act = t.dataset.act;
+  if (act === 'construction' && s) applyEdit((tx, m) => setSurfaceConstruction(tx, m, s.name, t.value), `assembly of ${s.name}`);
+  else if (act === 'layer-mat' && base) applyEdit((tx) => setLayer(tx, base, Number(t.dataset.i), { material: t.value }), `layer of ${base}`);
+  else if (act === 'layer-thk' && base) {
+    if (num() > 0) applyEdit((tx) => setLayer(tx, base, Number(t.dataset.i), { thickness: num() / 1000 }), `layer of ${base}`);
+    else refreshPanels();
+  } else if (act === 'mat-field') {
+    const m = t.closest('[data-m]').dataset.m;
+    if (num() > 0) applyEdit((tx) => setMaterialField(tx, m, t.dataset.f, num() / Number(t.dataset.per || 1)), `material ${m}`);
+    else refreshPanels();
+  } else if (act === 'mat-name') {
+    const m = t.closest('[data-m]').dataset.m;
+    if (t.value.trim() && t.value.trim() !== m) applyEdit((tx) => rename(tx, 'material', m, t.value), `material ${m} renamed`);
+  } else if (act === 'asm-name' && base) {
+    if (t.value.trim() && t.value.trim() !== base) { libOpen = t.value.trim(); applyEdit((tx) => rename(tx, 'construction', base, t.value), `assembly ${base} renamed`); }
   }
-});
-$('info').addEventListener('keydown', (e) => {
+}
+function onKey(e) {
   const t = e.target;
-  if (e.key === 'Enter' && t.matches('input.popnum')) t.blur();
+  if (e.key === 'Enter' && t.matches('input.popnum, input.libname')) t.blur();
   if (e.key === 'Tab' && t.matches('input.popname') && !t.value) { t.value = t.placeholder; e.preventDefault(); }
-  if (e.key === 'Enter' && t.matches('input.popname')) $('info').querySelector('[data-act=copy]')?.click();
+  if (e.key === 'Enter' && t.matches('input.popname')) t.closest('.poprow')?.querySelector('[data-act=copy]')?.click();
   e.stopPropagation();
-});
-$('info').addEventListener('click', (e) => {
+}
+function onClick(e) {
   const b = e.target.closest('[data-act]');
-  if (!b || !model) return;
-  const s = selected && model.surfaces[selected], base = s && baseConstruction(s.construction);
-  const act = b.dataset.act;
+  if (!b || !model || b.disabled) return;
+  const s = selected && model.surfaces[selected], base = assemblyOf(b), i = Number(b.dataset.i), act = b.dataset.act;
   if (act === 'layers') { layersOpen = !layersOpen; showInfo(current()); }
-  else if (act === 'layer-del' && s) applyEdit((tx) => removeLayer(tx, base, Number(b.dataset.i)), `layer of ${base}`);
-  else if (act === 'layer-add' && s) applyEdit((tx) => { const l = layersOf(tx.epjson.Construction[base]); addLayer(tx, base, l.length, l[l.length - 1]); }, `layer of ${base}`);
-  else if (act === 'copy' && s) {
-    const box = $('info').querySelector('[data-act=copy-name]'), name = (box.value || box.placeholder).trim();
+  else if (act === 'layer-del' && base) applyEdit((tx) => removeLayer(tx, base, i), `layer of ${base}`);
+  else if (act === 'layer-up' && base) applyEdit((tx) => moveLayer(tx, base, i, -1), `layer of ${base}`);
+  else if (act === 'layer-down' && base) applyEdit((tx) => moveLayer(tx, base, i, 1), `layer of ${base}`);
+  else if (act === 'layer-add' && base) applyEdit((tx) => { const l = layersOf(tx.epjson.Construction[base]); addLayer(tx, base, l.length, l[l.length - 1]); }, `layer of ${base}`);
+  else if (act === 'copy' && s && base) {
+    const box = b.closest('.poprow').querySelector('[data-act=copy-name]'), name = (box.value || box.placeholder).trim();
     if (name) applyEdit((tx, m) => { copyConstruction(tx, base, name); setSurfaceConstruction(tx, m, s.name, name); }, `copy of ${base}`);
   } else if (act === 'winedit' && model.windows[selected]) {
     if (winEdit.name === selected) winEdit.stop(); else winEdit.start(selected);
     showInfo(current());
+  } else if (act === 'lib-tab') { libTab = b.dataset.v; renderLibrary(); }
+  else if (act === 'asm-open') { libOpen = libOpen === b.dataset.v ? null : b.dataset.v; renderLibrary(); }
+  else if (act === 'asm-new') {
+    const first = materialNames()[0];
+    let made = null;
+    if (first) applyEdit((tx) => { made = newConstruction(tx, 'New assembly', [first]); }, 'new assembly');
+    if (made) { libOpen = made; renderLibrary(); }
+  } else if (act === 'asm-del') applyEdit((tx) => removeConstruction(tx, b.dataset.v), `assembly ${b.dataset.v} removed`);
+  else if (act === 'mat-new') applyEdit((tx) => newMaterial(tx, $('lib-kind').value, 'New material'), 'new material');
+  else if (act === 'mat-del') applyEdit((tx) => removeMaterial(tx, b.dataset.v), `material ${b.dataset.v} removed`);
+}
+for (const id of ['info', 'library']) {
+  $(id).addEventListener('change', onChange);
+  $(id).addEventListener('keydown', onKey);
+  $(id).addEventListener('click', onClick);
+}
+function refreshPanels() { showInfo(current()); renderLibrary(); }
+
+// ---------- the Materials and assemblies window ----------
+// The model's library: every material with the figures that define it, and every assembly with its
+// layers, each typed over, renamed, added or (when nothing uses it) removed.
+let libTab = 'assemblies', libOpen = null;
+function renderLibrary() {
+  const box = $('library');
+  if (box.hidden || !model) return;
+  if (box.contains(document.activeElement) && document.activeElement.matches('input, select')) return;
+  const ep = model.epjson, scroll = box.querySelector('.libbody')?.scrollTop || 0;
+  const tab = (v, label) => `<button type="button" data-act="lib-tab" data-v="${v}" aria-pressed="${libTab === v}">${label}</button>`;
+  let body = '';
+  if (libTab === 'materials') {
+    body += '<table class="libtable"><tr><th>Material</th><th>Kind</th><th colspan="4">Properties</th><th title="Assemblies using it">Used</th><th></th></tr>';
+    for (const type of Object.keys(MATERIAL_FIELDS)) {
+      for (const [name, m] of Object.entries(ep[type] || {}).sort(([a], [b]) => a.localeCompare(b))) {
+        const uses = materialUses(ep, name);
+        body += `<tr data-m="${esc(name)}"><td><input class="libname" data-act="mat-name" value="${esc(name)}" title="Its name: type a new one"></td><td class="muted">${MATERIAL_KINDS[type]}</td>`
+          + MATERIAL_FIELDS[type].map(([f, label, unit, per]) => `<td><label title="${label}${unit ? `, ${unit}` : ''}"><span class="muted">${label}</span><input class="popnum" data-act="mat-field" data-f="${f}" data-per="${per}" value="${+((m[f] ?? 0) * per).toFixed(4)}"> ${unit}</label></td>`).join('')
+          + '<td></td>'.repeat(4 - MATERIAL_FIELDS[type].length)
+          + `<td>${uses}</td><td>${uses ? '' : `<button type="button" class="pbtn x" data-act="mat-del" data-v="${esc(name)}" title="Remove this material (no assembly uses it)">×</button>`}</td></tr>`;
+      }
+    }
+    body += `</table><div class="poprow libfoot"><select id="lib-kind" class="popsel">${Object.entries(MATERIAL_KINDS).map(([t, l]) => `<option value="${t}">${l}</option>`).join('')}</select><button type="button" class="pbtn" data-act="mat-new">New material</button></div>`;
+  } else {
+    body += '<div class="libasms">';
+    for (const name of Object.keys(ep.Construction || {}).filter((n) => !n.endsWith('_FLIPPED')).sort()) {
+      const c = constructionProperties(ep, name), uses = constructionUses(ep, name), open = libOpen === name;
+      body += `<div class="libasm${open ? ' open' : ''}" data-c="${esc(name)}"><div class="libasmhd">`
+        + `<button type="button" class="pbtn more" data-act="asm-open" data-v="${esc(name)}" title="${open ? 'Close' : 'Show and edit its layers'}">${open ? '▾' : '▸'}</button>`
+        + `<input class="libname" data-act="asm-name" value="${esc(name)}" title="Its name: type a new one">`
+        + `<span class="muted">${c.layers.length} layer${c.layers.length === 1 ? '' : 's'} · ${c.glazing ? (c.uFactor ? `U ${fmt(c.uFactor, 2)}` : 'glazing') : `R ${fmt(c.R, 2)}`} · ${uses} surface${uses === 1 ? '' : 's'}</span>`
+        + (uses ? '' : `<button type="button" class="pbtn x" data-act="asm-del" data-v="${esc(name)}" title="Remove this assembly (no surface uses it)">×</button>`)
+        + '</div>';
+      if (open) body += (c.glazing ? [`<span class="muted">A window's glazing: its layers are set in the material list.</span>`] : assemblyEditor(name, { users: uses }))
+        .map((r) => (r.startsWith('<div') ? r : `<div>${r}</div>`)).join('');
+      body += '</div>';
+    }
+    body += '</div><div class="poprow libfoot"><button type="button" class="pbtn" data-act="asm-new" title="A new assembly of one layer, to build up here and give to surfaces from their pop-up">New assembly</button></div>';
   }
+  box.innerHTML = `<div class="pophd" title="Drag to move"><span class="popttl">Materials and assemblies</span><span class="seg mini">${tab('assemblies', 'Assemblies')}${tab('materials', 'Materials')}</span>`
+    + '<span class="popbtns"><button type="button" data-pop="close" title="Close">×</button></span></div>'
+    + `<div class="libbody">${body}</div>`;
+  box.querySelector('.libbody').scrollTop = scroll;
+}
+$('lib-open').addEventListener('click', () => { const box = $('library'); box.hidden = !box.hidden; renderLibrary(); });
+$('library').addEventListener('click', (e) => { if (e.target.closest('[data-pop=close]')) $('library').hidden = true; });
+$('library').addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('.pophd') || e.target.closest('button') || e.button !== 0) return;
+  const box = $('library'), r = box.getBoundingClientRect(), x0 = e.clientX - r.left, y0 = e.clientY - r.top;
+  const move = (m) => Object.assign(box.style, { left: `${m.clientX - x0}px`, top: `${m.clientY - y0}px`, right: 'auto' });
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', () => window.removeEventListener('pointermove', move), { once: true });
 });
+
 $('info').addEventListener('change', (e) => {
   const a = e.target.dataset?.apply;
   if (a) applyAll[a] = e.target.checked;

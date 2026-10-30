@@ -13,6 +13,7 @@ import {
   addLayer, removeLayer, layersOf, setZoneSetting, zoneSettings, outdoorAirSpec, toZone,
 } from '../src/model/edit.js';
 import { toBuilding } from '../src/model/geometry.js';
+import * as lib from '../src/model/edit.js';
 
 const FILE = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'), 'Example 02', 'Results', '2226_Emmenweid.epJSON');
 const skip = !existsSync(FILE) && 'Example_02 is not on this computer';
@@ -110,4 +111,27 @@ test('zone settings are written to the zone\'s own objects', { skip }, () => {
   assert.equal(zoneSettings(epjson, 'GF_Office_1_0').peoplePerArea !== 0.1, true, 'other zones untouched');
   e.undo();
   assert.notEqual(zoneSettings(epjson, zone).peoplePerArea, 0.1);
+});
+
+test('the library: layers reordered, materials and assemblies made, renamed and removed', { skip }, () => {
+  const { epjson } = fresh();
+  const { moveLayer, newMaterial, newConstruction, rename, setMaterialField, removeMaterial, removeConstruction, constructionUses, materialUses, schedulesOfType } = lib;
+  const name = Object.keys(epjson.Construction).find((n) => !n.endsWith('_FLIPPED') && layersOf(epjson.Construction[n]).length > 1);
+  const l0 = layersOf(epjson.Construction[name]);
+  edit(epjson, (tx) => moveLayer(tx, name, 0, 1));
+  assert.deepEqual(layersOf(epjson.Construction[name]), [l0[1], l0[0], ...l0.slice(2)]);
+  let m, c;
+  edit(epjson, (tx) => { m = newMaterial(tx, 'Material', 'Hemp'); setMaterialField(tx, m, 'conductivity', 0.04); c = newConstruction(tx, 'Hemp wall', [m]); });
+  assert.equal(materialUses(epjson, m), 1);
+  edit(epjson, (tx) => rename(tx, 'material', m, 'Hempcrete'));
+  assert.deepEqual(layersOf(epjson.Construction[c]), ['Hempcrete']);
+  const used = Object.values(epjson['BuildingSurface:Detailed'])[0].construction_name.replace(/_FLIPPED$/, '');
+  const n = constructionUses(epjson, used);
+  edit(epjson, (tx) => rename(tx, 'construction', used, 'Renamed'));
+  assert.equal(constructionUses(epjson, 'Renamed'), n);
+  assert.equal(importEpJSON(epjson).checks.filter((x) => x.level === 'error').length, 0);
+  assert.throws(() => edit(epjson, (tx) => removeConstruction(tx, 'Renamed')), /used by surfaces/);
+  edit(epjson, (tx) => { removeConstruction(tx, c); removeMaterial(tx, 'Hempcrete'); });
+  assert.equal(epjson.Material.Hempcrete, undefined);
+  assert.ok(schedulesOfType(epjson, 'Fraction').every((x) => !Object.keys(epjson.Zone).some((z) => x.includes(z))));
 });

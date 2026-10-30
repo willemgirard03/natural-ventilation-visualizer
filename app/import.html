@@ -35,6 +35,7 @@
       <span id="status" class="cbval">none</span>
       <span id="examples" hidden></span>
       <button type="button" class="minibtn" id="export" disabled title="Save the model as it stands, with the tool's changes, as .epJSON">Export</button>
+      <button type="button" class="minibtn" id="lib-open" disabled title="The model's materials and assemblies: their conductivities, resistances and layers, to change, add or rename">Materials &amp; assemblies</button>
       <button type="button" class="minibtn" id="edited" hidden title="Edits made to the model. Click, or Ctrl+Z, to undo the last; Ctrl+Y redoes it.">Edited</button></span>
     <span class="barsel"><span class="tipped" title="Hourly weather file (.epw) for the site: picking a date and time fills in the outdoor conditions">Weather file</span>
       <select id="weather-file"><option value="">none</option></select>
@@ -78,6 +79,7 @@
   <p class="stale" id="stale" hidden></p>
 </div>
 
+<div class="library" id="library" hidden></div>
 <main id="results" hidden>
   <section class="views">
     <div class="view" id="view3d">
