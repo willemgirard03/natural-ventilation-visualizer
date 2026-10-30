@@ -45,6 +45,11 @@ export function co2Color(ppm, out = new THREE.Color()) {
   return x <= mid ? out.lerpColors(CO2_STOPS[0], CO2_STOPS[1], (x - lo) / (mid - lo))
     : out.lerpColors(CO2_STOPS[1], CO2_STOPS[2], (x - mid) / (hi - mid));
 }
+// People per m2 this hour: pale for an empty room, through to deep violet at the scale's top.
+const EMPTY = new THREE.Color('#ECEAF2'), FULL = new THREE.Color('#5B3A8E');
+export function peopleColor(density, top, out = new THREE.Color()) {
+  return density <= 0 ? out.copy(EMPTY) : out.copy(EMPTY).lerp(FULL, 0.15 + 0.85 * Math.min(1, density / Math.max(1e-9, top)));
+}
 export const zoneColor = (i) => new THREE.Color().setHSL(((i * 137.508) % 360) / 360, 0.38, 0.64);
 
 // Pressure difference across a surface (Pa, inside minus outside at its height): blue where air is
@@ -196,8 +201,10 @@ export class View3D {
     this.pending = requestAnimationFrame(() => {
       this.pending = 0;
       this.sections?.beforeRender();
+      this.beforeRender?.();
       this.renderer.render(this.scene, this.camera);
       this.cube?.render();
+      this.onRender?.();
     });
   }
 
@@ -260,8 +267,9 @@ export class View3D {
     this.highlight = null;
   }
 
-  // doors: openings the tool adds (interior-doors.js), drawn on both sides of their wall.
-  setModel(model, { doors = [], walls = this.walls || 'thin' } = {}) {
+  // doors: openings the tool adds (interior-doors.js), drawn on both sides of their wall. keep: the
+  // same building edited, so the camera and the section planes stay as they are.
+  setModel(model, { doors = [], walls = this.walls || 'thin', keep = false } = {}) {
     this.clear();
     this.model = model;
     this.doors = doors;
@@ -302,6 +310,11 @@ export class View3D {
     this.edges = new THREE.LineSegments(this.edgesGeometry(), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
 
     this.group.add(this.front, this.back, this.glass, this.doorMesh, this.shading, this.edges, this.problemLayer());
+    if (keep) {
+      if (this.sections.planes.length) this.caps.update();
+      this.render();
+      return;
+    }
     this.sections.clear();
     this.frame();
   }
@@ -413,6 +426,10 @@ export class View3D {
       const c = this.co2?.[s.zone];
       return c === undefined ? NO_PRESSURE : co2Color(c);
     }
+    if (this.colorBy === 'people') {
+      const p = this.people?.values[s.zone];
+      return p === undefined ? NO_PRESSURE : peopleColor(p, this.people.top);
+    }
     return this.colorBy === 'zone' ? zoneColor(this.zoneIndex[s.zone] ?? 0) : TYPE_COLORS[s.csType] || TYPE_COLORS.Unknown;
   }
 
@@ -420,6 +437,12 @@ export class View3D {
   setPressures(values, range) {
     this.pressures = { values, range };
     if (this.colorBy === 'pressure') this.setColorBy('pressure');
+  }
+
+  // People per m2 in each zone this hour (by zone name) and the scale's top, for colouring by occupancy.
+  setPeople(values, top) {
+    this.people = { values, top };
+    if (this.colorBy === 'people') this.setColorBy('people');
   }
 
   // CO2 by zone name (ppm), for colouring by CO2.
@@ -566,6 +589,8 @@ export class View3D {
 
   pickAt(e) {
     this.sections.select(null);
+    const box = this.container.getBoundingClientRect();
+    this.lastPick = [e.clientX - box.left, e.clientY - box.top]; // where the selection's pop-up opens
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster();

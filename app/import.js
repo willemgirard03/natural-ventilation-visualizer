@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
-import { View3D, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE, co2Color, CO2_SCALE } from './view3d.js';
+import { View3D, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE, co2Color, CO2_SCALE, peopleColor } from './view3d.js';
 import { footprintAxis, toAirflowNetwork } from '../src/model/airflow-network.js';
 import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
@@ -18,7 +18,14 @@ import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { readZoneResultsStream, zoneAt, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
-import { daylightSavingDays } from '../src/model/schedules.js';
+import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
+import { constructionProperties } from '../src/model/constructions.js';
+import {
+  edit, windowRect, rectProblem, clampRect, setWindowRect, setSurfaceConstruction, copyConstruction, setLayer, addLayer, removeLayer,
+  layersOf, baseConstruction, materialType, setZoneSetting, zoneSettings, schedulesOfType,
+} from '../src/model/edit.js';
+import { ZoneLabels } from './zonelabels.js';
+import { WindowEditor } from './winedit.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -44,6 +51,20 @@ const slices = new FieldSlices(view);
 air.setVisible($('show-air').checked);
 slices.timeScale = Number($('cut-speed').value);
 view.setProjection($('projection').querySelector('[aria-pressed="true"]').dataset.proj);
+// Zone labels select a whole zone; a click on a surface selects the surface.
+const labels = new ZoneLabels(view, (zone) => view.select(zone));
+labels.setVisible($('show-labels').checked);
+$('show-labels').addEventListener('change', (e) => labels.setVisible(e.target.checked));
+// A window's sill, head and jambs pushed and pulled in the view, and the window dragged across its wall.
+const winEdit = new WindowEditor(view, {
+  rectOf: (name) => (model ? windowRect(model, name) : null),
+  problem: (name, r) => rectProblem(model, name, r),
+  clamp: (name, r) => clampRect(model, name, r),
+  floorOf: (name) => model.zones[model.windows[name].zone].bottom,
+  onCommit: (name, r) => applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true }),
+});
+view.onRender = () => labels.update();
+view.beforeRender = () => winEdit.beforeRender();
 let sliceRange = null, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
 // room's own temperature. Throttled, since the simulation posts several steps a second.
@@ -185,6 +206,7 @@ function solveAir() {
     windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
   };
   const conditions = conditionsAt(hourAt, outdoor, site);
+  view.setPeople(peopleNow(hourAt), peopleTop());
   const mode = $('windows').value;
   // Surfaces' inside temperatures this hour, where the results have them (the tool's reruns do).
   conditions.surfaceT = {};
@@ -227,11 +249,11 @@ function solveAir() {
   })));
   $('windows-reset').hidden = !windowSet.size && !roomSet.size;
   // With a results file, temperatures belong to the results' own window states.
-  const differs = results && (mode !== 'results' || [...windowSet.keys()].some((n) => !n.endsWith(':door')) || roomSet.size);
+  const differs = results && (modelEdited || mode !== 'results' || [...windowSet.keys()].some((n) => !n.endsWith(':door')) || roomSet.size);
   $('stale').hidden = !differs;
   if (differs && !rerunning) {
     const [a, b] = rerunWeek();
-    $('stale').innerHTML = `Windows differ from ${esc(results.name)}. Room temperatures are still the ones it recorded with its own windows, so the stack effect and two-way flows use temperatures that these windows would change over the following hours. `
+    $('stale').innerHTML = `${modelEdited ? 'The model has been edited since' : 'Windows differ from'} ${esc(results.name)}. Room temperatures are still the ones it recorded with its own windows, so the stack effect and two-way flows use temperatures that these windows would change over the following hours. `
       + (runner ? `<button class="quiet" id="rerun">Rerun ${esc(dateOf(a).label)}–${esc(dateOf(b).label)} in EnergyPlus</button> (about 20 s, with these windows and doors)`
         : 'Running EnergyPlus again, with these windows and doors, needs the tool on this computer.');
   }
@@ -412,6 +434,7 @@ async function rerun(year = false) {
     }
     const merged = year ? week : mergeResults(results, week, hourIndex(a, 1));
     windowSet.clear(); roomSet.clear(); // the run now holds these choices
+    modelEdited = false; // and the model as it is
     $('windows').value = 'results';
     clearInterval(tick);
     rerunning = false;
@@ -470,7 +493,7 @@ $('info').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-act]');
   if (b?.dataset.act === 'plane-flip') { view.sections.flip(view.sections.selected); return; }
   if (b?.dataset.act === 'plane-delete') { view.sections.remove(view.sections.selected); return; }
-  if (!b || !airflow) return;
+  if (!b || !airflow || !['window', 'room'].includes(b.dataset.act)) return;
   if (b.dataset.act === 'window') windowSet.set(b.dataset.name, b.dataset.open === '1');
   if (b.dataset.act === 'room') {
     roomSet.set(b.dataset.zone, b.dataset.open === '1');
@@ -492,8 +515,10 @@ $('info').addEventListener('click', (e) => {
 // Sashes: one window's type or hinge from its details, or all of them from the Sashes setting.
 $('info').addEventListener('change', (e) => {
   if (e.target.dataset?.act !== 'sash') return;
-  sashSet.set(e.target.dataset.name, { ...sashSet.get(e.target.dataset.name), type: e.target.value });
-  amountSet.delete(e.target.dataset.name); // a new mechanism: back to the amount that frees the model's fraction
+  for (const n of scopeOf(e.target.dataset.name)) {
+    sashSet.set(n, { ...sashSet.get(n), type: e.target.value });
+    amountSet.delete(n); // a new mechanism: back to the amount that frees the model's fraction
+  }
   solveAir();
   showInfo(current());
 });
@@ -510,8 +535,7 @@ $('sash-type').addEventListener('change', () => { sashSet.clear(); amountSet.cle
 $('info').addEventListener('input', (e) => {
   if (e.target.dataset?.act !== 'amount') return;
   const name = e.target.dataset.name, a = Number(e.target.value) / 100, l = net.links.find((x) => x.name === name);
-  amountSet.set(name, a);
-  windowSet.set(name, a > 0);
+  for (const n of scopeOf(name)) { amountSet.set(n, a); windowSet.set(n, a > 0); }
   solveAir();
   const out = $('info').querySelector(`output[data-for="${CSS.escape(name)}"]`);
   if (out) out.textContent = amountText(l);
@@ -721,44 +745,101 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
   });
 }).catch(() => {});
 
-// Details of the selected surface, window, zone or shading surface, and any checks that name it.
+// The selected surface, window, zone, door or section plane, in a pop-up beside where it was picked
+// (as the Solar Shading Explorer's): its settings to change, the air through it, and any checks that
+// name it. The pop-up stays where it is (or where it was dragged) while the same thing is selected.
+let popKey = null, popMin = false, layersOpen = false;
 function showInfo(found) {
   const box = $('info');
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
-  if (!found) { box.hidden = true; box.dataset.kind = ''; return; }
-  const { kind, item } = found;
+  labels.select(found?.kind === 'zone' ? found.item.name : null);
+  if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
+  if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; return; }
+  const { kind, item } = found, key = `${kind}:${item.name}`;
+  // Not redrawn under a figure being typed, unless the selection changed.
+  if (key === popKey && box.contains(document.activeElement) && document.activeElement.matches('input:not([type=range]), select')) return;
+  const { title, rows } = popContent(kind, item);
   box.dataset.kind = kind;
+  box.innerHTML = `<div class="pophd" title="Drag to move"><span class="popttl">${title}</span><span class="popbtns">`
+    + `<button type="button" data-pop="min" title="${popMin ? 'Show the details' : 'Fold the details away'}">${popMin ? '▸' : '–'}</button>`
+    + '<button type="button" data-pop="close" title="Close (Esc)">×</button></span></div>'
+    + `<div class="popbody"${popMin ? ' hidden' : ''}>${rows.map((r) => (r.startsWith('<div') ? r : `<div>${r}</div>`)).join('')}</div>`;
+  box.hidden = false;
+  if (key !== popKey) { popKey = key; placePop(); }
+}
+
+// Beside the point picked, inside the view.
+function placePop() {
+  const box = $('info'), v = $('viewer'), at = view.lastPick;
+  if (!at) { Object.assign(box.style, { left: '10px', top: '', bottom: '10px' }); return; }
+  const w = box.offsetWidth, h = box.offsetHeight, W = v.clientWidth, H = v.clientHeight;
+  const x = Math.max(8, Math.min(at[0] + 16, W - w - 8)), y = Math.max(8, Math.min(at[1] + 12, H - h - 8));
+  Object.assign(box.style, { left: `${x}px`, top: `${y}px`, bottom: '' });
+}
+$('info').addEventListener('pointerdown', (e) => {
+  const hd = e.target.closest('.pophd');
+  if (!hd || e.target.closest('button') || e.button !== 0) return;
+  const box = $('info'), x0 = e.clientX - box.offsetLeft, y0 = e.clientY - box.offsetTop;
+  const move = (m) => Object.assign(box.style, { left: `${m.clientX - x0}px`, top: `${m.clientY - y0}px`, bottom: '' });
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', () => window.removeEventListener('pointermove', move), { once: true });
+});
+$('info').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-pop]');
+  if (!b) return;
+  if (b.dataset.pop === 'close') { winEdit.stop(); view.sections.select(null); view.select(null); return; }
+  popMin = !popMin;
+  showInfo(current());
+});
+
+// A heading inside the pop-up.
+const popSec = (t, tip = '') => `<div class="popsec"${tip ? ` title="${esc(tip)}"` : ''}>${t}</div>`;
+// A figure that can be typed over: a setting of the model, applied when Enter is pressed or it is left.
+const popNum = (key, value, unit, tip, digits = 2, extra = '') => `<span class="popv"><input class="popnum" data-zset="${key}"${extra} value="${value === null || value === undefined ? '' : +Number(value).toFixed(digits)}" ${value === null || value === undefined ? 'disabled placeholder="–"' : ''} title="${esc(tip)}"> ${unit}</span>`;
+
+function popContent(kind, item) {
   const rows = [];
+  const deg = (x) => (x === null ? '' : `${Math.round(x)}°`);
   if (kind === 'plane') {
     const plan = item.kind === 'plan';
-    rows.push(`<b>${esc(item.name)}</b>`,
-      plan ? `Removes what is ${item.flip ? 'below' : 'above'} it, within its bounds` : `Removes the ${compass(frameOf(item).n)} side, within its bounds`,
+    rows.push(plan ? `Removes what is ${item.flip ? 'below' : 'above'} it, within its bounds` : `Removes the ${compass(frameOf(item).n)} side, within its bounds`,
       `<span class="muted">Drag its outline to move it, the gumball's arrows to move it along x, y or z (click one to type a distance), its arc to turn it, the squares to resize its bounds. Delete removes it.</span>`,
       `<button class="quiet" data-act="plane-flip">Flip</button> <button class="quiet" data-act="plane-delete">Delete</button>`);
-    box.innerHTML = rows.map((r) => `<div>${r}</div>`).join('');
-    box.hidden = false;
-    return;
+    return { title: esc(item.name), rows };
   }
-  const deg = (x) => (x === null ? '' : `${Math.round(x)}°`);
+  let title;
   if (kind === 'surface') {
-    rows.push(`<b>${esc(item.name)}</b>`, `${esc(item.csType)} of zone ${esc(item.zone)}`,
-      `${fmt(item.area, 2)} m² · ${item.azimuth === null ? (item.tilt < 90 ? 'faces up' : 'faces down') : `faces ${deg(item.azimuth)} from north`} · tilt ${deg(item.tilt)}`,
-      esc(item.construction));
+    title = `${esc(item.csType)} · ${esc(item.zone)}`;
+    rows.push(`<span class="muted">${esc(item.name)}</span>`,
+      `${fmt(item.area, 2)} m² · ${item.azimuth === null ? (item.tilt < 90 ? 'faces up' : 'faces down') : `faces ${deg(item.azimuth)} from north`} · tilt ${deg(item.tilt)}`);
     if (item.adjacentZone) rows.push(`Shared with zone ${esc(item.adjacentZone)}`);
+    rows.push(...assemblyRows(item));
   } else if (kind === 'window') {
-    rows.push(`<b>${esc(item.name)}</b>`, `Window of zone ${esc(item.zone)}, on ${esc(item.parent)}`,
-      `${fmt(item.area, 2)} m² · faces ${deg(item.azimuth)} from north · ${fmt(item.height, 2)} m tall`,
+    const r = windowRect(model, item.name), floor = model.zones[item.zone].bottom;
+    title = `Window · ${dirWord(item.azimuth)} · level ${levelOf(item) + 1}`;
+    rows.push(`<span class="muted">${esc(item.name)}, ${esc(item.zone)}</span>`,
+      r ? `${fmt(r.s1 - r.s0, 2)} × ${fmt(r.z1 - r.z0, 2)} m, sill ${fmt(r.z0 - floor, 2)} m · ${fmt(item.area, 2)} m²` : `${fmt(item.area, 2)} m² · ${fmt(item.height, 2)} m tall`,
       item.operableFraction ? `Operable fraction ${fmt(item.operableFraction.value, 2)}` : 'Not operable');
+    if (r) rows.push(`<button class="pbtn${winEdit.name === item.name ? ' on' : ''}" data-act="winedit" title="${winEdit.name === item.name ? 'Back to the building: the handles go (Esc)' : 'Its sill, head and jambs get handles in the view to push or pull; drag the glass to move it across its wall; click a handle or a figure to type it'}">${winEdit.name === item.name ? 'Done' : 'Edit window in 3D'}</button>`);
   } else if (kind === 'door') {
-    rows.push(`<b>Door between ${esc(item.zone)} and ${esc(item.partnerZone)}</b>`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m`,
+    title = 'Door';
+    rows.push(`Between ${esc(item.zone)} and ${esc(item.partnerZone)}`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m`,
       '<span class="muted">Added by the tool for the airflow network; the model has no interior openings here.</span>');
   } else if (kind === 'zone') {
-    rows.push(`<b>Zone ${esc(item.name)}</b>`, `${fmt(item.floorArea.value, 1)} m² floor · ${fmt(item.volume.value, 0)} m³ · ${fmt(item.height, 2)} m high`);
+    title = `Zone · ${esc(item.name)}`;
+    rows.push(`${fmt(item.floorArea.value, 1)} m² floor · ${fmt(item.volume.value, 0)} m³ · ${fmt(item.height, 2)} m high`);
+    rows.push(...zoneRows(item));
   } else {
-    rows.push(`<b>${esc(item.name)}</b>`, 'Shading surface');
+    title = 'Shading surface';
+    rows.push(esc(item.name));
   }
   if (airflow) {
-    rows.push(...airLines(kind, item));
+    const air = airLines(kind, item);
+    if (air.length) rows.push(popSec(kind === 'window' ? 'Opening' : 'Air'), ...air);
+    if (kind === 'window' && air.length) {
+      rows.push(`<div class="poprow"><label class="chk" title="The window type and opening amount set here go to every window on this window's level, on all sides of the building"><input type="checkbox" data-apply="sides"${applyAll.sides ? ' checked' : ''}> Apply to all sides</label>`
+        + `<label class="chk" title="The window type and opening amount set here go to the windows on this side of the building on every level"><input type="checkbox" data-apply="levels"${applyAll.levels ? ' checked' : ''}> Apply to all levels</label></div>`);
+    }
     if (kind === 'zone') rows.push(...roomButton(item.name));
     if (kind === 'surface' || kind === 'window') rows.push(`Room: ${co2Line(item.zone)}`);
     if (kind === 'surface') rows.push(...roomButton(item.zone));
@@ -767,8 +848,82 @@ function showInfo(found) {
     const cls = c.level === 'error' ? 'error-text' : c.level === 'warning' ? 'warning-text' : 'muted';
     rows.push(`<span class="${cls}">${esc(c.message)}</span>`);
   }
-  box.innerHTML = rows.map((r) => `<div>${r}</div>`).join('');
-  box.hidden = false;
+  return { title, rows };
+}
+
+const dirWord = (az) => (az === null || az === undefined ? 'skylight' : ['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west'][Math.round(az / 45) % 8]);
+
+// Surface films (inside + outside, m2.K/W, ISO 6946) for a construction's U-value by surface type.
+const FILMS = { wall: 0.13 + 0.04, floor: 0.17 + 0.04, roof: 0.1 + 0.04, ceiling: 0.1 + 0.04 };
+const materialNames = () => ['Material', 'Material:NoMass', 'Material:AirGap'].flatMap((t) => Object.keys(model.epjson[t] || {})).sort();
+
+// A surface's assembly: the construction it takes (any of the model's opaque ones), its R and U, and
+// its layers to change, outside first. Changing a layer changes every surface with that assembly;
+// a copy gives this surface one of its own.
+function assemblyRows(s) {
+  const ep = model.epjson, base = baseConstruction(s.construction), c = constructionProperties(ep, base);
+  const users = Object.values(model.surfaces).filter((x) => baseConstruction(x.construction) === base).length;
+  const opts = Object.keys(ep.Construction || {}).filter((n) => !n.endsWith('_FLIPPED') && !constructionProperties(ep, n)?.glazing).sort()
+    .map((n) => `<option${n === base ? ' selected' : ''}>${esc(n)}</option>`).join('');
+  const rows = [popSec('Assembly', 'The construction of this surface. Partitions and slabs shared by two zones take it on both sides, reversed on the other.'),
+    `<select class="popsel wide" data-act="construction" title="Give this surface another of the model's assemblies">${opts}</select>`];
+  if (c) {
+    const film = FILMS[String(s.surfaceType).toLowerCase()] ?? 0.17;
+    rows.push(`R ${fmt(c.R, 2)} m²·K/W · U ${c.R === null ? '–' : fmt(1 / (c.R + film), 3)} W/m²·K · ${fmt((c.thickness || 0) * 1000, 0)} mm · <span title="Surfaces with this assembly (both sides of shared ones count)">${users} surface${users === 1 ? '' : 's'}</span>`);
+    rows.push(`<button class="pbtn more" data-act="layers" aria-expanded="${layersOpen}">${layersOpen ? 'Layers ▴' : 'Layers ▸'}</button>`);
+    if (layersOpen) {
+      const mats = materialNames();
+      layersOf(ep.Construction[base]).forEach((m, i) => {
+        const thick = materialType(ep, m) === 'Material';
+        rows.push(`<div class="poplayer"><span class="lnum" title="${i ? `Layer ${i + 1} from outside` : 'Outside layer'}">${i + 1}</span>`
+          + `<select class="popsel" data-act="layer-mat" data-i="${i}" title="${esc(m)}">${mats.map((n) => `<option${n === m ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`
+          + (thick ? `<input class="popnum" data-act="layer-thk" data-i="${i}" value="${+(ep.Material[m].thickness * 1000).toFixed(1)}" title="Thickness, mm"> mm` : '<span class="muted" title="A layer without mass: a resistance only">R only</span>')
+          + `<button type="button" class="pbtn x" data-act="layer-del" data-i="${i}" title="Take this layer out">×</button></div>`);
+      });
+      rows.push(`<div class="poprow"><button class="pbtn" data-act="layer-add" title="A layer added on the inside, a copy of the innermost one's material">Add layer</button>`
+        + `<span class="muted">${users > 1 ? `Changes all ${users} surfaces with this assembly` : 'Outside layer first'}</span></div>`,
+        `<div class="poprow"><input class="popname" data-act="copy-name" placeholder="${esc(base)} copy" title="A name for the copy: Tab takes the one suggested"><button class="pbtn" data-act="copy" title="A copy of this assembly, with its own materials, given to this surface only (and its other side)">Copy for this surface</button></div>`);
+    }
+  }
+  return rows;
+}
+
+// A zone's settings, read from its objects, each typed over: occupancy with its schedule through the
+// day picked, lights, equipment, outdoor air, infiltration and when its windows open.
+function zoneRows(z) {
+  const ep = model.epjson, s = zoneSettings(ep, z.name), rows = [];
+  const hourAt = hourIndex(Number($('day').value), Number($('hour').value)), dayStart = hourIndex(Number($('day').value), 1);
+  rows.push(popSec('Occupancy', 'People in the zone: a peak density, and a schedule of the fraction present each hour'));
+  rows.push(`${popNum('peoplePerArea', s.peoplePerArea, 'people/m²', 'Peak people per square metre of floor', 4)}`
+    + (z.people ? ` · ${fmt(s.peoplePerArea ? 1 / s.peoplePerArea : null, 1)} m²/person` : ''));
+  if (s.peopleSchedule) {
+    const opts = schedulesOfType(ep, 'Fraction').map((n) => `<option${n === s.peopleSchedule ? ' selected' : ''}>${esc(n)}</option>`).join('');
+    rows.push(`<select class="popsel wide" data-zset="peopleSchedule" title="The fraction of the peak present each hour">${opts}</select>`);
+    const values = scheduleValues(s.peopleSchedule);
+    if (values) {
+      const day = Array.from({ length: 24 }, (_, h) => values[dayStart + h] ?? 0), now = values[hourAt] ?? 0;
+      const people = (z.people?.density.value || 0) * z.floorArea.value * now;
+      rows.push(`<div class="popday" title="The fraction present through ${esc(dateOf(Number($('day').value)).label)}, hour by hour; the hour picked is darker">${daySpark(day, hourAt - dayStart)}</div>`,
+        `${fmt(people, 1)} people now (${fmt(100 * now, 0)}% of peak)`);
+    }
+  }
+  rows.push(popSec('Loads'),
+    `<span class="popkv"><span>Lights</span>${popNum('lightsPerArea', s.lightsPerArea, 'W/m²', 'Lighting power per square metre of floor, at full use', 2)}</span>`,
+    `<span class="popkv"><span>Equipment</span>${popNum('equipmentPerArea', s.equipmentPerArea, 'W/m²', 'Equipment power per square metre of floor, at full use', 2)}</span>`);
+  rows.push(popSec('Ventilation', 'Mechanical: the outdoor air the zone\'s ideal loads supply (people and floor area add up). Infiltration: air leaking in, as air changes per hour. Natural: windows open when the room is warmer than this.'),
+    `<span class="popkv"><span>Outdoor air</span>${popNum('outdoorAirPerPerson', s.outdoorAirPerPerson === null ? null : s.outdoorAirPerPerson * 1000, 'L/s·person', 'Mechanical outdoor air per person', 2, ' data-scale="0.001"')}</span>`,
+    `<span class="popkv"><span></span>${popNum('outdoorAirPerArea', s.outdoorAirPerArea === null ? null : s.outdoorAirPerArea * 1000, 'L/s·m²', 'Mechanical outdoor air per square metre of floor', 3, ' data-scale="0.001"')}</span>`,
+    `<span class="popkv"><span>Infiltration</span>${popNum('infiltrationAch', s.infiltrationAch, 'ach', 'Air changes per hour leaking in', 3)}</span>`,
+    `<span class="popkv"><span>Windows open above</span>${popNum('ventMinIndoor', s.ventMinIndoor, '°C', 'Natural ventilation: the room temperature above which its windows open', 1)}</span>`);
+  return rows;
+}
+
+// 24 bars, one an hour, as high as the fraction present; the hour picked darker.
+function daySpark(day, now) {
+  const w = 7, h = 26;
+  return `<svg width="${24 * w}" height="${h + 10}" viewBox="0 0 ${24 * w} ${h + 10}" aria-hidden="true">`
+    + day.map((f, i) => `<rect x="${i * w + 0.5}" y="${h - Math.max(0.5, f * h)}" width="${w - 1.5}" height="${Math.max(0.5, f * h)}" class="${i === now ? 'now' : ''}"/>`).join('')
+    + [0, 6, 12, 18].map((x) => `<text x="${x * w}" y="${h + 9}">${x}</text>`).join('') + '</svg>';
 }
 
 const CO2_HELP = `The mean over this hour, from a balance over the airflow network run through the ${CO2_HOURS} hours before: the people in the model's schedules breathing out CO2, outdoor air coming in through windows, leaks and any ventilation equipment, and air passing between rooms. Windows and doors are held as set now for those hours. Outdoor air is about 400 ppm; above 1000 ppm rooms feel stuffy.`;
@@ -843,6 +998,9 @@ function legend() {
       const [lo, mid, hi] = CO2_SCALE;
       items.push(`<span title="${esc(CO2_HELP)} Each zone's surfaces take its colour.">${ramp([co2Color(lo), co2Color(mid), co2Color(hi)], 48)}CO₂ ${lo} … ${mid} … ${hi}+ ppm</span>`);
     } else items.push('<span class="muted">CO₂ needs the airflow on</span>');
+  } else if ($('color-by').value === 'people') {
+    const top = peopleTop();
+    items.push(`<span title="People per square metre of floor in each zone this hour: its peak density times its occupancy schedule's fraction now. Pale: nobody there.">${ramp([peopleColor(0, top), peopleColor(top / 2, top), peopleColor(top, top)], 48)}Occupancy 0 … ${fmt(top, 2)} people/m² this hour</span>`);
   } else if ($('color-by').value === 'zone') {
     Object.keys(model.zones).forEach((z, i) => items.push(chip(`#${zoneColor(i).getHexString()}`, z)));
   } else {
@@ -1110,7 +1268,8 @@ document.addEventListener('pointerdown', (e) => {
   for (const d of document.querySelectorAll('details.dd[open]')) if (!d.contains(e.target)) d.open = false;
 });
 
-function render(m) {
+// The model's details below the view: summary, checks, zones, surfaces and constructions.
+function fillDetails(m) {
   const zones = Object.values(m.zones);
   const windows = Object.values(m.windows);
   const ventilated = zones.filter((z) => z.ventilation);
@@ -1167,10 +1326,17 @@ function render(m) {
       <td>${c.C === null ? '<span class="muted">–</span>' : fmt(c.C / 1000, 0)}</td>
       <td>${c.uFactor === undefined ? '<span class="muted">–</span>' : fmt(c.uFactor, 3)}</td>
       <td>${(uses[c.name] || 0) + (uses[c.name + '_FLIPPED'] || 0)}</td></tr>`).join('');
+}
 
+function render(m) {
+  fillDetails(m);
+  winEdit.stop();
+  undoStack.length = 0; redoStack.length = 0; modelEdited = false; axisCache = null; schedCache.clear();
+  $('edited').hidden = true;
   $('results').hidden = false;
   view.resize();
   view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value });
+  labels.setModel(m);
   net = buildNetwork(m);
   rooms = prepareRoomFlow(voxelize(m), net, m);
   field = null;
@@ -1190,6 +1356,149 @@ function render(m) {
   view.select(null);
   legend();
 }
+
+// ---------- editing the model ----------
+// Each edit changes the .epJSON (src/model/edit.js); the model is read again from it and everything
+// drawn and solved is rebuilt, keeping the camera, the cuts, the selection and the results (which
+// are then stale: their room temperatures were recorded for the model as it was).
+const undoStack = [], redoStack = [];
+let modelEdited = false;
+// geometry: the edit moves or resizes something, so the room air's cells are laid out again (about a
+// second for Example_02); settings and assemblies keep them.
+function applyEdit(change, what, { geometry = false } = {}) {
+  if (!model) return false;
+  let e;
+  try { e = edit(model.epjson, (tx) => change(tx, model)); } catch (err) { popMessage(err.message); return false; }
+  if (!e.changed) return false;
+  undoStack.push({ ...e, what, geometry });
+  if (undoStack.length > 100) undoStack.shift();
+  redoStack.length = 0;
+  refreshModel(geometry);
+  return true;
+}
+function undo() { const e = undoStack.pop(); if (!e) return; e.undo(); redoStack.push(e); refreshModel(e.geometry); }
+function redo() { const e = redoStack.pop(); if (!e) return; e.redo(); undoStack.push(e); refreshModel(e.geometry); }
+function popMessage(text) {
+  const body = $('info').querySelector('.popbody');
+  if (body) body.insertAdjacentHTML('afterbegin', `<div class="error-text popmsg">${esc(text)}</div>`);
+}
+function refreshModel(geometry = true) {
+  const keep = selected, keepPlane = view.sections.selected;
+  const m = importEpJSON(model.epjson, { fileName: model.source.fileName });
+  model = m;
+  modelEdited = true;
+  axisCache = null; schedCache.clear();
+  fillDetails(m);
+  view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value, keep: true });
+  labels.setModel(m);
+  if (geometry) {
+    net = buildNetwork(m);
+    rooms = prepareRoomFlow(voxelize(m), net, m);
+  }
+  field = null;
+  startGrid(m);
+  air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
+  for (const map of [windowSet, sashSet, amountSet]) for (const k of [...map.keys()]) if (!m.windows[k] && !k.endsWith(':door')) map.delete(k);
+  view.setColorBy($('color-by').value);
+  view.setShadingVisible($('show-shading').checked);
+  $('edited').hidden = false;
+  $('edited').textContent = `Edited (${undoStack.length})`;
+  applyHour(); // solves the air with the model as it is now
+  if ($('show-air').checked) air.play();
+  winEdit.refresh();
+  if (keepPlane) view.sections.select(keepPlane); else view.select(keep);
+  legend();
+}
+document.addEventListener('keydown', (e) => {
+  if (!model || e.target.closest?.('input, select, textarea')) return;
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && k === 'z' && !e.shiftKey) { undo(); e.preventDefault(); }
+  else if ((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))) { redo(); e.preventDefault(); }
+  else if (e.key === 'Escape' && !view.sections.selected && !$('view3d').classList.contains('full')) {
+    if (winEdit.active) { winEdit.stop(); showInfo(current()); } else if (selected) view.select(null);
+  }
+});
+$('edited').addEventListener('click', undo);
+
+// Settings typed in the pop-up: a zone's, a layer's thickness; Tab in a name box takes its suggestion.
+$('info').addEventListener('change', (e) => {
+  const t = e.target, zone = selected && model.zones[selected] ? selected : null;
+  if (t.dataset.zset && zone) {
+    const v = t.tagName === 'SELECT' ? t.value : Number(String(t.value).replace(',', '.')) * Number(t.dataset.scale || 1);
+    if (t.tagName !== 'SELECT' && !(Number.isFinite(v) && v >= 0)) { showInfo(current()); return; }
+    applyEdit((tx) => setZoneSetting(tx, zone, t.dataset.zset, v), `zone ${zone} ${t.dataset.zset}`);
+    return;
+  }
+  const s = selected && model.surfaces[selected];
+  if (!s) return;
+  const base = baseConstruction(s.construction);
+  if (t.dataset.act === 'construction') applyEdit((tx, m) => setSurfaceConstruction(tx, m, s.name, t.value), `assembly of ${s.name}`);
+  else if (t.dataset.act === 'layer-mat') applyEdit((tx) => setLayer(tx, base, Number(t.dataset.i), { material: t.value }), `layer of ${base}`);
+  else if (t.dataset.act === 'layer-thk') {
+    const mm = Number(String(t.value).replace(',', '.'));
+    if (mm > 0) applyEdit((tx) => setLayer(tx, base, Number(t.dataset.i), { thickness: mm / 1000 }), `layer of ${base}`);
+    else showInfo(current());
+  }
+});
+$('info').addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (e.key === 'Enter' && t.matches('input.popnum')) t.blur();
+  if (e.key === 'Tab' && t.matches('input.popname') && !t.value) { t.value = t.placeholder; e.preventDefault(); }
+  if (e.key === 'Enter' && t.matches('input.popname')) $('info').querySelector('[data-act=copy]')?.click();
+  e.stopPropagation();
+});
+$('info').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-act]');
+  if (!b || !model) return;
+  const s = selected && model.surfaces[selected], base = s && baseConstruction(s.construction);
+  const act = b.dataset.act;
+  if (act === 'layers') { layersOpen = !layersOpen; showInfo(current()); }
+  else if (act === 'layer-del' && s) applyEdit((tx) => removeLayer(tx, base, Number(b.dataset.i)), `layer of ${base}`);
+  else if (act === 'layer-add' && s) applyEdit((tx) => { const l = layersOf(tx.epjson.Construction[base]); addLayer(tx, base, l.length, l[l.length - 1]); }, `layer of ${base}`);
+  else if (act === 'copy' && s) {
+    const box = $('info').querySelector('[data-act=copy-name]'), name = (box.value || box.placeholder).trim();
+    if (name) applyEdit((tx, m) => { copyConstruction(tx, base, name); setSurfaceConstruction(tx, m, s.name, name); }, `copy of ${base}`);
+  } else if (act === 'winedit' && model.windows[selected]) {
+    if (winEdit.name === selected) winEdit.stop(); else winEdit.start(selected);
+    showInfo(current());
+  }
+});
+$('info').addEventListener('change', (e) => {
+  const a = e.target.dataset?.apply;
+  if (a) applyAll[a] = e.target.checked;
+});
+
+// Windows on a level, and on a side of the building: for Apply to all sides and Apply to all levels.
+const applyAll = { sides: false, levels: false };
+let axisCache = null;
+const sideOf = (w) => {
+  axisCache ??= footprintAxis(model).azimuth;
+  return Math.round(((((w.azimuth ?? 0) - axisCache) % 360) + 360) % 360 / 90) % 4;
+};
+function levelOf(w) {
+  const floors = [...new Set(Object.values(model.zones).map((z) => Math.round(z.bottom * 2) / 2))].sort((a, b) => a - b);
+  return floors.indexOf(Math.round(model.zones[w.zone].bottom * 2) / 2);
+}
+// The operable windows a change to one window's type or opening goes to.
+function scopeOf(name) {
+  const w = model.windows[name];
+  if (!w || (!applyAll.sides && !applyAll.levels)) return [name];
+  return net.links.filter((l) => l.control === 'zone' && model.windows[l.name]).map((l) => l.name).filter((n) => {
+    const x = model.windows[n];
+    return n === name || ((applyAll.sides || sideOf(x) === sideOf(w)) && (applyAll.levels || levelOf(x) === levelOf(w)));
+  });
+}
+
+// Occupancy: the people per m2 in each zone this hour, from its peak density and schedule.
+const schedCache = new Map();
+function scheduleValues(name) {
+  if (!schedCache.has(name)) schedCache.set(name, hourlyValues(model.epjson, name));
+  return schedCache.get(name);
+}
+function peopleNow(hourAt) {
+  return Object.fromEntries(Object.values(model.zones).map((z) => [z.name, z.people ? z.people.density.value * (scheduleValues(z.people.schedule)?.[hourAt] ?? 1) : 0]));
+}
+const peopleTop = () => Math.max(0.02, ...Object.values(model.zones).map((z) => z.people?.density.value || 0));
 
 $('checks').addEventListener('click', (e) => {
   const name = e.target.dataset?.name;
@@ -1212,7 +1521,7 @@ $('export').addEventListener('click', () => {
   const blob = new Blob([serializeEpJSON(exportEpJSON(model))], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = (model.source.fileName || 'model').replace(/\.(epjson|json)$/i, '') + '_export.epJSON';
+  a.download = (model.source.fileName || 'model').replace(/\.(epjson|json)$/i, '') + (modelEdited || undoStack.length ? '_edited' : '_export') + '.epJSON';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });

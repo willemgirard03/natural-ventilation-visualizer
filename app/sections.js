@@ -470,23 +470,7 @@ for (int i = 0; i < ${MAX}; i++) {
   // arrow or the outline, an angle on the arc, a size on a grip. apply(number) changes the plane;
   // zero is ignored unless zeroOk. Enter or leaving the box applies it, Esc cancels.
   ask(e, placeholder, apply, zeroOk = false) {
-    const input = document.createElement('input');
-    input.className = 'floatedit';
-    input.placeholder = placeholder;
-    const r = this.view.container.getBoundingClientRect();
-    Object.assign(input.style, { left: `${e.clientX - r.left + 10}px`, top: `${e.clientY - r.top - 12}px` });
-    this.view.container.appendChild(input);
-    setTimeout(() => input.focus()); // after the click that opened it
-    let done = false;
-    const finish = (keep) => {
-      if (done) return;
-      done = true;
-      const text = input.value.trim(), x = Number(text.replace(',', '.'));
-      input.remove();
-      if (keep && text && Number.isFinite(x) && (x || zeroOk)) { apply(x); this.changed(); }
-    };
-    input.addEventListener('keydown', (k) => { if (k.key === 'Enter') finish(true); if (k.key === 'Escape') finish(false); k.stopPropagation(); });
-    input.addEventListener('blur', () => finish(true));
+    askNumber(this.view.container, e, placeholder, (x) => { apply(x); this.changed(); }, zeroOk);
   }
 
   // ---------- placing a new plane: dragged in from the bar, or a click on the button then on the view ----------
@@ -587,7 +571,29 @@ function segmentDistance(p, a, b) {
 // A grip: a square with the panel's fill and the editing colour's outline (9 px, as in the Solar
 // Shading Explorer's sheets).
 let gripTex = null;
-function gripTexture() {
+// A box to type a figure in, beside the pointer in a view's container; apply(number) on Enter or on
+// leaving the box, Esc cancels. Zero is ignored unless zeroOk.
+export function askNumber(container, e, placeholder, apply, zeroOk = false) {
+  const input = document.createElement('input');
+  input.className = 'floatedit';
+  input.placeholder = placeholder;
+  const r = container.getBoundingClientRect();
+  Object.assign(input.style, { left: `${e.clientX - r.left + 10}px`, top: `${e.clientY - r.top - 12}px` });
+  container.appendChild(input);
+  setTimeout(() => input.focus()); // after the click that opened it
+  let done = false;
+  const finish = (keep) => {
+    if (done) return;
+    done = true;
+    const text = input.value.trim(), x = Number(text.replace(',', '.'));
+    input.remove();
+    if (keep && text && Number.isFinite(x) && (x || zeroOk)) apply(x);
+  };
+  input.addEventListener('keydown', (k) => { if (k.key === 'Enter') finish(true); if (k.key === 'Escape') finish(false); k.stopPropagation(); });
+  input.addEventListener('blur', () => finish(true));
+}
+
+export function gripTexture() {
   if (gripTex) return gripTex;
   const c = document.createElement('canvas');
   c.width = c.height = 36;
