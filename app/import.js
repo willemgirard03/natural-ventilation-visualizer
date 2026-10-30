@@ -18,6 +18,7 @@ import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js'
 import { readZoneResultsStream, zoneAt, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
+import { unitNormal } from '../src/model/geometry.js';
 import { constructionProperties } from '../src/model/constructions.js';
 import {
   edit, windowRect, rectProblem, clampRect, setWindowRect, setSurfaceConstruction, copyConstruction, setLayer, addLayer, removeLayer,
@@ -63,22 +64,29 @@ function zoneUnder(e, h = view.hitAt(e)) {
   }
   return null;
 }
-// What a click would select, offered under the pointer: the window, the wall (each side of a shared
-// one), the zone looked into and the zones beside; Tab steps through them, outlined as offered.
+// What a click would select, offered under the pointer, in this order: the window under it; the
+// surface it is on, the side facing the view; that side's zone; on a shared wall, its other side and
+// the zone beyond. Tab steps through them, outlined as offered.
 function candidatesAt(e) {
   const h = view.hitAt(e);
   if (!h || !model) return [];
   const out = [], front = zoneUnder(e, h);
   const add = (kind, name, label) => { if (name && !out.some((c) => c.kind === kind && c.name === name)) out.push({ kind, name, label }); };
+  const zone = (z) => { if (z && model.zones[z]) add('zone', z, `Zone · ${z}`); };
   if (h.kind === 'window') add('window', h.item.name, `Window · ${h.item.zone}`);
   if (h.kind === 'door') add('door', h.item.name, `Door · ${h.item.zone} – ${h.item.partnerZone}`);
   if (h.kind === 'shading') add('shading', h.item.name, `Shading · ${h.item.name}`);
   const s = h.kind === 'surface' ? h.item : h.kind === 'window' ? model.surfaces[h.item.parent] : null;
   if (s) {
+    // The side facing the view: the one of the zone looked into, else the one whose outside faces the camera.
     const partner = s.adjacentSurface && model.surfaces[s.adjacentSurface];
-    for (const x of partner && partner.zone === front ? [partner, s] : [s, partner]) if (x) add('surface', x.name, `${x.csType} · ${x.zone}`);
+    const faces = (x) => x.zone === front || (!front && unitNormal(x.vertices).reduce((a, n, i) => a + n * [h.dir.x, h.dir.y, h.dir.z][i], 0) < 0);
+    const [near, far] = partner && faces(partner) && !faces(s) ? [partner, s] : [s, partner];
+    add('surface', near.name, `${near.csType} · ${near.zone}`);
+    zone(near.zone);
+    if (far) { add('surface', far.name, `${far.csType} · ${far.zone}`); zone(far.zone); }
   }
-  for (const z of [front, s?.zone, s?.adjacentZone, h.item?.zone, h.item?.partnerZone]) if (z && model.zones[z]) add('zone', z, `Zone · ${z}`);
+  for (const z of [front, h.item?.zone, h.item?.partnerZone]) zone(z);
   return out;
 }
 // A candidate's outline: a zone's edges once each; a surface, window or door's own edges.
@@ -1637,17 +1645,22 @@ function renderLibrary() {
   const tab = (v, label) => `<button type="button" data-act="lib-tab" data-v="${v}" aria-pressed="${libTab === v}">${label}</button>`;
   let body = '';
   if (libTab === 'materials') {
-    body += '<table class="libtable"><tr><th>Material</th><th>Kind</th><th colspan="4">Properties</th><th title="Assemblies using it">Used</th><th></th></tr>';
+    // One table for each kind of material, its figures under column titles that stay in view.
     for (const type of Object.keys(MATERIAL_FIELDS)) {
-      for (const [name, m] of Object.entries(ep[type] || {}).sort(([a], [b]) => a.localeCompare(b))) {
+      const list = Object.entries(ep[type] || {}).sort(([a], [b]) => a.localeCompare(b));
+      if (!list.length) continue;
+      body += `<table class="libtable"><thead><tr><th>${MATERIAL_KINDS[type]}</th>`
+        + MATERIAL_FIELDS[type].map(([, label, unit]) => `<th class="num">${label}${unit ? `<span class="unit"> ${unit}</span>` : ''}</th>`).join('')
+        + '<th class="num" title="Assemblies using it">Used</th><th></th></tr></thead><tbody>';
+      for (const [name, m] of list) {
         const uses = materialUses(ep, name);
-        body += `<tr data-m="${esc(name)}"><td><input class="libname" data-act="mat-name" value="${esc(name)}" title="Its name: type a new one"></td><td class="muted">${MATERIAL_KINDS[type]}</td>`
-          + MATERIAL_FIELDS[type].map(([f, label, unit, per]) => `<td><label title="${label}${unit ? `, ${unit}` : ''}"><span class="muted">${label}</span><input class="popnum" data-act="mat-field" data-f="${f}" data-per="${per}" value="${+((m[f] ?? 0) * per).toFixed(4)}"> ${unit}</label></td>`).join('')
-          + '<td></td>'.repeat(4 - MATERIAL_FIELDS[type].length)
-          + `<td>${uses}</td><td>${uses ? '' : `<button type="button" class="pbtn x" data-act="mat-del" data-v="${esc(name)}" title="Remove this material (no assembly uses it)">×</button>`}</td></tr>`;
+        body += `<tr data-m="${esc(name)}"><td><input class="libname" data-act="mat-name" value="${esc(name)}" title="${esc(name)}: type a new name"></td>`
+          + MATERIAL_FIELDS[type].map(([f, label, unit, per]) => `<td class="num"><input class="popnum" data-act="mat-field" data-f="${f}" data-per="${per}" value="${+((m[f] ?? 0) * per).toFixed(per > 1 ? 1 : 4)}" title="${label}${unit ? `, ${unit}` : ''}"></td>`).join('')
+          + `<td class="num">${uses}</td><td>${uses ? '' : `<button type="button" class="pbtn x" data-act="mat-del" data-v="${esc(name)}" title="Remove this material (no assembly uses it)">×</button>`}</td></tr>`;
       }
+      body += '</tbody></table>';
     }
-    body += `</table><div class="poprow libfoot"><select id="lib-kind" class="popsel">${Object.entries(MATERIAL_KINDS).map(([t, l]) => `<option value="${t}">${l}</option>`).join('')}</select><button type="button" class="pbtn" data-act="mat-new">New material</button></div>`;
+    body += `<div class="poprow libfoot"><select id="lib-kind" class="popsel">${Object.entries(MATERIAL_KINDS).map(([t, l]) => `<option value="${t}">${l}</option>`).join('')}</select><button type="button" class="pbtn" data-act="mat-new">New material</button></div>`;
   } else {
     body += '<div class="libasms">';
     for (const name of Object.keys(ep.Construction || {}).filter((n) => !n.endsWith('_FLIPPED')).sort()) {

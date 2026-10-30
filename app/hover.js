@@ -3,7 +3,7 @@
 // (a shared wall is two surfaces, one per zone), and the zones on either side. The first is offered;
 // Tab steps to the next (Shift+Tab back), and a click selects the one offered. It is outlined dotted,
 // whole and through anything in front, the part a clipping plane removes included, with its name in
-// a tag beside the pointer.
+// a tag beside the pointer. The likeliest is offered as soon as the pointer is over it.
 
 import * as THREE from 'three';
 
@@ -51,7 +51,7 @@ export class HoverPick {
   hover(e) {
     if (!this.enabled || this.view.sections.placing || this.view.busy?.(e)) { this.clear(); return; }
     const list = this.candidatesAt(e);
-    const keep = this.current && list.findIndex((c) => c.kind === this.current.kind && c.name === this.current.name);
+    const now = this.current, keep = now ? list.findIndex((c) => c.kind === now.kind && c.name === now.name) : -1;
     this.list = list;
     this.index = keep >= 0 ? keep : 0;
     this.at = [e.clientX, e.clientY];

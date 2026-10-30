@@ -246,7 +246,11 @@ svg.asm .side{font:500 9px var(--mono); fill:var(--ink3)}
 .library .popbtns button:hover{background:var(--rule2); color:var(--ink)}
 .library .libbody{overflow:auto; min-height:0}
 .library .libtable{border-collapse:collapse; width:100%}
-.library .libtable th{text-align:left; font-weight:600; color:var(--ink3); border-bottom:1px solid var(--rule2); padding:2px 4px}
+.library .libtable{margin-bottom:10px}
+.library .libtable th{text-align:left; font-weight:600; color:var(--ink3); border-bottom:1px solid var(--rule); padding:3px 4px; position:sticky; top:0; z-index:1; background:var(--panel); white-space:nowrap}
+.library .libtable th:first-child{color:var(--ink)}
+.library .libtable .num{text-align:right}
+.library .libtable .unit{font-weight:400}
 .library .libtable td{padding:2px 4px; border-bottom:1px solid var(--rule2); vertical-align:middle; white-space:nowrap}
 .library .libtable label{display:inline-flex; gap:3px; align-items:center}
 .library .libname{font:inherit; width:16em; padding:0 4px; border:1px solid transparent; border-radius:2px; background:none; color:var(--ink)}
