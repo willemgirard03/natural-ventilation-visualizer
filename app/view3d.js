@@ -169,8 +169,6 @@ export class View3D {
       down = null;
       if (moved < 5) this.pickAt(e);
     });
-    // A double click selects the zone of what is under the pointer.
-    this.renderer.domElement.addEventListener('dblclick', (e) => { const z = this.zoneAt?.(e); if (z) this.select(z); });
 
     this.cube = new ViewCube(this, (dir) => this.lookFrom(dir));
     this.sections = new Sections(this);
@@ -657,6 +655,12 @@ export class View3D {
     this.sections.select(null);
     const box = this.container.getBoundingClientRect();
     this.lastPick = [e.clientX - box.left, e.clientY - box.top]; // where the selection's pop-up opens
+    // What the pointer offered (Tab steps through what is under it), else the nearest thing hit.
+    const offered = this.offered?.(e);
+    if (offered) {
+      if (offered.kind === 'shading') { this.select(null); const item = this.model.shading.find((x) => x.name === offered.name); return this.onSelect({ kind: 'shading', item, polys: [item] }); }
+      return this.select(offered.name);
+    }
     const h = this.hitAt(e);
     if (!h) return this.select(null);
     if (h.kind === 'shading') { this.select(null); return this.onSelect({ kind: h.kind, item: h.item, polys: [h.item] }); }

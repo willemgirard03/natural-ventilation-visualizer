@@ -143,7 +143,7 @@ body.hasfull{overflow:hidden}
 /* zone labels over the 3D view, and a window's figures while it is edited */
 .zlabels,.winfigs{position:absolute; inset:0; pointer-events:none; overflow:hidden; z-index:4}
 /* a zone's tag, as the Solar Shading Explorer labels its drawings: mono text on a small square backing */
-.ztag{position:absolute; left:0; top:0; pointer-events:auto; font:500 10.5px/1.35 var(--mono); color:var(--ink2); background:rgba(253,253,252,.92); border:0; border-radius:0; padding:0 4px; cursor:pointer; white-space:nowrap; margin:0}
+.ztag{position:absolute; left:0; top:0; pointer-events:none; font:500 10.5px/1.35 var(--mono); color:var(--ink2); background:rgba(253,253,252,.92); border:0; border-radius:0; padding:0 4px; cursor:pointer; white-space:nowrap; margin:0}
 .ztag:hover{color:var(--glass); box-shadow:inset 0 0 0 .6px var(--glass)}
 .ztag.on{color:var(--ink); box-shadow:inset 0 -2px 0 #F2A900}
 .wfig{position:absolute; left:0; top:0; pointer-events:auto; font:500 10.5px/1.3 var(--mono); color:var(--ink); background:rgba(253,253,252,.92); border:1px solid #F2A900; border-radius:2px; padding:0 4px; cursor:text; white-space:nowrap; margin:0}

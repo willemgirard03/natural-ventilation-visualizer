@@ -11,7 +11,6 @@ import { GridFlow } from '../src/solver/grid.js';
 import { co2Generation, outdoorAirSupply, outdoorCO2, stepCO2 } from '../src/solver/co2.js';
 import { cellAt } from '../src/solver/roomflow.js';
 import { FieldSlices, rampTemperature } from './slices.js';
-import { frameOf } from './sections.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
 import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
@@ -25,7 +24,7 @@ import {
   moveLayer, layersOf, baseConstruction, materialType, setZoneSetting, zoneSettings, schedulesOfType, MATERIAL_FIELDS, MATERIAL_KINDS,
   setMaterialField, newMaterial, newConstruction, rename, removeMaterial, removeConstruction, materialUses, constructionUses,
 } from '../src/model/edit.js';
-import { ZoneLabels } from './zonelabels.js';
+import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 
 const $ = (id) => document.getElementById(id);
@@ -52,11 +51,9 @@ const slices = new FieldSlices(view);
 air.setVisible($('show-air').checked);
 slices.timeScale = Number($('cut-speed').value);
 view.setProjection($('projection').querySelector('[aria-pressed="true"]').dataset.proj);
-// Zone tags select a whole zone; a click on a surface selects the surface, a double click its zone.
-// The zone under the pointer is the room the pointer looks into: the room-air cell just in front of
-// the surface hit (a floor and the ceiling below it share a place, so the surface alone is ambiguous).
-function zoneUnder(e) {
-  const h = view.hitAt(e);
+// The zone the pointer looks into: the room-air cell just in front of the surface hit (a floor and the
+// ceiling below it share a place, so the surface alone does not say which room is seen).
+function zoneUnder(e, h = view.hitAt(e)) {
   if (!h || !rooms) return null;
   const g = rooms.g, o = view.origin;
   for (const back of [0.3, 0.6, 0.9]) {
@@ -66,10 +63,44 @@ function zoneUnder(e) {
   }
   return null;
 }
-view.zoneAt = zoneUnder;
-const labels = new ZoneLabels(view, { onPick: (zone) => view.select(zone), zoneAt: zoneUnder });
-labels.setVisible($('show-labels').checked);
-$('show-labels').addEventListener('change', (e) => labels.setVisible(e.target.checked));
+// What a click would select, offered under the pointer: the window, the wall (each side of a shared
+// one), the zone looked into and the zones beside; Tab steps through them, outlined as offered.
+function candidatesAt(e) {
+  const h = view.hitAt(e);
+  if (!h || !model) return [];
+  const out = [], front = zoneUnder(e, h);
+  const add = (kind, name, label) => { if (name && !out.some((c) => c.kind === kind && c.name === name)) out.push({ kind, name, label }); };
+  if (h.kind === 'window') add('window', h.item.name, `Window · ${h.item.zone}`);
+  if (h.kind === 'door') add('door', h.item.name, `Door · ${h.item.zone} – ${h.item.partnerZone}`);
+  if (h.kind === 'shading') add('shading', h.item.name, `Shading · ${h.item.name}`);
+  const s = h.kind === 'surface' ? h.item : h.kind === 'window' ? model.surfaces[h.item.parent] : null;
+  if (s) {
+    const partner = s.adjacentSurface && model.surfaces[s.adjacentSurface];
+    for (const x of partner && partner.zone === front ? [partner, s] : [s, partner]) if (x) add('surface', x.name, `${x.csType} · ${x.zone}`);
+  }
+  for (const z of [front, s?.zone, s?.adjacentZone, h.item?.zone, h.item?.partnerZone]) if (z && model.zones[z]) add('zone', z, `Zone · ${z}`);
+  return out;
+}
+// A candidate's outline: a zone's edges once each; a surface, window or door's own edges.
+function edgesOf(c) {
+  const o = view.origin, pos = [], seen = new Set();
+  const polys = c.kind === 'shading' ? model.shading.filter((x) => x.name === c.name) : view.find(c.name)?.polys || [];
+  for (const { vertices: v } of polys) {
+    for (let i = 0; i < v.length; i++) {
+      const a = v[i], b = v[(i + 1) % v.length], k = [a, b].map((p) => p.map((x) => x.toFixed(3)).join()).sort().join('|');
+      if (seen.has(k)) continue;
+      seen.add(k);
+      pos.push(a[0] - o[0], a[1] - o[1], a[2] - o[2], b[0] - o[0], b[1] - o[1], b[2] - o[2]);
+    }
+  }
+  return pos;
+}
+const hover = new HoverPick(view, { candidatesAt, edgesOf });
+view.offered = (e) => hover.pickFor(e);
+// While a plane's or a window's handle is under the pointer, nothing else is offered.
+view.busy = (e) => !!(view.sections.handleAt(e) || winEdit.handleAt(e));
+hover.setEnabled($('show-labels').checked);
+$('show-labels').addEventListener('change', (e) => hover.setEnabled(e.target.checked));
 // A window's sill, head and jambs pushed and pulled in the view, and the window dragged across its wall.
 const winEdit = new WindowEditor(view, {
   rectOf: (name) => (model ? windowRect(model, name) : null),
@@ -468,12 +499,6 @@ $('stale').addEventListener('click', (e) => { if (e.target.id === 'rerun') rerun
 $('run-period').addEventListener('change', (e) => { yearPicked = e.target.value === 'year'; });
 $('run-eplus').addEventListener('click', () => rerun($('run-period').value === 'year'));
 
-// The compass direction (true north) a horizontal direction in model axes points to, in words.
-function compass(d) {
-  const az = (THREE_DEG(Math.atan2(d.x, d.y)) + (model?.site.northAxis || 0) + 360) % 360;
-  return ['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west'][Math.round(az / 45) % 8];
-}
-const THREE_DEG = (r) => (r * 180) / Math.PI;
 
 // What is selected now: a section plane, or a surface, window, door or zone.
 const current = () => (view.sections.selected ? { kind: 'plane', item: view.sections.selected } : view.find(selected));
@@ -481,10 +506,7 @@ const current = () => (view.sections.selected ? { kind: 'plane', item: view.sect
 // Section planes: added from the bar (dragged in, or a click on the button and then on the view), and
 // picked, moved and turned in the view (sections.js). The air on them follows every change.
 view.sections.onChange = () => drawSlices(true);
-view.sections.onSelect = (p) => {
-  if (p) { view.select(null); showInfo({ kind: 'plane', item: p }); }
-  else if (!$('info').hidden && $('info').dataset.kind === 'plane') showInfo(null);
-};
+view.sections.onSelect = (p) => { if (p) view.select(null); };
 for (const b of document.querySelectorAll('[data-add]')) {
   b.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !model) return;
@@ -507,8 +529,6 @@ for (const b of document.querySelectorAll('[data-add]')) {
 // Opening and closing windows one by one or room by room, from the details of what is selected.
 $('info').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-act]');
-  if (b?.dataset.act === 'plane-flip') { view.sections.flip(view.sections.selected); return; }
-  if (b?.dataset.act === 'plane-delete') { view.sections.remove(view.sections.selected); return; }
   if (!b || !airflow || !['window', 'room'].includes(b.dataset.act)) return;
   if (b.dataset.act === 'window') windowSet.set(b.dataset.name, b.dataset.open === '1');
   if (b.dataset.act === 'room') {
@@ -769,9 +789,9 @@ let popKey = null, popMin = false, layersOpen = false, popPinned = false;
 function showInfo(found) {
   const box = $('info');
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
-  labels.select(found?.kind === 'zone' ? found.item.name : null);
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
-  if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; return; }
+  // Nothing to show for a clipping plane: its gumball and grips are its controls.
+  if (!found || found.kind === 'plane') { box.hidden = true; box.dataset.kind = ''; popKey = null; return; }
   const { kind, item } = found, key = `${kind}:${item.name}`;
   // Not redrawn under a figure being typed, unless the selection changed.
   if (key === popKey && box.contains(document.activeElement) && document.activeElement.matches('input:not([type=range]), select')) return;
@@ -835,13 +855,6 @@ const popNum = (key, value, unit, tip, digits = 2, extra = '') => `<span class="
 function popContent(kind, item) {
   const rows = [];
   const deg = (x) => (x === null ? '' : `${Math.round(x)}°`);
-  if (kind === 'plane') {
-    const plan = item.kind === 'plan';
-    rows.push(plan ? `Removes what is ${item.flip ? 'below' : 'above'} it, within its bounds` : `Removes the ${compass(frameOf(item).n)} side, within its bounds`,
-      `<span class="muted">Drag its outline to move it, the gumball's arrows to move it along x, y or z (click one to type a distance), its arc to turn it, the squares to resize its bounds. Delete removes it.</span>`,
-      `<button class="quiet" data-act="plane-flip">Flip</button> <button class="quiet" data-act="plane-delete">Delete</button>`);
-    return { title: esc(item.name), rows };
-  }
   let title;
   if (kind === 'surface') {
     title = `${esc(item.csType)} · ${esc(item.zone)}`;
@@ -1456,7 +1469,7 @@ function render(m) {
   $('results').hidden = false;
   view.resize();
   view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value });
-  labels.setModel(m);
+  hover.clear();
   net = buildNetwork(m);
   rooms = prepareRoomFlow(voxelize(m), net, m);
   field = null;
@@ -1510,7 +1523,7 @@ function refreshModel(geometry = true) {
   axisCache = null; schedCache.clear();
   fillDetails(m);
   view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value, keep: true });
-  labels.setModel(m);
+  hover.clear();
   if (geometry) {
     net = buildNetwork(m);
     rooms = prepareRoomFlow(voxelize(m), net, m);

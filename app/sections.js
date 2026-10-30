@@ -1,19 +1,21 @@
-// Section planes in the 3D view: vertical sections and horizontal plan cuts, as many as needed (up to
-// MAX). Each removes what lies on one side of it, but only within its bounds, a rectangle in the
-// plane, as a section in Revit is cropped. Every material in the scene is patched to discard what a
-// plane removes, so walls, windows, particles and the air's slices are all cut alike.
+// Clipping planes in the 3D view, as many as needed (up to MAX). Each removes what lies on one side of
+// it, but only within its bounds, a rectangle in the plane, as a section in Revit is cropped. Every
+// material in the scene is patched to discard what a plane removes, so walls, windows, particles and
+// the air's slices are all cut alike.
 //
-// A plane is picked by its outline. Picked, it shows a gumball (arrows along the model's x, y and z,
-// as in the Solar Shading Explorer, and an arc to turn it about the vertical) and a grip on each side
-// of its bounds. Its outline drags it along its normal; a click on an arrow (without dragging) asks for
-// a distance to move it by. Planes are kept in view coordinates (the model's, shifted by the view's
-// origin).
+// Adding a section or a plan cut only sets how a plane is first placed (upright and square to a wall,
+// or level at plan height); after that it turns any way. Picked by its outline, a plane shows a
+// gumball: arrows along the model's x, y and z, as in the Solar Shading Explorer, and three arcs that
+// turn it about its own axes (snapping square to the world's within a few degrees), with a grip on each
+// side of its bounds. Its outline drags it along its normal; a click on an arrow or an arc (without
+// dragging) asks for a distance or an angle. Planes are kept in view coordinates (the model's, shifted
+// by the view's origin); a plane's orientation is a quaternion, q, taking x, y, z to its u, v, n.
 
 import * as THREE from 'three';
 
 export const MAX = 8;
-const AXIS_COLORS = ['#c2412d', '#2f8a4e', '#2d5fc2']; // x, y, z
-const GLASS = '#2F6F68', SUN = '#D9821A';
+const AXIS_COLORS = ['#c2412d', '#2f8a4e', '#2d5fc2']; // x, y, z; and a plane's own u, v, n
+const GLASS = '#2F6F68';
 const GUMBALL_PX = 72; // arrow length on screen
 const GRIP_PX = 9, PICK_PX = 7, GRIP_HIT = 11;
 const SNAP = 0.05; // m, moves by arrow
@@ -22,13 +24,27 @@ const MARGIN = 1; // m, around the building for new bounds
 
 // The plane's frame: normal n (towards the side removed), u along it, v across it (up for a section).
 export function frameOf(p) {
-  const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
-  const u = new THREE.Vector3(c, s, 0);
-  let v, n;
-  if (p.kind === 'plan') { v = new THREE.Vector3(-s, c, 0); n = new THREE.Vector3(0, 0, 1); }
-  else { v = new THREE.Vector3(0, 0, 1); n = new THREE.Vector3(s, -c, 0); }
+  const u = new THREE.Vector3(1, 0, 0).applyQuaternion(p.q), v = new THREE.Vector3(0, 1, 0).applyQuaternion(p.q);
+  const n = new THREE.Vector3(0, 0, 1).applyQuaternion(p.q);
   if (p.flip) n.negate();
   return { o: p.o, u, v, n };
+}
+
+// The orientation taking x, y, z to u, v and u x v.
+const frameQuaternion = (u, v) => new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(u, v, u.clone().cross(v)));
+
+// A plane turned: its normal pulled square to the world's axes within SQUARE_PULL degrees, and then its
+// u along one of them, so planes settle level, upright and square to the model.
+function squared(q) {
+  const out = q.clone(), lim = Math.cos(THREE.MathUtils.degToRad(SQUARE_PULL));
+  const axes = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map((a) => new THREE.Vector3(...a));
+  const n = new THREE.Vector3(0, 0, 1).applyQuaternion(out);
+  const an = axes.find((a) => a.dot(n) > lim);
+  if (an) out.premultiply(new THREE.Quaternion().setFromUnitVectors(n, an));
+  const n2 = new THREE.Vector3(0, 0, 1).applyQuaternion(out), u = new THREE.Vector3(1, 0, 0).applyQuaternion(out);
+  const au = an && axes.find((a) => Math.abs(a.dot(n2)) < 1e-6 && a.dot(u) > lim);
+  if (au) out.premultiply(new THREE.Quaternion().setFromUnitVectors(u, au));
+  return out;
 }
 
 // Whether a point (view coordinates) is removed by a plane.
@@ -145,15 +161,18 @@ for (int i = 0; i < ${MAX}; i++) {
   // side or across it, whichever faces the camera more; it removes the side towards the camera. A plan
   // cut removes what is above it.
   make(kind, at, along = null) {
-    const p = { kind, o: at.clone(), yaw: 0, flip: false, b: [0, 0, 0, 0] };
+    const p = { kind, o: at.clone(), flip: false, b: [0, 0, 0, 0] };
     const axis = this.view.longAxis || 0; // radians, the footprint's long side from model x
     const look = this.view.camera.position.clone().sub(at).setZ(0).normalize();
     const facing = (y) => Math.sin(y) * look.x - Math.cos(y) * look.y; // n = (sin yaw, -cos yaw) towards the camera
+    let yaw = axis;
     if (kind === 'section') {
       const a = along ? Math.atan2(along.y, along.x) : null;
       const options = along ? [a, a + Math.PI] : [axis, axis + Math.PI / 2, axis + Math.PI, axis - Math.PI / 2];
-      p.yaw = options.reduce((best, y) => (facing(y) > facing(best) ? y : best));
-    } else p.yaw = axis;
+      yaw = options.reduce((best, y) => (facing(y) > facing(best) ? y : best));
+    }
+    const u = new THREE.Vector3(Math.cos(yaw), Math.sin(yaw), 0);
+    p.q = frameQuaternion(u, kind === 'plan' ? new THREE.Vector3(-u.y, u.x, 0) : new THREE.Vector3(0, 0, 1));
     p.b = this.fullBounds(p);
     return p;
   }
@@ -162,7 +181,7 @@ for (int i = 0; i < ${MAX}; i++) {
     if (this.planes.length >= MAX) return null;
     const p = this.make(kind, at, along);
     p.id = ++this.count;
-    p.name = `${kind === 'plan' ? 'Plan cut' : 'Section'} ${p.id}`;
+    p.name = `Clipping plane ${p.id}`;
     this.planes.push(p);
     this.select(p);
     this.changed();
@@ -200,7 +219,7 @@ for (int i = 0; i < ${MAX}; i++) {
       const c = this.box().getCenter(new THREE.Vector3());
       p = this.make('plan', c.setZ(z));
       p.id = ++this.count;
-      p.name = `Plan cut ${p.id}`;
+      p.name = `Clipping plane ${p.id}`;
       p.forChecks = true;
       if (this.planes.length >= MAX) this.planes.shift();
       this.planes.push(p);
@@ -253,7 +272,7 @@ for (int i = 0; i < ${MAX}; i++) {
       this.layer.remove(o);
     }
     for (const p of this.planes) {
-      const on = p === this.selected, color = p.kind === 'plan' ? SUN : GLASS;
+      const on = p === this.selected, color = GLASS;
       const c = this.corners(p);
       const line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(c), on
         ? new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 })
@@ -275,7 +294,7 @@ for (int i = 0; i < ${MAX}; i++) {
     this.gumball.visible = !!this.selected;
     if (this.selected) {
       this.gumball.position.copy(this.selected.o);
-      this.gumball.userData.arc.rotation.z = this.selected.yaw;
+      this.gumball.userData.rings.quaternion.copy(this.selected.q);
     }
   }
 
@@ -300,26 +319,32 @@ for (int i = 0; i < ${MAX}; i++) {
       arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
       g.add(arrow);
     });
-    // The turning arc, in the horizontal plane, between 18 and 72 degrees from the plane's u axis.
-    const arc = new THREE.Group();
-    const curve = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.016, 6, 40, THREE.MathUtils.degToRad(54)), mat(GLASS));
-    curve.rotation.z = THREE.MathUtils.degToRad(18);
-    const hit = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.09, 6, 24, THREE.MathUtils.degToRad(54)), new THREE.MeshBasicMaterial({ visible: false }));
-    hit.rotation.z = THREE.MathUtils.degToRad(18);
-    hit.userData.handle = { type: 'turn' };
-    hits.push(hit);
-    for (const a of [18, 72]) {
-      const head = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.13, 12), mat(GLASS));
-      const r = THREE.MathUtils.degToRad(a);
-      head.position.set(0.62 * Math.cos(r), 0.62 * Math.sin(r), 0);
-      head.rotation.z = r + (a === 18 ? Math.PI : 0); // along the arc, outwards at each end
-      arc.add(head);
-    }
-    arc.add(curve, hit);
-    g.add(arc);
+    // Three turning arcs, one about each of the plane's own axes (u, v, n), each a quarter of a ring
+    // between 18 and 72 degrees, held in a group that takes the plane's orientation.
+    const rings = new THREE.Group();
+    [[0, new THREE.Euler(0, Math.PI / 2, 0)], [1, new THREE.Euler(-Math.PI / 2, 0, 0)], [2, new THREE.Euler(0, 0, 0)]].forEach(([i, turn]) => {
+      const arc = new THREE.Group();
+      const curve = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.016, 6, 40, THREE.MathUtils.degToRad(54)), mat(AXIS_COLORS[i]));
+      curve.rotation.z = THREE.MathUtils.degToRad(18);
+      const hit = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.09, 6, 24, THREE.MathUtils.degToRad(54)), new THREE.MeshBasicMaterial({ visible: false }));
+      hit.rotation.z = THREE.MathUtils.degToRad(18);
+      hit.userData.handle = { type: 'turn', axis: i };
+      hits.push(hit);
+      for (const a of [18, 72]) {
+        const head = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.13, 12), mat(AXIS_COLORS[i]));
+        const r = THREE.MathUtils.degToRad(a);
+        head.position.set(0.62 * Math.cos(r), 0.62 * Math.sin(r), 0);
+        head.rotation.z = r + (a === 18 ? Math.PI : 0); // along the arc, outwards at each end
+        arc.add(head);
+      }
+      arc.add(curve, hit);
+      arc.rotation.copy(turn); // the ring's own z onto the plane's u, v or n
+      rings.add(arc);
+    });
+    g.add(rings);
     const knob = new THREE.Mesh(new THREE.SphereGeometry(0.06, 16, 12), mat('#4B5855'));
     g.add(knob);
-    g.userData.arc = arc;
+    g.userData.rings = rings;
     g.userData.hits = hits;
     g.traverse((o) => { o.renderOrder = 20; });
     g.visible = false;
@@ -391,8 +416,8 @@ for (int i = 0; i < ${MAX}; i++) {
       el.setPointerCapture(e.pointerId);
       const p = h.plane;
       if (p !== this.selected) this.select(p);
-      drag = { h, p, x: e.clientX, y: e.clientY, o: p.o.clone(), yaw: p.yaw, b: [...p.b], moved: false };
-      if (h.type === 'turn') drag.a0 = this.angleAt(e, p);
+      drag = { h, p, x: e.clientX, y: e.clientY, o: p.o.clone(), q: p.q.clone(), b: [...p.b], moved: false };
+      if (h.type === 'turn') { drag.axis = this.turnAxis(p, h.axis); drag.a0 = this.angleAt(e, p, drag.axis); }
     }, true);
     el.addEventListener('pointermove', (e) => {
       if (!drag) { this.hover(e); return; }
@@ -413,14 +438,12 @@ for (int i = 0; i < ${MAX}; i++) {
         if (k < 2) p.b[k] = k ? Math.max(p.b[k], p.b[0] + 0.5) : Math.min(p.b[k], p.b[1] - 0.5);
         else p.b[k] = k === 3 ? Math.max(p.b[k], p.b[2] + 0.5) : Math.min(p.b[k], p.b[3] - 0.5);
       } else if (h.type === 'turn') {
-        const a = this.angleAt(e, p);
-        if (a !== null && drag.a0 !== null) {
-          const step = e.shiftKey ? 15 : 1;
-          let deg = Math.round(THREE.MathUtils.radToDeg(drag.yaw + a - drag.a0) / step) * step;
-          const square = Math.round(deg / 90) * 90; // the world's axes pull within SQUARE_PULL
-          if (Math.abs(deg - square) <= SQUARE_PULL) deg = square;
-          p.yaw = THREE.MathUtils.degToRad(deg); // the bounds turn with it, about its origin
-        }
+        // About the arc's axis, by the pointer's angle round it (or, seen edge on, by how far it moved).
+        const a = this.angleAt(e, p, drag.axis);
+        let turn = a !== null && drag.a0 !== null ? a - drag.a0 : (dx - dy) * 0.01;
+        const step = THREE.MathUtils.degToRad(e.shiftKey ? 15 : 1);
+        turn = Math.round(turn / step) * step;
+        p.q = squared(new THREE.Quaternion().setFromAxisAngle(drag.axis, turn).multiply(drag.q)); // the bounds turn with it
       }
       this.changed();
     });
@@ -432,7 +455,11 @@ for (int i = 0; i < ${MAX}; i++) {
       if (d.moved) return;
       const deg = THREE.MathUtils.radToDeg;
       if (d.h.type === 'move') this.ask(e, 'move mm', (x) => { d.p.o.addScaledVector(d.h.axis, x / 1000); });
-      else if (d.h.type === 'turn') this.ask(e, `angle °, now ${Math.round(deg(d.p.yaw))}`, (x) => { d.p.yaw = THREE.MathUtils.degToRad(x); }, true);
+      else if (d.h.type === 'turn') {
+        this.ask(e, `turn about its ${'uvn'[d.h.axis]} axis, °`, (x) => {
+          d.p.q = squared(new THREE.Quaternion().setFromAxisAngle(this.turnAxis(d.p, d.h.axis), THREE.MathUtils.degToRad(x)).multiply(d.p.q));
+        });
+      }
       else if (d.h.type === 'grip') {
         const k = d.h.grip.k, size = k < 2 ? d.p.b[1] - d.p.b[0] : d.p.b[3] - d.p.b[2];
         this.ask(e, `${k < 2 ? 'width' : 'height'} mm, now ${Math.round(size * 1000)}`, (x) => {
@@ -451,13 +478,23 @@ for (int i = 0; i < ${MAX}; i++) {
     });
   }
 
-  // The pointer's angle about the plane's origin, in the horizontal plane through it.
-  angleAt(e, p) {
+  // The world direction of a plane's own u, v or n (0, 1, 2) axis, which an arc turns it about.
+  turnAxis(p, i) {
+    return [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)][i].applyQuaternion(p.q).normalize();
+  }
+
+  // The pointer's angle about the plane's origin, in the plane through it square to an axis; null when
+  // that plane is seen nearly edge on.
+  angleAt(e, p, axis) {
     const v = this.view, r = v.renderer.domElement.getBoundingClientRect();
     const ray = new THREE.Raycaster();
     ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), v.camera);
-    const hit = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -p.o.z), new THREE.Vector3());
-    return hit ? Math.atan2(hit.y - p.o.y, hit.x - p.o.x) : null;
+    if (Math.abs(ray.ray.direction.dot(axis)) < 0.15) return null;
+    const hit = ray.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(axis, p.o), new THREE.Vector3());
+    if (!hit) return null;
+    const b1 = Math.abs(axis.z) < 0.9 ? new THREE.Vector3(0, 0, 1).cross(axis).normalize() : new THREE.Vector3(1, 0, 0).cross(axis).normalize();
+    const b2 = axis.clone().cross(b1), d = hit.sub(p.o);
+    return Math.atan2(d.dot(b2), d.dot(b1));
   }
 
   hover(e) {
@@ -549,7 +586,7 @@ for (int i = 0; i < ${MAX}; i++) {
   showGhost(p) {
     if (this.ghost) { this.ghost.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); }); this.layer.remove(this.ghost); this.ghost = null; }
     if (p) {
-      const c = this.corners(p), color = p.kind === 'plan' ? SUN : GLASS;
+      const c = this.corners(p), color = GLASS;
       const g = new THREE.Group();
       const line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(c), new THREE.LineDashedMaterial({ color, dashSize: 0.5, gapSize: 0.3, depthTest: false, transparent: true }));
       line.computeLineDistances();

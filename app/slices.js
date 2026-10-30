@@ -149,7 +149,7 @@ export class FieldSlices {
   trailsFor(p, i, f, bounds, slice, step) {
     const where = [];
     slice.values.forEach((val, k) => { if (val !== null) where.push(bounds[0] + ((k % slice.W) + 0.5) * step, bounds[2] + (Math.floor(k / slice.W) + 0.5) * step); });
-    const key = [f.o.x, f.o.y, f.o.z, p.yaw, p.flip, ...p.b].map((x) => (typeof x === 'number' ? x.toFixed(3) : x)).join(',');
+    const key = [f.o.x, f.o.y, f.o.z, p.q.x, p.q.y, p.q.z, p.q.w, p.flip, ...p.b].map((x) => (typeof x === 'number' ? x.toFixed(3) : x)).join(',');
     let t = this.trails.get(p);
     if (t && t.key !== key) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
     const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY * this.density));
