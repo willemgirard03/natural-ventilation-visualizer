@@ -8,10 +8,13 @@
 // through its colour) and before the particles (so they do not). An unshaded plane hides nothing.
 //
 // The particles in the planes are their own: moved within each plane by the air's velocity along it,
-// separately from the 3D particles, with their own density and speed, coloured the same way.
+// separately from the 3D particles. Each plane has its own settings (p.air: what its slice is coloured
+// by, whether it shows particles, and their colour, density and speed), set in its pop-up, so planes
+// can show different things side by side. Pointing at a slice shows a crosshair there and the values
+// of the air at that point (probe).
 
 import * as THREE from 'three';
-import { frameOf } from './sections.js';
+import { frameOf, removes as removesPoint } from './sections.js';
 import { temperatureColor, speedColor } from './particles.js';
 import { co2Color } from './view3d.js';
 
@@ -32,6 +35,11 @@ export function rampTemperature(t, lo, hi, out = new THREE.Color()) {
   return x < 0 ? out.copy(MID).lerp(COOL, -x) : out.copy(MID).lerp(WARM, x);
 }
 
+// A new plane's settings: its slice coloured by temperature, with particles coloured the same way, at
+// density x1 and real-time speed. field: 'temperature', 'speed', 'co2' or '' (no colour); color:
+// the particles', 'temperature', 'speed', 'co2' or 'none' (black).
+export const AIR_DEFAULT = { field: 'temperature', particles: true, color: 'temperature', density: 1, speed: 1 };
+
 export class FieldSlices {
   constructor(view) {
     this.view = view;
@@ -39,10 +47,17 @@ export class FieldSlices {
     view.scene.add(this.group);
     this.visible = false;
     this.trails = new Map(); // by plane: its particles, kept across updates while the plane stays put
-    this.timeScale = 10; // how much faster than real time the particles in the planes move
-    this.density = 1; // times DENSITY
-    this.colorBy = 'temperature'; // or 'speed', 'co2', or 'none' (black): their own, apart from the 3D particles'
     this.running = false;
+    // The probe: a crosshair in the plane pointed at, and the values there beside the pointer.
+    this.cross = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#18211F', depthTest: false, transparent: true }));
+    this.cross.renderOrder = 30;
+    this.cross.visible = false;
+    this.cross.userData.noSection = true;
+    view.scene.add(this.cross);
+    this.tag = document.createElement('div');
+    this.tag.className = 'probetag';
+    this.tag.hidden = true;
+    view.container.appendChild(this.tag);
   }
 
   hide() {
@@ -69,54 +84,104 @@ export class FieldSlices {
     }
   }
 
-  // sample: { inside(x, y, z) -> bool, value(x, y, z) -> number, velocity(x, y, z) -> [u, v, w] } in
-  // model coordinates; field: 'temperature', 'speed', 'co2' or '' (particles only); trails: particles
-  // in the planes; colour(v, range): a THREE.Color; grid: the room cells, for their extent and spacing.
-  // Returns the values' range on the slices.
-  update(sample, field, colour, grid, trails) {
+  // sample: { inside(x, y, z) -> bool, value(field, x, y, z) -> number, velocity(x, y, z) -> [u, v, w],
+  // temperature, co2 } in model coordinates; colour(field, v, range): a THREE.Color; grid: the room
+  // cells, for their extent and spacing. Each plane is drawn by its own settings (p.air). Returns the
+  // range of each field on the slices that show it: { temperature, co2: [lo, hi], speed: true }.
+  update(sample, colour, grid) {
     const v = this.view, o = v.origin;
     this.clear();
     this.sample = sample;
+    this.grid = grid;
     const planes = v.sections.planes;
-    this.clearTrails(new Set(trails ? planes : []));
+    this.clearTrails(new Set(planes.filter((p) => p.air.particles)));
     const out = [];
     // The grid's box in view coordinates: slices are cropped to it.
     const gmin = new THREE.Vector3(grid.min[0] - o[0], grid.min[1] - o[1], grid.min[2] - o[2]);
     const gmax = gmin.clone().add(new THREE.Vector3(grid.nx, grid.ny, grid.nz).multiplyScalar(grid.h));
     planes.forEach((p, i) => {
+      const { field, particles } = p.air;
+      if (!field && !particles) return;
       const f = frameOf(p);
       // The plane's bounds cropped to the grid's box, along u and v.
       const [u0, u1, v0, v1] = crop(p.b, f, gmin, gmax);
       if (!(u1 > u0 && v1 > v0)) return;
       const start = f.o.clone().addScaledVector(f.u, u0).addScaledVector(f.v, v0).addScaledVector(f.n, -0.02);
-      const s = this.paint(sample, start, f.u, f.v, u1 - u0, v1 - v0, grid.h / 2, i, !!field);
-      if (s) out.push(s);
-      if (trails) this.trailsFor(p, i, f, [u0, u1, v0, v1], s, grid.h / 2);
+      const value = field ? (x, y, z) => sample.value(field, x, y, z) : () => 0;
+      const s = this.paint(sample, value, start, f.u, f.v, u1 - u0, v1 - v0, grid.h / 2, i, !!field);
+      if (s) out.push({ ...s, field });
+      if (particles) this.trailsFor(p, i, f, [u0, u1, v0, v1], s, grid.h / 2);
     });
-    // Colour with a common range, then show.
-    const all = out.flatMap((s) => s.values.filter((x) => x !== null));
-    // Temperature and CO2 over the range on the cuts (CO2 at least 50 ppm wide), speed on its fixed log scale.
-    let range = field === 'speed' ? null : all.length ? [Math.min(...all), Math.max(...all)] : [20, 24];
-    if (field === 'co2' && range) { const mid = (range[0] + range[1]) / 2; range = [Math.min(range[0], mid - 25), Math.max(range[1], mid + 25)]; }
+    // Each field coloured over its own range on the slices that show it: temperature and CO2 over
+    // the range there (CO2 at least 50 ppm wide), speed on its fixed log scale.
+    const ranges = {};
+    for (const field of new Set(out.map((s) => s.field).filter(Boolean))) {
+      if (field === 'speed') { ranges.speed = true; continue; }
+      const all = out.filter((s) => s.field === field).flatMap((s) => s.values.filter((x) => x !== null));
+      let r = all.length ? [Math.min(...all), Math.max(...all)] : [20, 24];
+      if (field === 'co2') { const mid = (r[0] + r[1]) / 2; r = [Math.min(r[0], mid - 25), Math.max(r[1], mid + 25)]; }
+      ranges[field] = r;
+    }
     for (const s of out) {
       const data = s.texture.image.data;
       s.values.forEach((val, k) => {
         if (val === null) { data[k * 4 + 3] = 0; return; }
-        if (!field) { data[k * 4 + 3] = 255; return; } // depth only: hides the particles behind
-        const col = colour(val, range);
+        if (!s.field) { data[k * 4 + 3] = 255; return; } // depth only: hides the particles behind
+        const col = colour(s.field, val, ranges[s.field]);
         data[k * 4] = col.r * 255; data[k * 4 + 1] = col.g * 255; data[k * 4 + 2] = col.b * 255; data[k * 4 + 3] = FILL * 255;
       });
       s.texture.needsUpdate = true;
     }
-    this.visible = planes.length > 0;
+    this.visible = out.length > 0;
     v.render();
-    return field ? range : null;
+    return ranges;
+  }
+
+  // The slice under the pointer: { plane, point (model coordinates) }, or null where the pointer is
+  // off every slice, on a part another plane removes, outside the rooms, or behind the building.
+  probeAt(e, hitDistance = Infinity) {
+    if (!this.visible || !this.sample || !this.grid) return null;
+    const v = this.view, r = v.renderer.domElement.getBoundingClientRect(), o = v.origin;
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), v.camera);
+    let best = null;
+    for (const p of v.sections.planes) {
+      if (!p.air.field && !p.air.particles) continue;
+      const f = frameOf(p), plane = new THREE.Plane().setFromNormalAndCoplanarPoint(f.n, f.o);
+      const at = ray.ray.intersectPlane(plane, new THREE.Vector3());
+      if (!at) continue;
+      const t = at.distanceTo(ray.ray.origin), d = at.clone().sub(f.o), u = d.dot(f.u), w = d.dot(f.v);
+      if (t > hitDistance + 0.05 || (best && t > best.t) || u < p.b[0] || u > p.b[1] || w < p.b[2] || w > p.b[3]) continue;
+      if (v.sections.planes.some((q) => q !== p && removesPoint(q, at))) continue;
+      const m = at.clone().addScaledVector(f.n, -0.02);
+      if (!this.sample.inside(m.x + o[0], m.y + o[1], m.z + o[2])) continue;
+      best = { t, plane: p, f, at, point: [m.x + o[0], m.y + o[1], m.z + o[2]] };
+    }
+    return best;
+  }
+
+  // Shows the probe at a slice point found by probeAt (or hides it): a crosshair in its plane, and
+  // the plane's own value first, then the others.
+  showProbe(found, e) {
+    if (!found) { if (this.cross.visible || !this.tag.hidden) { this.cross.visible = false; this.tag.hidden = true; this.view.render(); } return; }
+    const { f, at, point, plane } = found, s = this.sample, len = this.view.sections.scaleAt(at) * 14;
+    const ends = [at.clone().addScaledVector(f.u, -len), at.clone().addScaledVector(f.u, len), at.clone().addScaledVector(f.v, -len), at.clone().addScaledVector(f.v, len)];
+    this.cross.geometry.setFromPoints(ends);
+    this.cross.visible = true;
+    const [x, y, z] = point, vel = s.velocity(x, y, z);
+    const parts = { temperature: `${s.temperature(x, y, z).toFixed(1)} °C`, speed: `${Math.hypot(...vel).toFixed(2)} m/s`, co2: `${Math.round(s.co2(x, y, z))} ppm` };
+    const first = plane.air.field || 'temperature';
+    this.tag.innerHTML = `<b>${parts[first]}</b>${Object.entries(parts).filter(([k]) => k !== first).map(([, t]) => ` · ${t}`).join('')}`;
+    const r = this.view.container.getBoundingClientRect();
+    this.tag.style.transform = `translate(${e.clientX - r.left + 14}px, ${e.clientY - r.top - 30}px)`;
+    this.tag.hidden = false;
+    this.view.render();
   }
 
   // One slice: a rectangle from `start` along unit vectors u and w (view coordinates), sized su x sw,
   // sampled every step; plane index i (its own cut does not remove it). coloured: false for a slice
   // that only hides what is behind it.
-  paint(sample, start, u, w, su, sw, step, i, coloured) {
+  paint(sample, value, start, u, w, su, sw, step, i, coloured) {
     const o = this.view.origin;
     const W = Math.max(2, Math.ceil(su / step)), H = Math.max(2, Math.ceil(sw / step));
     const values = new Array(W * H);
@@ -124,7 +189,7 @@ export class FieldSlices {
       for (let k = 0; k < W; k++) {
         const a = (k + 0.5) * step, b = (j + 0.5) * step;
         const x = start.x + u.x * a + w.x * b + o[0], y = start.y + u.y * a + w.y * b + o[1], z = start.z + u.z * a + w.z * b + o[2];
-        values[k + j * W] = sample.inside(x, y, z) ? sample.value(x, y, z) : null;
+        values[k + j * W] = sample.inside(x, y, z) ? value(x, y, z) : null;
       }
     }
     const texture = new THREE.DataTexture(new Uint8Array(W * H * 4), W, H, THREE.RGBAFormat);
@@ -152,7 +217,7 @@ export class FieldSlices {
     const key = [f.o.x, f.o.y, f.o.z, p.q.x, p.q.y, p.q.z, p.q.w, p.flip, ...p.b].map((x) => (typeof x === 'number' ? x.toFixed(3) : x)).join(',');
     let t = this.trails.get(p);
     if (t && t.key !== key) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
-    const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY * this.density));
+    const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY * p.air.density));
     if (t && t.n !== n) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
     if (!t) {
       const segs = n * (HISTORY - 1);
@@ -174,7 +239,7 @@ export class FieldSlices {
       t = { key, lines, heads, n, uv: new Float32Array(n * HISTORY * 2), age: new Float32Array(n), life: new Float32Array(n), since: new Float32Array(n), born: new Uint8Array(n), tint: new Float32Array(n * 3) };
       this.trails.set(p, t);
     }
-    Object.assign(t, { f, i, bounds, where, step });
+    Object.assign(t, { p, f, i, bounds, where, step });
     this.view.sections.patch(t.lines.material, i);
     this.view.sections.patch(t.heads.material, i);
     if (!this.running) this.run();
@@ -186,9 +251,9 @@ export class FieldSlices {
     let last = performance.now();
     const frame = (now) => {
       if (!this.trails.size) { this.running = false; return; }
-      const dt = Math.min(0.05, (now - last) / 1000) * this.timeScale;
+      const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
-      for (const t of this.trails.values()) this.advance(t, dt);
+      for (const t of this.trails.values()) this.advance(t, dt * t.p.air.speed); // each plane at its own speed
       this.view.render();
       requestAnimationFrame(frame);
     };
@@ -219,7 +284,7 @@ export class FieldSlices {
         else {
           const vel = sample.velocity(x, y, z);
           // Its colour, as a 3D particle's: the air's temperature where it is, or its speed.
-          const by = this.colorBy;
+          const by = t.p.air.color;
           const col = by === 'none' ? NONE : by === 'speed' ? speedColor(Math.hypot(vel[0], vel[1], vel[2]), TINT)
             : by === 'co2' ? co2Color(sample.co2(x, y, z), TINT) : temperatureColor(sample.temperature(x, y, z), TINT);
           t.tint[k * 3] = col.r; t.tint[k * 3 + 1] = col.g; t.tint[k * 3 + 2] = col.b;

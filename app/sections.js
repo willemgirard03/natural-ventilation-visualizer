@@ -13,6 +13,7 @@
 // by the view's origin); a plane's orientation is a quaternion, q, taking x, y, z to its u, v, n.
 
 import * as THREE from 'three';
+import { AIR_DEFAULT } from './slices.js';
 
 export const MAX = 8;
 const AXIS_COLORS = ['#c2412d', '#2f8a4e', '#2d5fc2']; // x, y, z; and a plane's own u, v, n
@@ -162,7 +163,7 @@ for (int i = 0; i < ${MAX}; i++) {
   // side or across it, whichever faces the camera more; it removes the side towards the camera. A plan
   // cut removes what is above it.
   make(kind, at, along = null) {
-    const p = { kind, o: at.clone(), flip: false, b: [0, 0, 0, 0] };
+    const p = { kind, o: at.clone(), flip: false, b: [0, 0, 0, 0], air: { ...AIR_DEFAULT } };
     const axis = this.view.longAxis || 0; // radians, the footprint's long side from model x
     const look = this.view.camera.position.clone().sub(at).setZ(0).normalize();
     const facing = (y) => Math.sin(y) * look.x - Math.cos(y) * look.y; // n = (sin yaw, -cos yaw) towards the camera
@@ -308,11 +309,11 @@ for (int i = 0; i < ${MAX}; i++) {
 
   // The planes as they are, to put back (undo, redo).
   state() {
-    return this.planes.map((p) => ({ ...p, o: p.o.clone(), q: p.q.clone(), b: [...p.b] }));
+    return this.planes.map((p) => ({ ...p, o: p.o.clone(), q: p.q.clone(), b: [...p.b], air: { ...p.air } }));
   }
   setState(list) {
     const id = this.selected?.id;
-    this.planes = list.map((p) => ({ ...p, o: p.o.clone(), q: p.q.clone(), b: [...p.b] }));
+    this.planes = list.map((p) => ({ ...p, o: p.o.clone(), q: p.q.clone(), b: [...p.b], air: { ...p.air } }));
     this.selected = this.planes.find((p) => p.id === id) || null;
     this.changed();
     this.onSelect(this.selected);

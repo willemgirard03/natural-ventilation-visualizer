@@ -50,7 +50,6 @@ const air = new AirflowParticles(view);
 const slices = new FieldSlices(view);
 // The layer settings as the page opens them.
 air.setVisible($('show-air').checked);
-slices.timeScale = Number($('cut-speed').value);
 view.setProjection($('projection').querySelector('[aria-pressed="true"]').dataset.proj);
 // The zone the pointer looks into: the room-air cell just in front of the surface hit (a floor and the
 // ceiling below it share a place, so the surface alone does not say which room is seen).
@@ -104,6 +103,23 @@ function edgesOf(c) {
   return pos;
 }
 const hover = new HoverPick(view, { candidatesAt, edgesOf });
+// Pointing at a cut: a crosshair there and the air's values, read from the room air as it is now.
+{
+  const el = view.renderer.domElement;
+  let pending = false, last = null;
+  el.addEventListener('pointermove', (e) => {
+    last = e;
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      const h = slices.visible && !e.buttons ? view.hitAt(last) : null;
+      const behind = h ? h.point.distanceTo(view.camera.position) : Infinity;
+      slices.showProbe(slices.visible && !last.buttons ? slices.probeAt(last, behind) : null, last);
+    });
+  });
+  el.addEventListener('pointerleave', () => slices.showProbe(null));
+}
 view.offered = (e) => hover.pickFor(e);
 // While a plane's or a window's handle is under the pointer, nothing else is offered.
 view.busy = (e) => !!(view.sections.handleAt(e) || winEdit.handleAt(e));
@@ -120,34 +136,27 @@ const winEdit = new WindowEditor(view, {
 });
 view.onRender = () => followPop();
 view.beforeRender = () => winEdit.beforeRender();
-let sliceRange = null, sliceTimer = 0, sliceLast = 0;
+let sliceRanges = {}, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
 // room's own temperature. Throttled, since the simulation posts several steps a second.
 function drawSlices(now = false) {
   // While a baked day plays, its blended fields; otherwise the live room air.
-  const kind = $('slices').value, arrows = $('arrows').checked, simulated = bakedPlay ? bakedPlay.kind === 'grid' : $('room-air').value === 'grid';
+  const simulated = bakedPlay ? bakedPlay.kind === 'grid' : $('room-air').value === 'grid';
   const grid = bakedPlay?.grid || liveGrid(), field = bakedPlay?.live || liveField();
-  if ((!kind && !arrows) || !model || !rooms || !view.sections.planes.length || (simulated ? !(bakedPlay || gridLive) : !field)) { slices.hide(); sliceRange = null; legend(); return; }
+  const any = view.sections.planes.some((p) => p.air.field || p.air.particles);
+  if (!any || !model || !rooms || (simulated ? !(bakedPlay || gridLive) : !field)) { slices.hide(); sliceRanges = {}; legend(); return; }
   const wait = 300 - (performance.now() - sliceLast);
   if (!now && wait > 0) { clearTimeout(sliceTimer); sliceTimer = setTimeout(() => drawSlices(true), wait); return; }
   sliceLast = performance.now();
   const g = rooms.g, fluid = (x, y, z) => { const c = cellAt(g, [x, y, z]); return c >= 0 && g.zone[c] >= 0; };
-  let value;
   const velocity = simulated ? (x, y, z) => grid.velocityAt([x, y, z])
     : (x, y, z) => { const c = cellAt(g, [x, y, z]); return [field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]]; };
-  if (kind === 'co2') {
-    value = simulated && grid.co2 ? (x, y, z) => grid.co2At(x, y, z) : (x, y, z) => airflow.co2?.[g.zones[g.zone[cellAt(g, [x, y, z])]]] ?? 400;
-  } else if (simulated) {
-    value = kind === 'speed' ? (x, y, z) => Math.hypot(...grid.velocityAt([x, y, z])) : (x, y, z) => grid.temperatureAt(x, y, z);
-  } else {
-    const t = airflow.conditions.zones;
-    value = kind === 'speed' ? (x, y, z) => { const c = cellAt(g, [x, y, z]); return Math.hypot(field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]); }
-      : (x, y, z) => t[g.zones[g.zone[cellAt(g, [x, y, z])]]].t;
-  }
-  const co2Ramp = (v, [lo, hi]) => co2Color(CO2_SCALE[0] + ((v - lo) / Math.max(1, hi - lo)) * (CO2_SCALE[2] - CO2_SCALE[0]));
-  const colour = kind === 'speed' ? (v) => speedColor(v) : kind === 'co2' ? co2Ramp : (v, range) => rampTemperature(v, range[0], range[1]);
   const temperature = simulated ? (x, y, z) => grid.temperatureAt(x, y, z) : (x, y, z) => airflow.conditions.zones[g.zones[g.zone[cellAt(g, [x, y, z])]]]?.t ?? 20;
-  sliceRange = slices.update({ inside: fluid, value, velocity, temperature, co2: (x, y, z) => co2Near([x, y, z]) }, kind, colour, g, arrows);
+  const co2 = (x, y, z) => co2Near([x, y, z]);
+  const value = (kind, x, y, z) => (kind === 'speed' ? Math.hypot(...velocity(x, y, z)) : kind === 'co2' ? co2(x, y, z) : temperature(x, y, z));
+  const co2Ramp = (v, [lo, hi]) => co2Color(CO2_SCALE[0] + ((v - lo) / Math.max(1, hi - lo)) * (CO2_SCALE[2] - CO2_SCALE[0]));
+  const colour = (kind, v, range) => (kind === 'speed' ? speedColor(v) : kind === 'co2' ? co2Ramp(v, range) : rampTemperature(v, range[0], range[1]));
+  sliceRanges = slices.update({ inside: fluid, value, velocity, temperature, co2 }, colour, g);
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
@@ -291,7 +300,7 @@ function solveAir() {
       grid.setCO2(co2);
       worker.postMessage({ type: 'co2', co2 });
     }
-    if ($('slices').value === 'co2') drawSlices(true);
+    if (view.sections.planes.some((q) => q.air.field === 'co2')) drawSlices(true);
     if ($('color-by').value === 'co2') legend();
     const line = document.getElementById('co2-line');
     if (line) line.outerHTML = co2Line(line.dataset.zone);
@@ -303,6 +312,7 @@ function solveAir() {
     return [n, { ...sashOf(n), angle: sashFor(l, conditions.open[n]).angle }];
   })));
   $('windows-reset').hidden = !windowSet.size && !roomSet.size;
+  showKeyframes();
   // With a results file, temperatures belong to the results' own window states.
   const differs = results && (modelEdited || mode !== 'results' || [...windowSet.keys()].some((n) => !n.endsWith(':door')) || roomSet.size);
   $('stale').hidden = !differs;
@@ -520,7 +530,10 @@ const current = () => (view.sections.selected ? { kind: 'plane', item: view.sect
 // Section planes: added from the bar (dragged in, or a click on the button and then on the view), and
 // picked, moved and turned in the view (sections.js). The air on them follows every change.
 view.sections.onChange = () => drawSlices(true);
-view.sections.onSelect = (p) => { if (p) view.select(null); };
+view.sections.onSelect = (p) => {
+  if (p) { const c = view.sections.screen(view.sections.centre(p)); view.lastPick = [c.x, c.y]; view.select(null); showInfo({ kind: 'plane', item: p }); }
+  else if ($('info').dataset.kind === 'plane') showInfo(current());
+};
 for (const b of document.querySelectorAll('[data-add]')) {
   b.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !model) return;
@@ -593,12 +606,8 @@ $('info').addEventListener('input', (e) => {
 $('windows-reset').addEventListener('click', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(current()); legend(); });
 for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(current()); legend(); });
 
-// Vertical section, along or across the footprint's long side.
-$('slices').addEventListener('change', () => drawSlices(true));
-$('arrows').addEventListener('change', () => drawSlices(true));
 
 $('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
-$('cut-color').addEventListener('change', (e) => { slices.colorBy = e.target.value; legend(); });
 // What the grid solver needs for CO2 in an hour: each zone's level from the balance, the outdoor
 // level, and the CO2 people breathe out and the outdoor air supplied, by zone.
 function co2Message(hourAt, targets, site) {
@@ -618,14 +627,6 @@ function co2Near(p, zoneIndex = null) {
   return airflow?.co2?.[g.zones[zi]] ?? 400;
 }
 air.co2At = (p, zi) => co2Near(p, zi);
-// The particles in the cuts: their own density and speed.
-$('cut-density').addEventListener('input', (e) => {
-  const k = 2 ** Number(e.target.value);
-  slices.density = k;
-  $('cut-density-value').textContent = `×${k < 1 ? k.toFixed(2).replace(/0$/, '') : k}`;
-  drawSlices(true);
-});
-$('cut-speed').addEventListener('input', (e) => { slices.timeScale = Number(e.target.value); $('cut-speed-value').textContent = `×${e.target.value}`; });
 $('air-speed').addEventListener('input', (e) => { air.speed = Number(e.target.value); $('air-speed-value').textContent = `×${e.target.value}`; });
 let selected = null;
 
@@ -652,6 +653,7 @@ function updateRun() {
 }
 function applyHour() {
   updateRun();
+  if (keyframes.length) followKeyframes(Number($('hour').value) - 1);
   if (!baking && !bakedPlay) bakeStatus();
   for (const id of ['day', 'hour', 'play']) $(id).disabled = !weather && !results;
   if (!weather && !results && $('play').classList.contains('on')) setPlaying(false);
@@ -815,8 +817,7 @@ function showInfo(found) {
   const box = $('info');
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
-  // Nothing to show for a clipping plane: its gumball and grips are its controls.
-  if (!found || found.kind === 'plane') { box.hidden = true; box.dataset.kind = ''; popKey = null; return; }
+  if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; return; }
   const { kind, item } = found, key = `${kind}:${item.name}`;
   // Not redrawn under a figure being typed, unless the selection changed.
   if (key === popKey && box.contains(document.activeElement) && document.activeElement.matches('input:not([type=range]), select')) return;
@@ -833,7 +834,7 @@ function showInfo(found) {
 // Beside the point picked, inside the view.
 function placePop() {
   const box = $('info'), v = $('viewer'), at = view.lastPick;
-  if (!at) { Object.assign(box.style, { left: '10px', top: '', bottom: '10px' }); return; }
+  if (!at) { Object.assign(box.style, { left: '10px', top: '10px', bottom: '' }); return; }
   const w = box.offsetWidth, h = box.offsetHeight, W = v.clientWidth, H = v.clientHeight;
   const x = Math.max(8, Math.min(at[0] + 16, W - w - 8)), y = Math.max(8, Math.min(at[1] + 12, H - h - 8));
   Object.assign(box.style, { left: `${x}px`, top: `${y}px`, bottom: '' });
@@ -850,12 +851,20 @@ $('info').addEventListener('pointerdown', (e) => {
 // below), never over it; a window being edited keeps room for its figures.
 function followPop() {
   const box = $('info');
-  if (popPinned || box.hidden || !model || !view.selectedPolys?.length || box.dataset.kind === 'plane') return;
-  const pts = view.selectedPolys.flatMap((p) => p.vertices), o = view.origin, q = new THREE.Vector3();
+  if (popPinned || box.hidden || !model) return;
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (const p of pts) {
-    const s2 = view.sections.screen(q.set(p[0] - o[0], p[1] - o[1], p[2] - o[2]));
-    x0 = Math.min(x0, s2.x); x1 = Math.max(x1, s2.x); y0 = Math.min(y0, s2.y); y1 = Math.max(y1, s2.y);
+  if (box.dataset.kind === 'plane') {
+    // Beside a plane's gumball, clear of its arrows.
+    if (!view.sections.selected) return;
+    const c = view.sections.screen(view.sections.centre(view.sections.selected));
+    [x0, x1, y0, y1] = [c.x - 70, c.x + 70, c.y - 70, c.y + 70];
+  } else {
+    if (!view.selectedPolys?.length) return;
+    const pts = view.selectedPolys.flatMap((p) => p.vertices), o = view.origin, q = new THREE.Vector3();
+    for (const p of pts) {
+      const s2 = view.sections.screen(q.set(p[0] - o[0], p[1] - o[1], p[2] - o[2]));
+      x0 = Math.min(x0, s2.x); x1 = Math.max(x1, s2.x); y0 = Math.min(y0, s2.y); y1 = Math.max(y1, s2.y);
+    }
   }
   const pad = winEdit.active ? 64 : 14, v = $('viewer'), W = v.clientWidth, H = v.clientHeight, w = box.offsetWidth, h = box.offsetHeight;
   let x = x1 + pad, y = Math.max(8, Math.min((y0 + y1) / 2 - h / 2, H - h - 8));
@@ -880,6 +889,7 @@ const popNum = (key, value, unit, tip, digits = 2, extra = '') => `<span class="
 function popContent(kind, item) {
   const rows = [];
   const deg = (x) => (x === null ? '' : `${Math.round(x)}°`);
+  if (kind === 'plane') return { title: esc(item.name), rows: planeRows(item) };
   let title;
   if (kind === 'surface') {
     title = `${esc(item.csType)} · ${esc(item.zone)}`;
@@ -923,6 +933,39 @@ function popContent(kind, item) {
   }
   return { title, rows };
 }
+
+// A clipping plane's own view of the air: what its cut is coloured by, and its particles (their
+// colour, density and speed), so planes can show different things. Moving it is its gumball's job.
+const TIMES = (k) => `×${k < 1 ? k.toFixed(2).replace(/0$/, '') : k}`;
+function planeRows(p) {
+  const a = p.air, opt = (list, now) => list.map(([v, l]) => `<option value="${v}"${v === now ? ' selected' : ''}>${l}</option>`).join('');
+  const fields = [['', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂']];
+  return [
+    `<span class="popkv"><span class="tipped" title="Colour the cut where it passes through rooms: the air's temperature, speed or CO2. Point at the cut to read the values there.">Cut colour</span><select class="popsel" data-air="field">${opt(fields, a.field)}</select></span>`,
+    `<label class="chk" title="Particles moving with the air within this plane, trailing, as in a 2D section: their own, apart from the 3D particles"><input type="checkbox" data-air="particles"${a.particles ? ' checked' : ''}> Particles in the cut</label>`,
+    ...(a.particles ? [
+      `<span class="popkv"><span>Colour</span><select class="popsel" data-air="color">${opt([['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['none', 'None (black)']], a.color)}</select></span>`,
+      `<span class="popkv"><span class="tipped" title="How many particles for the same area of air">Density</span><span class="popv"><input type="range" data-air="density" min="-2" max="2" step="0.5" value="${Math.log2(a.density)}"> <output>${TIMES(a.density)}</output></span></span>`,
+      `<span class="popkv"><span class="tipped" title="How much faster than real time they move">Speed</span><span class="popv"><input type="range" data-air="speed" min="1" max="60" value="${a.speed}"> <output>${TIMES(a.speed)}</output></span></span>`,
+    ] : []),
+  ];
+}
+// Its settings changed: the cut redrawn (density and speed as the slider moves).
+function onAir(e) {
+  const t = e.target, key = t.dataset?.air, p = view.sections.selected;
+  if (!key || !p) return;
+  const a = p.air;
+  if (key === 'particles') a.particles = t.checked;
+  else if (key === 'density') a.density = 2 ** Number(t.value);
+  else if (key === 'speed') a.speed = Number(t.value);
+  else a[key] = t.value;
+  if (key === 'density' || key === 'speed') t.nextElementSibling.textContent = TIMES(a[key]);
+  if (key !== 'speed') drawSlices(true);
+  if (e.type === 'change' && key !== 'density' && key !== 'speed') showInfo(current());
+  legend();
+}
+$('info').addEventListener('input', onAir);
+$('info').addEventListener('change', onAir);
 
 const dirWord = (az) => (az === null || az === undefined ? 'skylight' : ['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west'][Math.round(az / 45) % 8]);
 
@@ -1175,17 +1218,18 @@ function legend() {
     SPEED_BANDS.forEach((b, i) => items.push(chip(BAND_COLORS[i], b === Infinity ? `over ${SPEED_BANDS[i - 1]} m/s` : `${i ? SPEED_BANDS[i - 1] : 0}–${b} m/s`)));
     items.push(chip('#E0401F', 'This hour', 'The arrow points the way the wind blows; its length grows with speed.'));
   }
-  if ($('slices').value && sliceRange !== undefined && slices.visible) {
-    if ($('slices').value === 'co2' && sliceRange) {
-      const [lo, hi] = sliceRange;
-      items.push(`<span title="Cuts: CO2 in the room air, from the grid solver (each room's mean held at its balance figure) or, with ideal flow, each room's own level. Coloured from the lowest to the highest on the cuts, so the pattern within rooms shows; the colours do not mean the same levels as Colour by CO2.">${ramp([co2Color(CO2_SCALE[0]), co2Color(CO2_SCALE[1]), co2Color(CO2_SCALE[2])], 48)}Cuts: CO₂ ${fmt(lo, 0)} … ${fmt(hi, 0)} ppm</span>`);
-    } else if ($('slices').value === 'speed') {
-      const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
-      items.push(`<span title="Slices: air speed on a log scale">${ramp(stops, 48)}Slices: speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
-    } else if (sliceRange) {
-      const [lo, hi] = sliceRange;
-      items.push(`<span title="Slices: air temperature, from the lowest to the highest on the slices shown">${ramp([rampTemperature(lo, lo, hi), rampTemperature((lo + hi) / 2, lo, hi), rampTemperature(hi, lo, hi)], 48)}Slices: ${fmt(lo, 1)} … ${fmt(hi, 1)} °C</span>`);
-    }
+  // The cuts: each field one of them is coloured by, over its range there.
+  if (slices.visible && sliceRanges.co2) {
+    const [lo, hi] = sliceRanges.co2;
+    items.push(`<span title="Cuts: CO2 in the room air, from the grid solver (each room's mean held at its balance figure) or, with ideal flow, each room's own level. Coloured from the lowest to the highest on the cuts, so the pattern within rooms shows; the colours do not mean the same levels as Colour by CO2.">${ramp([co2Color(CO2_SCALE[0]), co2Color(CO2_SCALE[1]), co2Color(CO2_SCALE[2])], 48)}Cuts: CO₂ ${fmt(lo, 0)} … ${fmt(hi, 0)} ppm</span>`);
+  }
+  if (slices.visible && sliceRanges.speed) {
+    const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
+    items.push(`<span title="Cuts: air speed on a log scale">${ramp(stops, 48)}Cuts: speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
+  }
+  if (slices.visible && sliceRanges.temperature) {
+    const [lo, hi] = sliceRanges.temperature;
+    items.push(`<span title="Cuts: air temperature, from the lowest to the highest on the cuts coloured by it">${ramp([rampTemperature(lo, lo, hi), rampTemperature((lo + hi) / 2, lo, hi), rampTemperature(hi, lo, hi)], 48)}Cuts: ${fmt(lo, 1)} … ${fmt(hi, 1)} °C</span>`);
   }
   // Particles: the 3D ones and those in the cuts, each by its own colour setting; one entry when they agree.
   const particleKey = (mode, who) => {
@@ -1197,11 +1241,11 @@ function legend() {
     if (mode === 'none') return chip('#000000', `${who}: black`);
     return `<span title="${who} colour: the temperature of the air they carry">${ramp([temperatureColor(14), temperatureColor(22), temperatureColor(30)])}${who}: 14–30 °C</span>`;
   };
-  const cutsShown = $('arrows').checked && view.sections.planes.length > 0;
-  if ($('show-air').checked && cutsShown && $('air-color').value === $('cut-color').value) items.push(particleKey($('air-color').value, 'Particles'));
+  const cutColours = [...new Set(view.sections.planes.filter((q) => q.air.particles).map((q) => q.air.color))];
+  if ($('show-air').checked && cutColours.length === 1 && $('air-color').value === cutColours[0]) items.push(particleKey($('air-color').value, 'Particles'));
   else {
     if ($('show-air').checked) items.push(particleKey($('air-color').value, 'Particles'));
-    if (cutsShown) items.push(particleKey($('cut-color').value, 'In the cuts'));
+    for (const c of cutColours) items.push(particleKey(c, 'In the cuts'));
   }
   if (view.problems.length) items.push(chip(PROBLEM, 'Named by a model check', 'The arrow shows the way EnergyPlus takes as outward, from the order of the corner points.'));
   $('legend').innerHTML = items.join('');
@@ -1290,8 +1334,6 @@ typeable($('day-value'), $('day'), parseDay);
 typeable($('when'), $('hour'), parseHour);
 typeable($('air-density-value'), $('air-density'), (t) => { const k = parseTimes(t); return k > 0 ? Math.log2(k) : null; });
 typeable($('air-speed-value'), $('air-speed'), parseTimes);
-typeable($('cut-density-value'), $('cut-density'), (t) => { const k = parseTimes(t); return k > 0 ? Math.log2(k) : null; });
-typeable($('cut-speed-value'), $('cut-speed'), parseTimes);
 
 // A figure set by dragging its name left or right, as at the foot of the Solar Shading Explorer's views:
 // `per` of a unit for each pixel moved, kept within min and max (or wrapped round `wrap`); its value
@@ -1394,6 +1436,65 @@ function setPlaying(on) {
     showMinutes(0);
   }, 100);
 }
+// ---------- window keyframes ----------
+// The windows and doors kept at an hour (◆ Keyframe): the Windows, Doors and Sashes settings and every
+// window or room set one by one. From each keyframe's hour until the next they hold, as the day plays,
+// as it is baked and as the hour is moved; before the first, the first holds. Editing windows between
+// keyframes changes only what is shown until the hour moves, unless it is kept as a keyframe.
+let keyframes = [], kfHour = null;
+function windowState() {
+  return { windows: $('windows').value, doors: $('doors').value, sash: $('sash-type').value,
+    windowSet: [...windowSet], roomSet: [...roomSet], sashSet: [...sashSet].map(([k, v]) => [k, { ...v }]), amountSet: [...amountSet] };
+}
+const sameState = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function keyframeAt(hour) {
+  if (!keyframes.length) return null;
+  return [...keyframes].reverse().find((k) => k.hour <= hour) || keyframes[0];
+}
+// Puts the windows as a keyframe has them, when the hour has moved to another keyframe's span.
+function followKeyframes(hour) {
+  const k = keyframeAt(hour);
+  if (!k || kfHour === k.hour) return;
+  kfHour = k.hour;
+  const s = k.state;
+  $('windows').value = s.windows; $('doors').value = s.doors; $('sash-type').value = s.sash;
+  windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();
+  for (const [n, v] of s.windowSet) windowSet.set(n, v);
+  for (const [n, v] of s.roomSet) roomSet.set(n, v);
+  for (const [n, v] of s.sashSet) sashSet.set(n, { ...v });
+  for (const [n, v] of s.amountSet) amountSet.set(n, v);
+}
+function saveKeyframe() {
+  const hour = Number($('hour').value) - 1, state = windowState();
+  keyframes = keyframes.filter((k) => k.hour !== hour).concat({ hour, state }).sort((a, b) => a.hour - b.hour);
+  kfHour = hour;
+  showKeyframes();
+}
+// What a keyframe holds, in a few words.
+function keyframeWords(s) {
+  const mode = { open: 'all open', closed: 'all closed', results: 'as in results' }[s.windows] || s.windows;
+  const own = s.windowSet.filter(([n]) => !n.endsWith(':door')).length + s.roomSet.length, doors = s.windowSet.filter(([n]) => n.endsWith(':door')).length;
+  return [`windows ${mode}`, s.sash !== 'casement' ? s.sash : null, own ? `${own} set one by one` : null, s.amountSet.length ? `${s.amountSet.length} opening${s.amountSet.length === 1 ? '' : 's'} set` : null,
+    `doors ${s.doors}${doors ? `, ${doors} set` : ''}`].filter(Boolean).join(', ');
+}
+function showKeyframes() {
+  const hour = Number($('hour').value) - 1, now = keyframeAt(hour), changed = now && !sameState(now.state, windowState());
+  $('keyframes').innerHTML = keyframes.length ? keyframes.map((k) => `<div class="kfrow${k === now ? ' on' : ''}"><button type="button" class="linkbtn" data-kf="go" data-h="${k.hour}" title="Go to ${pad2(k.hour)}:00">${pad2(k.hour)}:00</button>`
+    + `<span class="muted">${esc(keyframeWords(k.state))}</span><button type="button" class="pbtnx" data-kf="del" data-h="${k.hour}" title="Remove this keyframe">×</button></div>`).join('')
+    : '<span class="muted">None: set the windows, then ◆ Keyframe.</span>';
+  $('keyframe').disabled = !model;
+  $('keyframe').textContent = changed ? '◆ Keyframe *' : '◆ Keyframe';
+  $('keyframe').title = (changed ? `The windows differ from the keyframe at ${pad2(now.hour)}:00: keep them as a keyframe at ${pad2(hour)}:00. ` : '') + 'Keep the windows and doors as they are now as a keyframe at this hour. From then on, as the day plays (and in bakes) they change at each keyframe and hold until the next. The keyframes are listed in the Play day menu.';
+}
+$('keyframe').addEventListener('click', saveKeyframe);
+$('keyframes').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-kf]');
+  if (!b) return;
+  const h = Number(b.dataset.h);
+  if (b.dataset.kf === 'del') { keyframes = keyframes.filter((k) => k.hour !== h); kfHour = null; showKeyframes(); return; }
+  const el = $('hour'); el.value = h + 1; el.dispatchEvent(new Event('input', { bubbles: true }));
+});
+
 // ---------- Play day, baked ----------
 // A day worked out before it is played, so it plays smoothly at any speed: each hour's network, and
 // its room air, either ideal flow (seconds) or the grid solver run for each hour's air time in a
@@ -1403,8 +1504,8 @@ function setPlaying(on) {
 let bake = null, baking = null, bakedPlay = null, edits = 0;
 function bakeKey(kind) {
   return JSON.stringify([kind, edits, model?.source.fileName, results?.name || null, weather?.fileName || null, $('day').value, playSpan(),
-    $('windows').value, $('doors').value, $('sash-type').value, [...windowSet], [...roomSet], [...sashSet], [...amountSet],
-    weather ? null : [$('t-out').value, $('t-in').value, $('wind').value, $('wind-dir').value], kind === 'grid' ? $('play-hold').value : null]);
+    ...(keyframes.length ? [] : [$('windows').value, $('doors').value, $('sash-type').value, [...windowSet], [...roomSet], [...sashSet], [...amountSet]]),
+    weather ? null : [$('t-out').value, $('t-in').value, $('wind').value, $('wind-dir').value], kind === 'grid' ? $('play-hold').value : null, keyframes]);
 }
 const bakeReady = () => !!bake && bake.key === bakeKey(bake.kind);
 function bakeStatus(text) {
@@ -1642,6 +1743,7 @@ function render(m) {
   if (bakedPlay) stopBaked();
   if (baking) baking.cancel();
   bake = null; edits = 0;
+  keyframes = []; kfHour = null;
   $('edited').hidden = true;
   $('lib-open').disabled = false;
   libOpen = null;
