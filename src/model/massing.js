@@ -28,7 +28,7 @@ export const SIDE_AZIMUTH = { N: 0, E: 90, S: 180, W: 270 };
 export const WINDOW_EDGE = 0.02; // m, kept between a window and its wall's edges or the next window
 
 export const WINDOWS0 = () => ({ winBy: 'number', winN: 4, winSp: 4.5, winW: 2.0, winH: 1.6, sill: 0.9, fillW: false, fillH: false, broken: {} });
-export const storey0 = (h = 3.5, w = 20, d = 10) => ({ name: null, h, w, d, ox: 0, oy: 0, slab: 0.3, sides: { N: WINDOWS0(), E: WINDOWS0(), S: WINDOWS0(), W: WINDOWS0() } });
+export const storey0 = (h = 3.5, w = 20, d = 10) => ({ name: null, h, w, d, ox: 0, oy: 0, rot: 0, slab: 0.3, sides: { N: WINDOWS0(), E: WINDOWS0(), S: WINDOWS0(), W: WINDOWS0() } });
 
 export const MASSING_SETTINGS0 = () => ({
   peoplePerArea: 0.0565, activity: 125.28, lightsPerArea: 6.57, equipmentPerArea: 10.33,
@@ -90,29 +90,48 @@ export function storeyBases(m) {
   for (const s of m.storeys) z.push(z[z.length - 1] + s.h);
   return z;
 }
-const plate = (s) => ({ x0: s.ox - s.w / 2, x1: s.ox + s.w / 2, y0: s.oy - s.d / 2, y1: s.oy + s.d / 2 });
-const overlap = (a, b) => {
-  const r = { x0: Math.max(a.x0, b.x0), x1: Math.min(a.x1, b.x1), y0: Math.max(a.y0, b.y0), y1: Math.min(a.y1, b.y1) };
-  return r.x1 - r.x0 > 1e-6 && r.y1 - r.y0 > 1e-6 ? r : null;
-};
-// A rectangle less another, as up to four rectangles (strips below and above, then left and right).
-function minus(a, b) {
-  const o = overlap(a, b);
-  if (!o) return [a];
-  const out = [
-    { x0: a.x0, x1: a.x1, y0: a.y0, y1: o.y0 }, { x0: a.x0, x1: a.x1, y0: o.y1, y1: a.y1 },
-    { x0: a.x0, x1: o.x0, y0: o.y0, y1: o.y1 }, { x0: o.x1, x1: a.x1, y0: o.y0, y1: o.y1 },
-  ];
-  return out.filter((r) => r.x1 - r.x0 > 1e-6 && r.y1 - r.y0 > 1e-6);
+// Turned clockwise in plan by a degrees, as a compass bearing turns.
+export const turnPlan = ([x, y], a) => { const r = (a * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r); return [x * c + y * s, -x * s + y * c]; };
+// A storey's plate in building coordinates: its corners counterclockwise seen from above, from the
+// south-west (before it is turned), so edge k is its side SIDES[k], left to right seen from outside.
+export function platePolygon(s) {
+  const hw = s.w / 2, hd = s.d / 2;
+  return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map((p) => { const [x, y] = turnPlan(p, s.rot || 0); return [x + s.ox, y + s.oy]; });
 }
-// A rectangle at a height, its corners counterclockwise seen from above (up) or from below (down).
-const flat = (r, z, up) => (up
-  ? [[r.x0, r.y0, z], [r.x1, r.y0, z], [r.x1, r.y1, z], [r.x0, r.y1, z]]
-  : [[r.x0, r.y0, z], [r.x0, r.y1, z], [r.x1, r.y1, z], [r.x1, r.y0, z]]);
-// A side of a plate: from its left end to its right end seen from outside.
-function sideLine(r, f) {
-  return { S: [[r.x0, r.y0], [r.x1, r.y0]], E: [[r.x1, r.y0], [r.x1, r.y1]], N: [[r.x1, r.y1], [r.x0, r.y1]], W: [[r.x0, r.y1], [r.x0, r.y0]] }[f];
+const polyArea = (P) => P.reduce((a, p, i) => { const q = P[(i + 1) % P.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0) / 2;
+// A convex polygon clipped to the inside (left) of the line a -> b, or to its outside.
+function clipLine(P, a, b, inside = true) {
+  const side = (p) => (inside ? 1 : -1) * ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]));
+  const out = [];
+  P.forEach((p, i) => {
+    const q = P[(i + 1) % P.length], sp = side(p), sq = side(q);
+    if (sp >= -1e-9) out.push(p);
+    if ((sp > 1e-9 && sq < -1e-9) || (sp < -1e-9 && sq > 1e-9)) { const t = sp / (sp - sq); out.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]); }
+  });
+  return clean(out);
 }
+// Repeated and collinear corners dropped.
+function clean(P) {
+  let out = P.filter((p, i) => Math.hypot(p[0] - P[(i + 1) % P.length][0], p[1] - P[(i + 1) % P.length][1]) > 1e-6);
+  out = out.filter((p, i) => { const a = out[(i + out.length - 1) % out.length], b = out[(i + 1) % out.length]; return Math.abs((p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0])) > 1e-9; });
+  return out.length >= 3 && polyArea(out) > 1e-4 ? out : [];
+}
+// Where two convex plates overlap, or null.
+const overlap = (A, B) => { let P = A; for (let i = 0; i < B.length && P.length; i++) P = clipLine(P, B[i], B[(i + 1) % B.length]); return P.length ? P : null; };
+// A convex plate less another, as convex pieces: the part outside each of the other's sides in turn.
+function minus(A, B) {
+  if (!overlap(A, B)) return [A];
+  const out = [];
+  let rest = A;
+  for (let i = 0; i < B.length && rest.length; i++) {
+    const a = B[i], b = B[(i + 1) % B.length], piece = clipLine(rest, a, b, false);
+    if (piece.length) out.push(piece);
+    rest = clipLine(rest, a, b, true);
+  }
+  return out;
+}
+// A plate at a height, its corners counterclockwise seen from above (up) or from below (down).
+const flat = (P, z, up) => (up ? P : [...P].reverse()).map(([x, y]) => [x, y, z]);
 
 const zoneName = (m, s, i) => `${String(s.name || `${m.name || 'Floor'}${i + 1}`).replace(/[,;!]/g, ' ').trim()}_${i}`;
 
@@ -121,7 +140,7 @@ const zoneName = (m, s, i) => `${String(s.name || `${m.name || 'Floor'}${i + 1}`
 export function massingGeometry(m) {
   const z = storeyBases(m), a = ((m.rot || 0) * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
   const turn = ([x, y, h]) => [x * c + y * sn, -x * sn + y * c, h];
-  const zones = m.storeys.map((s, i) => ({ name: zoneName(m, s, i), storey: i, z0: z[i], z1: z[i + 1], plate: plate(s), surfaces: [], windows: [] }));
+  const zones = m.storeys.map((s, i) => ({ name: zoneName(m, s, i), storey: i, z0: z[i], z1: z[i + 1], plate: platePolygon(s), surfaces: [], windows: [] }));
   const add = (zone, type, kind, pts, extra = {}) => {
     const name = `${zone.name}:f${zone.surfaces.length}`;
     zone.surfaces.push({ name, type, kind, vertices: pts.map(turn), ...extra });
@@ -137,14 +156,14 @@ export function massingGeometry(m) {
       for (const r of minus(zone.plate, below.plate)) add(zone, 'Floor', 'exposed', flat(r, zone.z0, false));
     }
     // the walls, each with its windows
-    for (const f of SIDES) {
-      const [A, B] = sideLine(zone.plate, f), len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+    for (const [k, f] of SIDES.entries()) {
+      const A = zone.plate[k], B = zone.plate[(k + 1) % 4], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
       const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len], mid = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
       const wall = add(zone, 'Wall', 'facade', [[A[0], A[1], zone.z0], [B[0], B[1], zone.z0], [B[0], B[1], zone.z1], [A[0], A[1], zone.z1]], { side: f });
       const at = (u, v) => [mid[0] + U[0] * u, mid[1] + U[1] * u, zone.z0 + v];
       sideWindows(s.sides?.[f], len, s.h, s.slab).forEach((w, k) => zone.windows.push({
         name: `${wall}:w${k}`, wall, side: f, index: w.index, width: w.u1 - w.u0, height: w.v1 - w.v0,
-        azimuth: (SIDE_AZIMUTH[f] + (m.rot || 0) + 360) % 360,
+        azimuth: (SIDE_AZIMUTH[f] + (s.rot || 0) + (m.rot || 0) + 720) % 360,
         vertices: [at(w.u0, w.v0), at(w.u1, w.v0), at(w.u1, w.v1), at(w.u0, w.v1)].map(turn),
       }));
     }
@@ -302,7 +321,7 @@ export function massingEpJSON(m, { weather = null, runPeriod = null } = {}) {
 
   const asm = (kind) => MASSING_ASSEMBLIES[kind][0];
   for (const zone of zones) {
-    const Z = zone.name, r = zone.plate, floorArea = (r.x1 - r.x0) * (r.y1 - r.y0);
+    const Z = zone.name, floorArea = polyArea(zone.plate);
     ep.Zone[Z] = { direction_of_relative_north: 0, x_origin: 0, y_origin: 0, z_origin: 0, type: 1, multiplier: 1, floor_area: floorArea, volume: floorArea * (zone.z1 - zone.z0), zone_inside_convection_algorithm: 'TARP', zone_outside_convection_algorithm: 'DOE-2' };
     for (const s of zone.surfaces) {
       const o = { surface_type: s.type, zone_name: Z, number_of_vertices: s.vertices.length, vertices: vertexList(s.vertices) };
@@ -436,4 +455,63 @@ export function breakOutWindow(m, name, r, wallMid) {
   g.broken = { ...(g.broken || {}) };
   g.broken[at.index] = { winW: +(r.s1 - r.s0).toFixed(3), winH: +(r.z1 - r.z0).toFixed(3), sill: +(r.z0 - at.z0).toFixed(3), offU: +(mid - (first + at.index * pitch)).toFixed(3), fillW: false, fillH: false };
   return true;
+}
+
+// ---------- a storey's handles ----------
+
+// A storey as the view draws its handles, in the model's coordinates (the building turned): its
+// corners, floor and roof levels, middle, own axes, and each face's middle and outward normal
+// ('S', 'E', 'N', 'W', 'roof', 'floor').
+export function storeyFrame(m, i) {
+  const s = m.storeys[i], z = storeyBases(m), z0 = z[i], z1 = z[i + 1], B = m.rot || 0;
+  const corners = platePolygon(s).map((p) => turnPlan(p, B));
+  const c = turnPlan([s.ox, s.oy], B), axis = (v) => [...turnPlan(turnPlan(v, s.rot || 0), B), 0];
+  const faces = SIDES.map((f, k) => {
+    const a = corners[k], b = corners[(k + 1) % 4], d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    return { key: f, at: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (z0 + z1) / 2], normal: [(b[1] - a[1]) / d, -(b[0] - a[0]) / d, 0] };
+  });
+  faces.push({ key: 'roof', at: [c[0], c[1], z1], normal: [0, 0, 1] });
+  if (i > 0) faces.push({ key: 'floor', at: [c[0], c[1], z0], normal: [0, 0, -1] });
+  return { corners, z0, z1, centre: [c[0], c[1], (z0 + z1) / 2], x: axis([1, 0]), y: axis([0, 1]), faces };
+}
+
+const SIDE_NORMAL = { S: [0, -1], E: [1, 0], N: [0, 1], W: [-1, 0] };
+export const STOREY_MIN = { h: 2, w: 1, d: 1 };
+
+// A face of storey i pushed or pulled by `dist` m along its outward normal: a wall takes its side of
+// the plate with it (the opposite side stays), the roof raises the storey and every storey above, the
+// floor lowers this storey's floor and so the ceiling of the one below. Returns the distance taken.
+export function pushFace(m, i, face, dist) {
+  const s = m.storeys[i];
+  if (face === 'roof') { const h = Math.max(STOREY_MIN.h, s.h + dist); dist = h - s.h; s.h = h; return dist; }
+  if (face === 'floor') {
+    const below = m.storeys[i - 1];
+    if (!below) return 0;
+    dist = Math.min(dist, below.h - STOREY_MIN.h);
+    dist = Math.max(dist, STOREY_MIN.h - s.h);
+    below.h -= dist; s.h += dist;
+    return dist;
+  }
+  const k = face === 'E' || face === 'W' ? 'w' : 'd', v = Math.max(STOREY_MIN[k], s[k] + dist);
+  dist = v - s[k];
+  s[k] = v;
+  const [dx, dy] = turnPlan(SIDE_NORMAL[face], s.rot || 0);
+  s.ox += (dx * dist) / 2; s.oy += (dy * dist) / 2;
+  return dist;
+}
+
+// Storey i moved along its own x or y axis, or up ('z': its floor and every storey above rise, the
+// storey below growing to meet it).
+export function moveStorey(m, i, axis, dist) {
+  const s = m.storeys[i];
+  if (axis === 'z') {
+    const below = m.storeys[i - 1];
+    if (!below) return 0;
+    const h = Math.max(STOREY_MIN.h, below.h + dist);
+    dist = h - below.h; below.h = h;
+    return dist;
+  }
+  const [dx, dy] = turnPlan(axis === 'x' ? [1, 0] : [0, 1], s.rot || 0);
+  s.ox += dx * dist; s.oy += dy * dist;
+  return dist;
 }

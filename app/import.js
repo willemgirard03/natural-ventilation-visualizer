@@ -27,8 +27,9 @@ import {
 } from '../src/model/edit.js';
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
-import { massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow } from '../src/model/massing.js';
+import { massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry } from '../src/model/massing.js';
 import { massingPanel } from './massing-panel.js';
+import { MassingEditor } from './massedit.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -127,7 +128,7 @@ const hover = new HoverPick(view, { candidatesAt, edgesOf });
 }
 view.offered = (e) => hover.pickFor(e);
 // While a plane's or a window's handle is under the pointer, nothing else is offered.
-view.busy = (e) => !!(view.sections.handleAt(e) || winEdit.handleAt(e));
+view.busy = (e) => !!(view.sections.handleAt(e) || winEdit.handleAt(e) || massEdit.handleAt(e));
 hover.setEnabled($('show-labels').checked);
 $('show-labels').addEventListener('change', (e) => hover.setEnabled(e.target.checked));
 // A window's sill, head and jambs pushed and pulled in the view, and the window dragged across its wall.
@@ -143,7 +144,9 @@ const winEdit = new WindowEditor(view, {
     : applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true })),
 });
 view.onRender = () => followPop();
-view.beforeRender = () => winEdit.beforeRender();
+// A massing's storey pushed, pulled, moved and turned in the view (app/massedit.js).
+const massEdit = new MassingEditor(view, { massing: () => massing, onChange: massingChange });
+view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); };
 let sliceRanges = {}, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
 // room's own temperature. Throttled, since the simulation posts several steps a second.
@@ -790,7 +793,7 @@ const load = (file) => loadText(file.name, () => file.text());
 
 async function loadText(name, read) {
   $('status').textContent = `Reading ${name}…`;
-  massing = null; $('massing').hidden = true; $('mass-open').hidden = true;
+  massing = null; $('massing').hidden = true; $('mass-open').hidden = true; massEdit.stop();
   try {
     const epjson = JSON.parse(await read());
     model = importEpJSON(epjson, { fileName: name });
@@ -827,6 +830,9 @@ function showInfo(found) {
   // a window of a massing: the Massing window turns to its storey and side
   const at = massing && found?.kind === 'window' && massingWindow(massing, found.item.name);
   if (at && !$('massing').hidden) massingUI.show(at.storey, at.side);
+  // a massing's zone or surface: its handles
+  const mt = massing && massingTarget(found);
+  if (mt) massEdit.start(mt); else massEdit.stop();
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
   if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; return; }
@@ -1841,6 +1847,7 @@ function refreshModel(geometry = true) {
   applyHour(); // solves the air with the model as it is now
   if ($('show-air').checked) air.play();
   winEdit.refresh();
+  massEdit.refresh();
   if (keepPlane) view.sections.select(keepPlane); else view.select(keep);
   renderLibrary();
   legend();
@@ -1944,6 +1951,20 @@ function massingChange(mutate, what) {
   e.redo = () => { r(); massing = structuredClone(after); queueMicrotask(massingUI.render); };
   massingUI.render();
   return true;
+}
+// Which storey a selected zone or surface of a massing is, and which face of it (null: the whole
+// zone). The ground floor has no handle of its own.
+function massingTarget(found) {
+  if (found?.kind !== 'zone' && found?.kind !== 'surface') return null;
+  const zones = massingGeometry(massing);
+  if (found.kind === 'zone') { const i = zones.findIndex((z) => z.name === found.item.name); return i < 0 ? null : { storey: i, face: null }; }
+  for (const z of zones) {
+    const s = z.surfaces.find((x) => x.name === found.item.name);
+    if (!s) continue;
+    const face = s.type === 'Wall' ? s.side : s.type === 'Floor' ? (z.storey > 0 ? 'floor' : null) : 'roof';
+    return face ? { storey: z.storey, face } : null;
+  }
+  return null;
 }
 // Where a window's wall has its middle, along the wall (as windowRect measures it).
 function wallMiddle(name) {

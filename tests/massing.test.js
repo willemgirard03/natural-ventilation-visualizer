@@ -86,3 +86,15 @@ test('a window dragged in its wall is broken out of its array where it was put',
     for (const k of ['s0', 's1', 'z0', 'z1']) near(r1[k], r[k], 2e-3);
   }
 });
+
+test('a storey turned on its own over the one below splits into convex slab, roof and exposed pieces', () => {
+  const m = massing0();
+  Object.assign(m.storeys[1], { rot: 30, ox: 6, w: 16, d: 8 });
+  const model = importEpJSON(massingEpJSON(m)), v = volumes(model);
+  near(v.Floor1_0, 20 * 10 * 3.5, 1e-4); near(v.Floor2_1, 16 * 8 * 3.5, 1e-4); // corners written to the micrometre
+  assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
+  const zones = massingGeometry(m);
+  // the lower roof and ceiling tile its plate; the upper floor's pieces tile the upper plate
+  const areaOf = (z, kinds) => z.surfaces.filter((s) => kinds.includes(s.kind) && s.type !== 'Wall').reduce((a, s) => a + model.surfaces[s.name].area, 0);
+  near(areaOf(zones[0], ['roof', 'slab']), 200, 1e-4); near(areaOf(zones[1], ['slab', 'exposed']), 128, 1e-4);
+});
