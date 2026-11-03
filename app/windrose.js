@@ -26,7 +26,7 @@ function label(text, color, size) {
   c.width = c.height = 128;
   const g = c.getContext('2d');
   g.fillStyle = color;
-  g.font = '600 88px Archivo, Arial, sans-serif';
+  g.font = '500 80px "IBM Plex Mono", ui-monospace, monospace';
   g.textAlign = 'center';
   g.textBaseline = 'middle';
   g.fillText(text, 64, 68);

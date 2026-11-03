@@ -13,6 +13,7 @@ import { cellAt } from '../src/solver/roomflow.js';
 import { FieldSlices, rampTemperature } from './slices.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
+import { SkyDome, VENT_BANDS, ventBandLabels } from './skydome.js';
 import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { readZoneResultsStream, zoneAt, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
@@ -134,7 +135,7 @@ const hover = new HoverPick(view, { candidatesAt, edgesOf });
 }
 view.offered = (e) => hover.pickFor(e);
 // While a plane's or a window's handle is under the pointer, nothing else is offered.
-view.busy = (e) => !!(view.sections.handleAt(e) || winEdit.handleAt(e) || massEdit.handleAt(e));
+view.busy = (e) => !!(view.sections.handleAt(e) || winEdit.handleAt(e) || massEdit.handleAt(e) || sky.handleAt(e));
 hover.setEnabled($('show-labels').checked);
 $('show-labels').addEventListener('change', (e) => hover.setEnabled(e.target.checked));
 // A window's sill, head and jambs pushed and pulled in the view, and the window dragged across its wall.
@@ -152,7 +153,40 @@ const winEdit = new WindowEditor(view, {
 view.onRender = () => followPop();
 // A massing's storey pushed, pulled, moved and turned in the view (app/massedit.js).
 const massEdit = new MassingEditor(view, { massing: () => massing, onChange: massingChange });
-view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); };
+// The sky over the building (app/skydome.js): the sun at the hour picked, dragged to pick another,
+// and true north on the horizon, dragged to set the model's north axis.
+const sky = new SkyDome(view, {
+  onTime: (doy, hour) => { $('day').value = doy; $('hour').value = hour; applyHour(); },
+  onNorth: (deg) => {
+    const name = Object.keys(model.epjson.Building || {})[0];
+    if (!name) { popMessage('The model has no Building object to hold a north axis.'); updateSky(); return; }
+    if (!applyEdit((tx) => { tx.get('Building', name).north_axis = deg; }, `north axis set to ${deg}°`, { geometry: true })) updateSky();
+  },
+});
+view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); };
+// The model's outdoor limits for opening windows (its natural ventilation's), for the sky's weather
+// dots: the first zone's that has them; EnergyPlus's own defaults where none are set.
+function ventLimits() {
+  for (const z of Object.values(model.zones)) {
+    const v = z.ventilation && [...z.ventilation.stack, ...z.ventilation.wind, ...z.ventilation.other][0];
+    if (v) return [v.controls.minOutdoorTemperature.value ?? -100, v.controls.maxOutdoorTemperature.value ?? 100];
+  }
+  return [-100, 100];
+}
+// The sky sized to the building, for the place, day and hour picked.
+function updateSky() {
+  if (!model) return;
+  const loc = Object.entries(model.epjson['Site:Location'] || {})[0];
+  sky.setPlace(weather?.location || (loc && { latitude: loc[1].latitude, longitude: loc[1].longitude, timeZone: loc[1].time_zone, name: loc[0] }));
+  const { radius, height } = view.extent(), R = 1.45 * Math.max(2 * radius, height, 1);
+  view.skyRadius = sky.shown ? R : 0;
+  sky.update({ R, north: model.site.northAxis, doy: Number($('day').value), hour: Number($('hour').value), weather, limits: ventLimits() });
+}
+$('show-sky').addEventListener('change', (e) => { sky.set({ shown: e.target.checked }); updateSky(); legend(); });
+$('show-sun').addEventListener('change', (e) => sky.set({ sunShown: e.target.checked }));
+$('sky-labels').addEventListener('change', (e) => sky.set({ labels: e.target.checked }));
+$('sky-opacity').addEventListener('input', (e) => { sky.set({ opacity: Number(e.target.value) / 100 }); $('sky-opacity-value').textContent = `${e.target.value}%`; });
+for (const el of document.querySelectorAll('[data-sky]')) el.addEventListener('change', () => { sky.set({ layers: { ...sky.layers, [el.dataset.sky]: el.checked } }); legend(); });
 let sliceRanges = {}, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
 // room's own temperature. Throttled, since the simulation posts several steps a second.
@@ -397,6 +431,7 @@ $('air-density').addEventListener('input', (e) => {
 // The wind rose for the month of the day picked, and this hour's wind as an arrow.
 function drawRose() {
   if (!model) return;
+  updateSky();
   if (!weather || !$('show-rose').checked) { view.setGroundOverlay(null); legend(); return; }
   const month = dateOf(Number($('day').value)).month;
   const radius = view.footprintRadius() * 1.05, northAxis = model.site.northAxis;
@@ -1242,6 +1277,11 @@ function legend() {
     SPEED_BANDS.forEach((b, i) => items.push(chip(BAND_COLORS[i], b === Infinity ? `over ${SPEED_BANDS[i - 1]} m/s` : `${i ? SPEED_BANDS[i - 1] : 0}–${b} m/s`)));
     items.push(chip('#E0401F', 'This hour', 'The arrow points the way the wind blows; its length grows with speed.'));
   }
+  if (sky.shown && sky.layers.dots && weather) {
+    const names = ventBandLabels(ventLimits());
+    items.push('<span title="Every daylit hour of the weather file, as a dot where the sun stood then, by whether the windows may open">Weather hours:</span>');
+    for (const b of VENT_BANDS) items.push(chip(b.color, names[b.key][0], names[b.key][1]));
+  }
   // The cuts: each field one of them is coloured by, over its range there.
   if (slices.visible && sliceRanges.co2) {
     const [lo, hi] = sliceRanges.co2;
@@ -1846,6 +1886,7 @@ function refreshModel(geometry = true) {
   startGrid(m);
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   for (const map of [windowSet, sashSet, amountSet]) for (const k of [...map.keys()]) if (!m.windows[k] && !k.endsWith(':door')) map.delete(k);
+  view.cube.setNorth(-m.site.northAxis);
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);
   $('edited').hidden = false;

@@ -17,7 +17,7 @@ import { SectionCaps } from './caps.js';
 
 // ClimateStudio's surface types, plus glazing and shading.
 // The plain white drawing (Colour by: White), in the Solar Shading Explorer's colours.
-const WHITE = { wall: '#EEF2F0', shade: '#D9E0DD', top: '#F6F8F7', floor: '#E6EAE8', edge: '#18211F', glass: '#C4D0D2' };
+const WHITE = { wall: '#E9EEEB', shade: '#DCE2DF', top: '#F6F8F7', floor: '#E6EAE8', edge: '#18211F', glass: '#C4D0D2' };
 
 export const TYPE_COLORS = {
   Facade: '#D8C7A3',
@@ -38,7 +38,7 @@ export const TYPE_COLORS = {
 const INSIDE_SHADE = 0x9a9a9a; // inside faces (the side a surface does not face) are drawn this much darker
 export const OPEN_WINDOW = '#1FA88E'; // an open window, in the airflow
 export const PROBLEM = '#D93025';
-const SELECTED = '#F2A900';
+const SELECTED = '#2F6F68'; // --glass: selection and editing, as in the shading tool's drawings
 
 // CO2 (ppm): green at outdoor levels, amber at 1000 ppm where rooms start to feel stuffy, red from 1500.
 export const CO2_SCALE = [400, 1000, 1500];
@@ -622,6 +622,12 @@ export class View3D {
     return Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1]) / 2;
   }
 
+  // The zones' footprint radius (as above) and height (m), for the sky's size.
+  extent() {
+    const b = bounds(this.surfaces.flatMap((s) => s.vertices));
+    return { radius: this.footprintRadius(), height: b.max[2] - b.min[2] };
+  }
+
   // Something drawn on the ground around the building (the wind rose); null removes it.
   setGroundOverlay(obj) {
     if (this.overlay) {
@@ -684,7 +690,7 @@ export class View3D {
     const found = name ? this.find(name) : null;
     this.selectedPolys = found?.polys || null;
     if (found) {
-      const h = new THREE.Group(), tint = { color: SELECTED, side: THREE.DoubleSide, transparent: true, opacity: 0.55, depthWrite: false, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 };
+      const h = new THREE.Group(), tint = { color: SELECTED, side: THREE.DoubleSide, transparent: true, opacity: 0.42, depthWrite: false, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 };
       const solids = found.polys.map((p) => this.thickOf(p));
       const flat = found.polys.filter((p, i) => !solids[i]);
       if (flat.length) h.add(new THREE.Mesh(polygonGeometry(flat, this.origin, null, found.kind === 'window' ? 0.03 : 0), new THREE.MeshBasicMaterial(tint)));
@@ -764,6 +770,11 @@ export class View3D {
         box.getCenter(centre);
         radius = Math.max(radius, box.getSize(new THREE.Vector3()).length() / 2);
       }
+    }
+    // With the sky shown, the whole building is framed with its dome, as the shading tool fits it.
+    if (polys === this.surfaces && this.skyRadius) {
+      centre.set(0, 0, this.skyRadius * 0.3);
+      radius = Math.max(radius, this.skyRadius * 1.3); // with the compass figures outside the horizon
     }
     const dist = (radius / Math.sin(THREE.MathUtils.degToRad(this.perspective.fov / 2))) * 1.05;
     const dir = from.clone().normalize();
