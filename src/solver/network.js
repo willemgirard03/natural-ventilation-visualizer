@@ -92,8 +92,8 @@ export function energyPlusCentroid(points) {
 
 // The network for a model, ready to solve at any moment.
 export function buildNetwork(model, options = {}) {
-  const { zones, links, options: o } = networkElements(model, options);
-  const axis = footprintAxis(model);
+  const { zones, links, options: o, axis: own } = networkElements(model, options);
+  const axis = own || footprintAxis(model); // a model's own network keeps its own wind set-up
   // EnergyPlus writes the axis and ratio rounded, as toAirflowNetwork does.
   const tables = windPressureTables(Math.round(axis.azimuth * 10) / 10, Math.round(axis.ratio * 1000) / 1000);
   const index = Object.fromEntries(zones.map((z, i) => [z, i]));
@@ -228,7 +228,7 @@ const climb = (p0, rho, h, g) => -p0 * (1 - Math.exp((-h * rho * g) / p0));
 //                       pivoted openings (pivotedOpening), as the tool's reruns write them
 // Returns zone pressures (Pa, relative to outdoors at ground level) and each link's flow both ways (kg/s).
 // exactEnergyPlus: reproduce EnergyPlus also where it treats an open opening as closed (see simpleOpening).
-export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations = 100, exactEnergyPlus = false } = {}) {
+export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations = 500, exactEnergyPlus = false } = {}) {
   const { outdoor, site = { elevation: 0, latitude: 45 } } = conditions;
   const pStd = standardPressure(site.elevation), g = gravity(site.latitude);
   const zoneState = net.zones.map((z) => {
@@ -277,15 +277,19 @@ export function solveNetwork(net, conditions, { tolerance = 1e-10, maxIterations
     return { sum, scale, J, flows };
   };
   let state = evaluate(), iterations = 0;
+  // Converged when every zone's imbalance is a tiny part of the flow through it; a step is judged by
+  // the imbalance in kg/s over all zones, so a zone with only small leaks does not hold back the
+  // Newton steps of rooms with many open windows (ClimateStudio's networks, with no doors or floor leaks).
   const residual = (s) => Math.max(...s.sum.map((x, i) => Math.abs(x) / Math.max(s.scale[i], 1e-12)));
+  const imbalance = (s) => s.sum.reduce((a, x) => a + x * x, 0);
   while (residual(state) > tolerance && iterations < maxIterations) {
     const step = solveLinear(state.J, state.sum.map((x) => -x));
-    const before = residual(state), p0 = [...p];
+    const before = imbalance(state), p0 = [...p];
     let lambda = 1;
     for (;;) { // damped Newton: halve the step until the imbalance falls
       for (let i = 0; i < N; i++) p[i] = p0[i] + lambda * step[i];
       const trial = evaluate();
-      if (residual(trial) < before || lambda < 1e-4) { state = trial; break; }
+      if (imbalance(trial) < before || lambda < 1e-4) { state = trial; break; }
       lambda /= 2;
     }
     iterations++;

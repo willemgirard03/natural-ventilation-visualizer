@@ -64,6 +64,10 @@ export function footprintAxis(model) {
 //   (their opening factor is angle / 90); other windows stay simple openings.
 export function networkElements(model, options = {}) {
   const o = { ...NETWORK_DEFAULTS, ...options };
+  // A model that has its own airflow network (ClimateStudio's AirflowNetwork mode, or the tool's own
+  // export) is solved with it: its cracks, openings and wind-pressure set-up, not the tool's defaults.
+  const own = options.own !== false && modelNetwork(model, o);
+  if (own) return own;
   const links = [];
   for (const s of Object.values(model.surfaces)) {
     const interzone = s.boundary === 'Surface';
@@ -90,6 +94,44 @@ export function networkElements(model, options = {}) {
   if (o.states) for (const l of links) if (l.type === 'opening' && l.name in o.states) l.control = o.states[l.name] ? 'open' : 'closed';
   if (o.openFactors) for (const l of links) if (l.type === 'opening' && l.name in o.openFactors) l.openFactor = o.openFactors[l.name];
   return { zones: Object.keys(model.zones), links, doors, options: o };
+}
+
+// The airflow network a model already has (AirflowNetwork:MultiZone:Surface and its components), as
+// the tool's links: each crack with its coefficient, exponent and crack factor; each window or door
+// opening with its discharge coefficient, its leakage when closed and its opening factor. The building's
+// long axis and side ratio for the wind pressures come from its SimulationControl, as EnergyPlus takes
+// them. Interior doors are the model's own (an opening on a surface between zones); none are added.
+// Returns null for a model without a network.
+export function modelNetwork(model, o = NETWORK_DEFAULTS) {
+  const ep = model.epjson, list = ep['AirflowNetwork:MultiZone:Surface'];
+  if (!list || !Object.keys(list).length) return null;
+  const cracks = ep['AirflowNetwork:MultiZone:Surface:Crack'] || {}, simple = ep['AirflowNetwork:MultiZone:Component:SimpleOpening'] || {};
+  const detailed = ep['AirflowNetwork:MultiZone:Component:DetailedOpening'] || {};
+  const links = [];
+  for (const a of Object.values(list)) {
+    const name = a.surface_name, s = model.surfaces[name], w = model.windows[name], factor = a.window_door_opening_factor_or_crack_factor ?? 1;
+    const c = cracks[a.leakage_component_name], so = simple[a.leakage_component_name], dO = detailed[a.leakage_component_name];
+    if (s && c) {
+      const to = s.boundary === 'Surface' ? s.adjacentZone : null;
+      links.push({ name, type: 'crack', from: s.zone, to, vertices: s.vertices, coefficient: c.air_mass_flow_coefficient_at_reference_conditions * factor, exponent: c.air_mass_flow_exponent ?? 0.65 });
+    } else if (w && (so || dO)) {
+      const parent = model.surfaces[w.parent], to = parent?.boundary === 'Surface' ? parent.adjacentZone : null;
+      const k = so || dO;
+      links.push({
+        name, type: 'opening', from: w.zone, to, vertices: w.vertices, openFactor: Math.min(1, factor),
+        closedCoefficient: k.air_mass_flow_coefficient_when_opening_is_closed, exponent: k.air_mass_flow_exponent_when_opening_is_closed ?? 0.65,
+        dischargeCoefficient: so ? so.discharge_coefficient : dO.discharge_coefficient_for_opening_factor_1 ?? o.dischargeCoefficient,
+        control: a.ventilation_control_mode === 'Constant' ? 'open' : a.ventilation_control_mode === 'NoVent' ? 'closed' : 'zone',
+        door: to ? { name, zone: w.zone, partnerZone: to } : undefined,
+      });
+    }
+  }
+  if (o.states) for (const l of links) if (l.type === 'opening' && l.name in o.states) l.control = o.states[l.name] ? 'open' : 'closed';
+  if (o.openFactors) for (const l of links) if (l.type === 'opening' && l.name in o.openFactors) l.openFactor = o.openFactors[l.name];
+  const sc = Object.values(ep['AirflowNetwork:SimulationControl'] || {})[0];
+  const axis = sc && sc.wind_pressure_coefficient_type !== 'Input'
+    ? { azimuth: sc.azimuth_angle_of_long_axis_of_building ?? 0, ratio: sc.ratio_of_building_width_along_short_axis_to_width_along_long_axis ?? 1 } : null;
+  return { zones: Object.keys(model.zones), links, doors: [], options: o, axis, own: true };
 }
 
 // Extra outputs for checking the tool's solver: the inputs it needs and the network's results.
