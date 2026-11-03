@@ -94,6 +94,9 @@ function candidatesAt(e) {
 function edgesOf(c) {
   const o = view.origin, pos = [], seen = new Set();
   const polys = c.kind === 'shading' ? model.shading.filter((x) => x.name === c.name) : view.find(c.name)?.polys || [];
+  // with thickness: the edges of the solids the walls are drawn as
+  const thick = c.kind !== 'shading' && view.outlineOf(polys);
+  if (thick) return thick;
   for (const { vertices: v } of polys) {
     for (let i = 0; i < v.length; i++) {
       const a = v[i], b = v[(i + 1) % v.length], k = [a, b].map((p) => p.map((x) => x.toFixed(3)).join()).sort().join('|');

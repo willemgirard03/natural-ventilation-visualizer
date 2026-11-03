@@ -385,6 +385,7 @@ export class View3D {
     const solidOf = new Map(envelope.map(([, k], i) => [k, solids[i]]));
     const pos = [], col = [], owner = [], c = new THREE.Color();
     this.solids = []; // each thick surface's closed solid (triangles, view coordinates), for the cut caps
+    this.solidOf = new Map(); // surface name -> its solid (both of a shared pair), for selection and hover
     this.surfaces.forEach((s, k) => {
       const shared = s.boundary === 'Surface' && s.adjacentSurface;
       if (thick && shared && s.name > s.adjacentSurface) return; // drawn once for the pair
@@ -393,7 +394,11 @@ export class View3D {
         const t = thick ? thicknessOf(s) : 0;
         try { tris = surfaceTriangles(s.vertices, holes.get(s.name) || [], this.origin, t, shared ? 'centre' : this.walls); } catch { tris = []; }
       }
-      if (thick && tris.length) this.solids.push(tris);
+      if (thick && tris.length) {
+        this.solids.push(tris);
+        this.solidOf.set(s.name, tris);
+        if (shared) this.solidOf.set(s.adjacentSurface, tris);
+      }
       if (!tris.length) { // an outline the cutter cannot handle: drawn as before, without holes
         tris = [];
         for (const tri of triangulate(s.vertices)) for (const i of tri) tris.push(...s.vertices[i].map((x, j) => x - this.origin[j]));
@@ -612,7 +617,38 @@ export class View3D {
     return null;
   }
 
-  // Outlines and tints the named surface, window or zone; null clears the selection.
+  // The solid a surface, window or door is drawn as when walls have thickness (triangles, view
+  // coordinates): a surface's own, or for an opening the box of its hole through its wall. null when
+  // drawn thin.
+  thickOf(poly) {
+    if (!this.walls || this.walls === 'thin') return null;
+    if (this.solidOf?.has(poly.name)) return this.solidOf.get(poly.name);
+    const wall = this.model.surfaces[poly.parent || poly.surface];
+    if (!wall) return null;
+    const t = this.model.constructions[wall.construction]?.thickness || 0.2;
+    try { return surfaceTriangles(poly.vertices, [], this.origin, t, wall.boundary === 'Surface' ? 'centre' : this.walls); } catch { return null; }
+  }
+
+  // The edges to outline a selection or a hover by (flat xyz pairs, view coordinates): the solids' as
+  // drawn with thickness, else the polygons'.
+  outlineOf(polys) {
+    const solids = polys.map((p) => this.thickOf(p));
+    if (!solids.some(Boolean)) return null;
+    const out = [];
+    polys.forEach((p, i) => {
+      if (!solids[i]) { out.push(...edgeGeometry([p], this.origin).getAttribute('position').array); return; }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(solids[i], 3));
+      const e = new THREE.EdgesGeometry(g, 25);
+      out.push(...e.getAttribute('position').array);
+      g.dispose(); e.dispose();
+    });
+    return out;
+  }
+
+  // Outlines and tints the named surface, window or zone; null clears the selection. With thickness,
+  // the solids it is drawn as are tinted and outlined, not just its modelled plane.
+  
   select(name, { frame = false } = {}) {
     if (this.highlight) {
       this.highlight.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
@@ -622,10 +658,19 @@ export class View3D {
     const found = name ? this.find(name) : null;
     this.selectedPolys = found?.polys || null;
     if (found) {
-      const h = new THREE.Group();
-      h.add(new THREE.Mesh(polygonGeometry(found.polys, this.origin, null, found.kind === 'window' ? 0.03 : 0),
-        new THREE.MeshBasicMaterial({ color: SELECTED, side: THREE.DoubleSide, transparent: true, opacity: 0.55, depthWrite: false, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 })));
-      h.add(new THREE.LineSegments(edgeGeometry(found.polys, this.origin), new THREE.LineBasicMaterial({ color: SELECTED, clippingPlanes: this.clipping })));
+      const h = new THREE.Group(), tint = { color: SELECTED, side: THREE.DoubleSide, transparent: true, opacity: 0.55, depthWrite: false, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 };
+      const solids = found.polys.map((p) => this.thickOf(p));
+      const flat = found.polys.filter((p, i) => !solids[i]);
+      if (flat.length) h.add(new THREE.Mesh(polygonGeometry(flat, this.origin, null, found.kind === 'window' ? 0.03 : 0), new THREE.MeshBasicMaterial(tint)));
+      const tris = solids.filter(Boolean).flat();
+      if (tris.length) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(tris, 3));
+        h.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ ...tint, opacity: found.kind === 'window' ? 0.35 : 0.45 })));
+      }
+      const edges = this.outlineOf(found.polys);
+      const eg = edges ? new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(edges, 3)) : edgeGeometry(found.polys, this.origin);
+      h.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: SELECTED, clippingPlanes: this.clipping })));
       h.renderOrder = 2;
       this.highlight = h;
       this.group.add(h);
