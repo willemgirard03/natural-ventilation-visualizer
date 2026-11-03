@@ -292,3 +292,14 @@ svg.asm .side{font:500 9px var(--mono); fill:var(--ink3)}
 .kfrow.on{background:var(--glasssoft)}
 .kfrow .pbtnx{border:0; background:none; color:var(--ink3); cursor:pointer; padding:0 3px}
 .kfrow .pbtnx:hover{color:#C0442B}
+
+/* the Massing window */
+.library.massing{width:min(620px, calc(100vw - 36px)); top:150px}
+.massing .poprow{display:flex; flex-wrap:wrap; gap:6px 8px; align-items:center; margin:4px 0}
+.massing .libname.short{width:8em}
+.massing .mstable tr.on td{background:var(--glasssoft)}
+.massing .mstable .popnum{width:4.6em}
+.massing .msub{font-weight:600; color:var(--ink); margin:8px 0 2px; border-top:1px solid var(--rule2); padding-top:6px}
+.massing .pbtn.side{min-width:2.2em}
+.massing .pbtn.side[aria-pressed=true]{border-color:var(--glass); background:var(--glasssoft); color:var(--ink)}
+.massing .mbroken{display:inline-flex; gap:2px; align-items:center; font-family:var(--mono); font-size:11px}

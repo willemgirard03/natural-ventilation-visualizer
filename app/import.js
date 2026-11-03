@@ -27,6 +27,8 @@ import {
 } from '../src/model/edit.js';
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
+import { massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow } from '../src/model/massing.js';
+import { massingPanel } from './massing-panel.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -132,7 +134,10 @@ const winEdit = new WindowEditor(view, {
   clamp: (name, r) => clampRect(model, name, r),
   floorOf: (name) => model.zones[model.windows[name].zone].bottom,
   depthOf: (name) => view.windowOffset(model.windows[name]),
-  onCommit: (name, r) => applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true }),
+  // a window of a massing's array is broken out of it, with the size and place it was given
+  onCommit: (name, r) => (massing && massingWindow(massing, name)
+    ? massingChange((x) => breakOutWindow(x, name, r, wallMiddle(name)), `window ${name} broken out of its array`)
+    : applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true })),
 });
 view.onRender = () => followPop();
 view.beforeRender = () => winEdit.beforeRender();
@@ -782,6 +787,7 @@ const load = (file) => loadText(file.name, () => file.text());
 
 async function loadText(name, read) {
   $('status').textContent = `Reading ${name}…`;
+  massing = null; $('massing').hidden = true; $('mass-open').hidden = true;
   try {
     const epjson = JSON.parse(await read());
     model = importEpJSON(epjson, { fileName: name });
@@ -815,6 +821,9 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
 let popKey = null, popMin = false, layersOpen = false, popPinned = false;
 function showInfo(found) {
   const box = $('info');
+  // a window of a massing: the Massing window turns to its storey and side
+  const at = massing && found?.kind === 'window' && massingWindow(massing, found.item.name);
+  if (at && !$('massing').hidden) massingUI.show(at.storey, at.side);
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
   if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; return; }
@@ -1914,6 +1923,42 @@ for (const id of ['info', 'library']) {
   $(id).addEventListener('click', onClick);
 }
 function refreshPanels() { showInfo(current()); renderLibrary(); }
+
+// ---------- massing ----------
+// A building modelled from scratch: storeys of floor plates, one zone each, with window arrays
+// (src/model/massing.js). The massing is kept beside the model; each change to it rewrites the model's
+// geometry as one undoable edit, keeping the assemblies, loads and settings changed since.
+let massing = null;
+const massingUI = massingPanel($('massing'), { get: () => massing, change: massingChange });
+function massingChange(mutate, what) {
+  if (!massing) return false;
+  const before = structuredClone(massing);
+  mutate(massing);
+  const after = structuredClone(massing);
+  if (!applyEdit((tx) => applyMassing(tx, massing, { weather }), what, { geometry: true })) { massing = before; massingUI.render(); return false; }
+  const e = undoStack[undoStack.length - 1], u = e.undo, r = e.redo;
+  e.undo = () => { u(); massing = structuredClone(before); queueMicrotask(massingUI.render); };
+  e.redo = () => { r(); massing = structuredClone(after); queueMicrotask(massingUI.render); };
+  massingUI.render();
+  return true;
+}
+// Where a window's wall has its middle, along the wall (as windowRect measures it).
+function wallMiddle(name) {
+  const w = model.windows[name], wall = model.surfaces[w.parent], f = windowRect(model, name).frame;
+  return wall.vertices.reduce((s, p) => s + p[0] * f.right[0] + p[1] * f.right[1], 0) / wall.vertices.length;
+}
+$('new-massing').addEventListener('click', () => {
+  if (model && !confirm('Start a new massing in place of the model open now? Export it first to keep it.')) return;
+  massing = massing0();
+  model = importEpJSON(massingEpJSON(massing, { weather }), { fileName: 'Massing.epJSON' });
+  $('status').textContent = 'Massing';
+  $('export').disabled = false;
+  render(model);
+  $('mass-open').hidden = false;
+  $('massing').hidden = false;
+  massingUI.reset(); massingUI.render();
+});
+$('mass-open').addEventListener('click', () => { $('massing').hidden = !$('massing').hidden; massingUI.render(); });
 
 // ---------- the Materials and assemblies window ----------
 // The model's library: every material with the figures that define it, and every assembly with its

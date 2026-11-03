@@ -358,3 +358,82 @@ function ventilation(zone, set, o) {
     delta_temperature: 1, minimum_outdoor_temperature: set.ventMinOutdoor, maximum_outdoor_temperature: set.ventMaxOutdoor, maximum_wind_speed: 40, ...o,
   };
 }
+
+// ---------- a massing changed, in a model already edited ----------
+
+// The objects a zone has of its own, besides those naming it in a zone field.
+const ZONE_OWN = (Z) => [['DesignSpecification:OutdoorAir', `${Z}MinFreshAir`], ['ZoneHVAC:IdealLoadsAirSystem', `${Z} Ideal Loads Air`],
+  ['ZoneHVAC:EquipmentList', `${Z} Equipment`], ['NodeList', `${Z} Inlets`]];
+const zoneField = (o) => o && (o.zone_name ?? o.zone_or_zonelist_or_space_or_spacelist_name ?? o.zone_or_space_name ?? o.zone_or_zonelist_name);
+const GEOMETRY = ['Zone', 'BuildingSurface:Detailed', 'FenestrationSurface:Detailed', 'ZoneVentilation:WindandStackOpenArea'];
+const KEEP_VENT = ['minimum_indoor_temperature', 'maximum_indoor_temperature', 'delta_temperature', 'minimum_outdoor_temperature', 'maximum_outdoor_temperature', 'maximum_wind_speed', 'opening_area_fraction_schedule_name'];
+
+// Rewrites a model's geometry from its massing, in an edit transaction (edit.js), keeping what was
+// changed since where it still applies: a surface's or window's assembly while it is the same kind of
+// surface, a zone's loads, systems and opening controls while the zone is there, and every material,
+// assembly and schedule. Zones that are gone take their own objects with them; new ones start with
+// the massing's settings. The operable fraction a zone's openings had is kept.
+export function applyMassing(tx, m, opts = {}) {
+  const fresh = massingEpJSON(m, opts), ep = tx.epjson, zones = new Set(Object.keys(fresh.Zone));
+  for (const Z of Object.keys(ep.Zone || {})) {
+    if (zones.has(Z)) continue;
+    for (const [type, objs] of Object.entries(ep)) for (const [n, o] of Object.entries(objs || {})) if (zoneField(o) === Z && !GEOMETRY.includes(type)) tx.remove(type, n);
+    for (const [type, n] of ZONE_OWN(Z)) if (ep[type]?.[n]) tx.remove(type, n);
+  }
+  // the operable fraction and controls each zone's openings have now
+  const vent = {};
+  for (const [n, v] of Object.entries(ep['ZoneVentilation:WindandStackOpenArea'] || {})) {
+    const Z = v.zone_or_space_name;
+    if (vent[Z] || !n.endsWith('_Buoy')) continue;
+    const glazing = Object.values(ep['FenestrationSurface:Detailed'] || {}).filter((w) => ep['BuildingSurface:Detailed']?.[w.building_surface_name]?.zone_name === Z);
+    const area = glazing.reduce((s, w) => s + windowArea(w), 0);
+    vent[Z] = { fraction: area > 0 ? v.opening_area / area : null, controls: Object.fromEntries(KEEP_VENT.filter((k) => k in v).map((k) => [k, v[k]])) };
+  }
+  for (const type of GEOMETRY) {
+    for (const n of Object.keys(ep[type] || {})) if (!fresh[type]?.[n]) tx.remove(type, n);
+    for (const [n, o] of Object.entries(fresh[type] || {})) {
+      const old = ep[type]?.[n], next = structuredClone(o);
+      if (old && (type === 'BuildingSurface:Detailed' ? old.surface_type === o.surface_type && old.outside_boundary_condition === o.outside_boundary_condition : type === 'FenestrationSurface:Detailed')) next.construction_name = old.construction_name;
+      if (type === 'ZoneVentilation:WindandStackOpenArea' && vent[o.zone_or_space_name]) {
+        const v = vent[o.zone_or_space_name], f = m.settings?.operableFraction ?? MASSING_SETTINGS0().operableFraction;
+        Object.assign(next, v.controls);
+        if (v.fraction != null) next.opening_area = (o.opening_area * v.fraction) / f;
+      }
+      if (old && JSON.stringify(old) === JSON.stringify(next)) continue;
+      const t = tx.get(type, n, true);
+      for (const k of Object.keys(t)) delete t[k];
+      Object.assign(t, next);
+    }
+  }
+  for (const [type, objs] of Object.entries(fresh)) {
+    if (GEOMETRY.includes(type)) continue;
+    for (const [n, o] of Object.entries(objs)) if (!ep[type]?.[n]) Object.assign(tx.get(type, n, true), structuredClone(o));
+  }
+}
+function windowArea(w) {
+  const p = [1, 2, 3, 4].map((i) => [w[`vertex_${i}_x_coordinate`], w[`vertex_${i}_y_coordinate`], w[`vertex_${i}_z_coordinate`]]).filter((q) => q[0] != null);
+  return p.length ? polygonArea(p) : 0;
+}
+
+// Which window of which array a window of the written model is: its storey, side and place in the
+// array (as massingGeometry numbers them). null for a window the massing did not make.
+export function massingWindow(m, name) {
+  for (const zone of massingGeometry(m)) {
+    const w = zone.windows.find((x) => x.name === name);
+    if (w) return { storey: zone.storey, side: w.side, index: w.index, z0: zone.z0 };
+  }
+  return null;
+}
+
+// A window moved or resized in its wall (s along the wall to the right, z up, as edit.js's
+// windowRect; `wallMid` the s of the wall's middle) broken out of its array with that size and place.
+export function breakOutWindow(m, name, r, wallMid) {
+  const at = massingWindow(m, name);
+  if (!at) return false;
+  const s = m.storeys[at.storey], g = s.sides[at.side];
+  const len = at.side === 'N' || at.side === 'S' ? s.w : s.d, { first, pitch } = unitLayout(g, len);
+  const mid = (r.s0 + r.s1) / 2 - wallMid;
+  g.broken = { ...(g.broken || {}) };
+  g.broken[at.index] = { winW: +(r.s1 - r.s0).toFixed(3), winH: +(r.z1 - r.z0).toFixed(3), sill: +(r.z0 - at.z0).toFixed(3), offU: +(mid - (first + at.index * pitch)).toFixed(3), fillW: false, fillH: false };
+  return true;
+}
