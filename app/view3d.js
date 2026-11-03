@@ -380,7 +380,7 @@ export class View3D {
     const envelope = thick ? this.surfaces.map((s, k) => [s, k]).filter(([s]) => s.boundary !== 'Surface') : [];
     let solids = [];
     try {
-      solids = envelopeSolids(envelope.map(([s]) => ({ vertices: s.vertices, holes: holes.get(s.name) || [], thickness: thicknessOf(s) })), this.origin, this.walls);
+      solids = envelopeSolids(envelope.map(([s]) => ({ vertices: s.vertices, holes: holes.get(s.name) || [], thickness: thicknessOf(s), zone: s.zone })), this.origin, this.walls);
     } catch { solids = envelope.map(() => []); }
     const solidOf = new Map(envelope.map(([, k], i) => [k, solids[i]]));
     const pos = [], col = [], owner = [], c = new THREE.Color();

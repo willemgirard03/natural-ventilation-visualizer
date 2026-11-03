@@ -89,22 +89,26 @@ function cornerMove(planes) {
 }
 
 // Solids for the building envelope (surfaces not shared by two zones), with mitred corners: each
-// corner of a surface's two faces is where the faces of every envelope surface meeting there meet,
-// each at its own thickness. With the interior finish as location line the solids grow outwards and
-// wrap the corners; with the exterior finish they grow inwards and merge. Holes cut straight through.
-// surfaces: [{ vertices, holes: [points], thickness, normal? }]; returns one triangle array per surface.
+// corner of a surface's two faces is where the faces of the envelope surfaces of the same zone meeting
+// there meet, each at its own thickness. With the interior finish as location line the solids grow
+// outwards and wrap the corners; with the exterior finish they grow inwards and merge. Each zone's
+// shell is mitred on its own: where zones touch at a corner (a storey cantilevered or set back over
+// another) their surfaces are extruded separately, not mitred into one another's planes. Holes cut
+// straight through.
+// surfaces: [{ vertices, holes: [points], thickness, zone? }]; returns one triangle array per surface.
 export function envelopeSolids(surfaces, origin, line) {
-  const key = (p) => p.map((x) => Math.round(x * 1000)).join(',');
+  const keyOf = (s) => (p) => `${s.zone ?? ''}|${p.map((x) => Math.round(x * 1000)).join(',')}`;
   const at = new Map();
   const info = surfaces.map((s, i) => {
     const n = new THREE.Vector3(...unitNormal(s.vertices));
     const [a, b] = faceOffsets(s.thickness, line);
+    const key = keyOf(s);
     for (const p of s.vertices) at.set(key(p), [...(at.get(key(p)) || []), i]);
     return { n, a, b };
   });
   const o = new THREE.Vector3(...origin);
   return surfaces.map((s, i) => {
-    const me = info[i];
+    const me = info[i], key = keyOf(s);
     const corner = (p, side) => {
       const planes = (at.get(key(p)) || [i]).map((j) => ({ n: info[j].n, r: j === i ? me[side] : info[j][side] }));
       planes.sort((x, y) => (x.n.equals(me.n) ? -1 : y.n.equals(me.n) ? 1 : 0)); // own plane first, so it wins ties
