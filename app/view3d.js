@@ -16,6 +16,9 @@ import { Sections } from './sections.js';
 import { SectionCaps } from './caps.js';
 
 // ClimateStudio's surface types, plus glazing and shading.
+// The plain white drawing (Colour by: White), in the Solar Shading Explorer's colours.
+const WHITE = { wall: '#EEF2F0', shade: '#D9E0DD', top: '#F6F8F7', floor: '#E6EAE8', edge: '#18211F', glass: '#C4D0D2' };
+
 export const TYPE_COLORS = {
   Facade: '#D8C7A3',
   Roof: '#B9614F',
@@ -376,11 +379,19 @@ export class View3D {
     for (const w of this.windows) hole(w.parent, w.vertices);
     for (const d of this.doors) { hole(d.surface, d.vertices); hole(d.partnerSurface, d.partnerVertices); }
     const thicknessOf = (s) => this.model.constructions[s.construction]?.thickness || 0.2;
+    // Floors take their thickness below their level, whatever the location line: a floor facing down
+    // grows outwards from its zone, a ceiling (the other side of a floor) into its zone. So a slab
+    // between storeys, an exposed floor and a ground floor all hang from the floor level and meet.
+    const lineOf = (s) => {
+      const nz = unitNormal(s.vertices)[2];
+      if (Math.abs(nz) > 0.9 && (nz < 0 || s.boundary === 'Surface')) return nz < 0 ? 'interior' : 'exterior';
+      return s.boundary === 'Surface' ? 'centre' : this.walls;
+    };
     // The envelope's solids are built together so their corners meet; shared surfaces are centred.
     const envelope = thick ? this.surfaces.map((s, k) => [s, k]).filter(([s]) => s.boundary !== 'Surface') : [];
     let solids = [];
     try {
-      solids = envelopeSolids(envelope.map(([s]) => ({ vertices: s.vertices, holes: holes.get(s.name) || [], thickness: thicknessOf(s), zone: s.zone })), this.origin, this.walls);
+      solids = envelopeSolids(envelope.map(([s]) => ({ vertices: s.vertices, holes: holes.get(s.name) || [], thickness: thicknessOf(s), zone: s.zone, line: lineOf(s) })), this.origin, this.walls);
     } catch { solids = envelope.map(() => []); }
     const solidOf = new Map(envelope.map(([, k], i) => [k, solids[i]]));
     const pos = [], col = [], owner = [], c = new THREE.Color();
@@ -392,7 +403,7 @@ export class View3D {
       let tris = solidOf.get(k);
       if (!tris?.length) {
         const t = thick ? thicknessOf(s) : 0;
-        try { tris = surfaceTriangles(s.vertices, holes.get(s.name) || [], this.origin, t, shared ? 'centre' : this.walls); } catch { tris = []; }
+        try { tris = surfaceTriangles(s.vertices, holes.get(s.name) || [], this.origin, t, lineOf(s)); } catch { tris = []; }
       }
       if (thick && tris.length) {
         this.solids.push(tris);
@@ -482,6 +493,13 @@ export class View3D {
       const p = this.people?.values[s.zone];
       return p === undefined ? NO_PRESSURE : peopleColor(p, this.people.top);
     }
+    if (this.colorBy === 'white') {
+      // drawn without light, as the shading tool's axon: tops palest, walls toned by the way they face
+      const n = unitNormal(s.vertices);
+      if (Math.abs(n[2]) > 0.9) return n[2] > 0 ? WHITE.top : WHITE.floor;
+      const h = Math.hypot(n[0], n[1]) || 1, t = 0.5 + 0.5 * ((n[0] * -0.6 + n[1] * -0.8) / h);
+      return new THREE.Color(WHITE.shade).lerp(new THREE.Color(WHITE.wall), t);
+    }
     return this.colorBy === 'zone' ? zoneColor(this.zoneIndex[s.zone] ?? 0) : TYPE_COLORS[s.csType] || TYPE_COLORS.Unknown;
   }
 
@@ -534,6 +552,14 @@ export class View3D {
       for (let j = 0; j < 3; j++) col.setXYZ(t * 3 + j, c.r, c.g, c.b);
     });
     col.needsUpdate = true;
+    // White: the Solar Shading Explorer's drawing, light fills under ink edges and pale glass.
+    const white = mode === 'white';
+    this.edges.material.color.set(white ? WHITE.edge : this.edgeColor);
+    this.edges.material.opacity = white ? 0.8 : 0.45;
+    // its fills flat, unlit
+    this.flatFront ||= new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.FrontSide, clippingPlanes: this.clipping });
+    if (white !== (this.front.material === this.flatFront)) [this.front.material, this.litFront] = white ? [this.flatFront, this.front.material] : [this.litFront, this.front.material];
+    this.redrawWindows();
     this.render();
   }
 
@@ -558,7 +584,7 @@ export class View3D {
     this.swung = swung;
     const g2 = this.glass.geometry, own2 = g2.userData.owner, col2 = g2.getAttribute('color'), items = this.glass.userData.items;
     own2.forEach((k, t) => {
-      c.set(open?.has(items[k].name) ? OPEN_WINDOW : TYPE_COLORS.Glazing);
+      c.set(open?.has(items[k].name) ? OPEN_WINDOW : this.colorBy === 'white' ? WHITE.glass : TYPE_COLORS.Glazing);
       for (let j = 0; j < 3; j++) col2.setXYZ(t * 3 + j, c.r, c.g, c.b);
     });
     col2.needsUpdate = true;
@@ -680,7 +706,8 @@ export class View3D {
     this.render();
   }
 
-  // What is under the pointer: { kind, item, point (view coordinates), dir (the ray's) }, or null.
+  // What is under the pointer: { kind, item, point (view coordinates), dir (the ray's), distance (along
+  // the ray from its start: the camera, or the near plane of the parallel view) }, or null.
   // Shading is drawn see-through, so the building behind it wins; shading is found only on its own.
   hitAt(e) {
     if (!this.front) return null;
@@ -693,7 +720,7 @@ export class View3D {
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];
     if (!hit) return null;
     const { kind, items } = hit.object.userData;
-    return { kind, item: items[hit.object.geometry.userData.owner[hit.faceIndex]], point: hit.point, dir: ray.ray.direction.clone() };
+    return { kind, item: items[hit.object.geometry.userData.owner[hit.faceIndex]], point: hit.point, dir: ray.ray.direction.clone(), distance: hit.distance };
   }
 
   pickAt(e) {

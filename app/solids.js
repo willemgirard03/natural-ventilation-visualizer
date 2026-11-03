@@ -95,13 +95,14 @@ function cornerMove(planes) {
 // shell is mitred on its own: where zones touch at a corner (a storey cantilevered or set back over
 // another) their surfaces are extruded separately, not mitred into one another's planes. Holes cut
 // straight through.
-// surfaces: [{ vertices, holes: [points], thickness, zone? }]; returns one triangle array per surface.
+// surfaces: [{ vertices, holes: [points], thickness, zone?, line? (its own location line) }]; returns
+// one triangle array per surface.
 export function envelopeSolids(surfaces, origin, line) {
   const keyOf = (s) => (p) => `${s.zone ?? ''}|${p.map((x) => Math.round(x * 1000)).join(',')}`;
   const at = new Map();
   const info = surfaces.map((s, i) => {
     const n = new THREE.Vector3(...unitNormal(s.vertices));
-    const [a, b] = faceOffsets(s.thickness, line);
+    const [a, b] = faceOffsets(s.thickness, s.line || line);
     const key = keyOf(s);
     for (const p of s.vertices) at.set(key(p), [...(at.get(key(p)) || []), i]);
     return { n, a, b };

@@ -148,6 +148,7 @@ export class FieldSlices {
     for (const p of v.sections.planes) {
       if (!p.air.field && !p.air.particles) continue;
       const f = frameOf(p), plane = new THREE.Plane().setFromNormalAndCoplanarPoint(f.n, f.o);
+      if (ray.ray.direction.dot(f.n) >= 0) continue; // its cut is seen only from the side it removes
       const at = ray.ray.intersectPlane(plane, new THREE.Vector3());
       if (!at) continue;
       const t = at.distanceTo(ray.ray.origin), d = at.clone().sub(f.o), u = d.dot(f.u), w = d.dot(f.v);

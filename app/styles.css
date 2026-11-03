@@ -303,3 +303,7 @@ svg.asm .side{font:500 9px var(--mono); fill:var(--ink3)}
 .massing .pbtn.side{min-width:2.2em}
 .massing .pbtn.side[aria-pressed=true]{border-color:var(--glass); background:var(--glasssoft); color:var(--ink)}
 .massing .mbroken{display:inline-flex; gap:2px; align-items:center; font-family:var(--mono); font-size:11px}
+
+/* a massing's handles over the 3D view (app/massedit.js, in the edit-handles skill's style) */
+.mhandles{position:absolute; left:0; top:0; pointer-events:none; overflow:visible; z-index:4}
+.mhandles .editable{pointer-events:auto; cursor:text}

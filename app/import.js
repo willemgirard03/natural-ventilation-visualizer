@@ -66,28 +66,34 @@ function zoneUnder(e, h = view.hitAt(e)) {
   }
   return null;
 }
-// What a click would select, offered under the pointer, in this order: the window under it; the
-// surface it is on, the side facing the view; that side's zone; on a shared wall, its other side and
-// the zone beyond. Tab steps through them, outlined as offered.
+// What a click would select, offered under the pointer, in this order: the whole zone; the window
+// under it; the surface it is on, the side facing the view; the zone's floor; on a shared wall, its
+// other side and the zone beyond. Shading, which belongs to no zone, comes first. Tab steps through
+// them, outlined as offered.
 function candidatesAt(e) {
   const h = view.hitAt(e);
   if (!h || !model) return [];
   const out = [], front = zoneUnder(e, h);
   const add = (kind, name, label) => { if (name && !out.some((c) => c.kind === kind && c.name === name)) out.push({ kind, name, label }); };
   const zone = (z) => { if (z && model.zones[z]) add('zone', z, `Zone · ${z}`); };
-  if (h.kind === 'window') add('window', h.item.name, `Window · ${h.item.zone}`);
-  if (h.kind === 'door') add('door', h.item.name, `Door · ${h.item.zone} – ${h.item.partnerZone}`);
   if (h.kind === 'shading') add('shading', h.item.name, `Shading · ${h.item.name}`);
   const s = h.kind === 'surface' ? h.item : h.kind === 'window' ? model.surfaces[h.item.parent] : null;
+  let near = null, far = null;
   if (s) {
     // The side facing the view: the one of the zone looked into, else the one whose outside faces the camera.
     const partner = s.adjacentSurface && model.surfaces[s.adjacentSurface];
     const faces = (x) => x.zone === front || (!front && unitNormal(x.vertices).reduce((a, n, i) => a + n * [h.dir.x, h.dir.y, h.dir.z][i], 0) < 0);
-    const [near, far] = partner && faces(partner) && !faces(s) ? [partner, s] : [s, partner];
-    add('surface', near.name, `${near.csType} · ${near.zone}`);
-    zone(near.zone);
-    if (far) { add('surface', far.name, `${far.csType} · ${far.zone}`); zone(far.zone); }
+    [near, far] = partner && faces(partner) && !faces(s) ? [partner, s] : [s, partner];
   }
+  const own = near?.zone || front || h.item?.zone;
+  zone(own);
+  if (h.kind === 'window') add('window', h.item.name, `Window · ${h.item.zone}`);
+  if (h.kind === 'door') add('door', h.item.name, `Door · ${h.item.zone} – ${h.item.partnerZone}`);
+  if (near) add('surface', near.name, `${near.csType} · ${near.zone}`);
+  // the zone's floor: its largest piece
+  const floor = model.zones[own]?.surfaces.map((n) => model.surfaces[n]).filter((x) => /floor/i.test(x.surfaceType)).sort((a, b) => b.area - a.area)[0];
+  if (floor) add('surface', floor.name, `${floor.csType} · ${floor.zone} floor`);
+  if (far) { add('surface', far.name, `${far.csType} · ${far.zone}`); zone(far.zone); }
   for (const z of [front, h.item?.zone, h.item?.partnerZone]) zone(z);
   return out;
 }
@@ -120,7 +126,7 @@ const hover = new HoverPick(view, { candidatesAt, edgesOf });
     requestAnimationFrame(() => {
       pending = false;
       const h = slices.visible && !e.buttons ? view.hitAt(last) : null;
-      const behind = h ? h.point.distanceTo(view.camera.position) : Infinity;
+      const behind = h ? h.distance : Infinity; // along the same ray as the probe's (the parallel view's starts at its near plane)
       slices.showProbe(slices.visible && !last.buttons ? slices.probeAt(last, behind) : null, last);
     });
   });
@@ -1219,11 +1225,11 @@ function legend() {
     items.push(`<span title="People per square metre of floor in each zone this hour: its peak density times its occupancy schedule's fraction now. Pale: nobody there.">${ramp([peopleColor(0, top), peopleColor(top / 2, top), peopleColor(top, top)], 48)}Occupancy 0 … ${fmt(top, 2)} people/m² this hour</span>`);
   } else if ($('color-by').value === 'zone') {
     Object.keys(model.zones).forEach((z, i) => items.push(chip(`#${zoneColor(i).getHexString()}`, z)));
-  } else {
+  } else if ($('color-by').value !== 'white') {
     const types = new Set(Object.values(model.surfaces).map((s) => s.csType));
     for (const [t, c] of Object.entries(TYPE_COLORS)) if (types.has(t)) items.push(chip(c, t));
   }
-  if (Object.keys(model.windows).length) items.push(chip(TYPE_COLORS.Glazing, $('show-air').checked ? 'Glazing, closed' : 'Glazing'));
+  if (Object.keys(model.windows).length) items.push(chip($('color-by').value === 'white' ? '#C4D0D2' : TYPE_COLORS.Glazing, $('show-air').checked ? 'Glazing, closed' : 'Glazing'));
   if ($('show-air').checked && airflow) {
     const n = Object.entries(airflow.conditions.open).filter(([k, f]) => f > 0 && !k.endsWith(':door')).length;
     if (n) items.push(chip(OPEN_WINDOW, `Window open (${n})`, 'Open to its operable fraction in the airflow. Select a window or a room to open or close it.'));
@@ -1946,11 +1952,23 @@ function massingChange(mutate, what) {
   mutate(massing);
   const after = structuredClone(massing);
   if (!applyEdit((tx) => applyMassing(tx, massing, { weather }), what, { geometry: true })) { massing = before; massingUI.render(); return false; }
-  const e = undoStack[undoStack.length - 1], u = e.undo, r = e.redo;
-  e.undo = () => { u(); massing = structuredClone(before); queueMicrotask(massingUI.render); };
-  e.redo = () => { r(); massing = structuredClone(after); queueMicrotask(massingUI.render); };
+  const e = undoStack[undoStack.length - 1], u = e.undo, r = e.redo, target = massEdit.target;
+  e.undo = () => { u(); massing = structuredClone(before); queueMicrotask(() => { massingUI.render(); reselect(target); }); };
+  e.redo = () => { r(); massing = structuredClone(after); queueMicrotask(() => { massingUI.render(); reselect(target); }); };
   massingUI.render();
+  reselect(target);
   return true;
+}
+// The massing rewritten renumbers its surfaces: the face that was selected, found again by its storey
+// and side (its largest piece), stays selected.
+function reselect(target) {
+  if (!target?.face || !massing) return;
+  const zone = massingGeometry(massing)[target.storey];
+  if (!zone) return;
+  const kinds = target.face === 'roof' ? ['Roof', 'Ceiling'] : target.face === 'floor' ? ['Floor'] : ['Wall'];
+  const pick = zone.surfaces.filter((x) => kinds.includes(x.type) && (x.type !== 'Wall' || x.side === target.face) && model.surfaces[x.name])
+    .sort((a, b) => model.surfaces[b.name].area - model.surfaces[a.name].area)[0];
+  if (pick && pick.name !== selected) view.select(pick.name);
 }
 // Which storey a selected zone or surface of a massing is, and which face of it (null: the whole
 // zone). The ground floor has no handle of its own.

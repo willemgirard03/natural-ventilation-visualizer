@@ -408,15 +408,25 @@ for (int i = 0; i < ${MAX}; i++) {
       this.gumball.updateMatrixWorld(true);
       const hit = ray.intersectObjects(this.gumball.userData.hits, false)[0];
       if (hit) return { ...hit.object.userData.handle, plane: this.selected };
-      for (const g of this.grips(this.selected)) if (this.screen(g.at).distanceTo(m) < GRIP_HIT) return { type: 'grip', grip: g, plane: this.selected };
+    }
+    // Grips and outlines only where the building does not stand in front of them, so what is drawn in
+    // front of a plane is picked rather than the plane.
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2((m.x / r.width) * 2 - 1, -(m.y / r.height) * 2 + 1), v.camera);
+    const wall = v.hitAt(e)?.distance ?? Infinity;
+    const seen = (p3) => p3.clone().sub(ray.ray.origin).dot(ray.ray.direction) < wall + 0.05;
+    if (this.selected && this.gumball.visible) {
+      for (const g of this.grips(this.selected)) if (this.screen(g.at).distanceTo(m) < GRIP_HIT && seen(g.at)) return { type: 'grip', grip: g, plane: this.selected };
     }
     // Outlines: the nearest within a few pixels.
     let best = null;
     for (const p of this.planes) {
-      const c = this.corners(p).map((x) => this.screen(x));
+      const c3 = this.corners(p), c = c3.map((x) => this.screen(x));
       for (let i = 0; i < 4; i++) {
-        const d = segmentDistance(m, c[i], c[(i + 1) % 4]);
-        if (d < PICK_PX && (!best || d < best.d)) best = { type: 'slide', plane: p, d };
+        const a = c[i], b = c[(i + 1) % 4], d = segmentDistance(m, a, b);
+        if (!(d < PICK_PX) || (best && d >= best.d)) continue;
+        const ab = b.clone().sub(a), t = Math.max(0, Math.min(1, m.clone().sub(a).dot(ab) / Math.max(1e-9, ab.lengthSq())));
+        if (seen(c3[i].clone().lerp(c3[(i + 1) % 4], t))) best = { type: 'slide', plane: p, d };
       }
     }
     return best;
