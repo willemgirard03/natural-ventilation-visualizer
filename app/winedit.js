@@ -181,13 +181,20 @@ export class WindowEditor {
       const right = new THREE.Vector3(...this.rect.frame.right), up = new THREE.Vector3(0, 0, 1);
       const mid = this.at((R.s0 + R.s1) / 2, (R.z0 + R.z1) / 2);
       const ds = Math.round(along(mid, right) / step) * step, dz = Math.round(along(mid, up) / step) * step;
+      // A massing's window stops at its limits: the floor, the slab (or just under the roof) and its
+      // bay's edges; any other window is held in its wall when dragged whole.
+      const sz = this.sizeOf(this.name), floor = this.floorOf(this.name);
+      const top = sz ? sz.top - (sz.slab ? 0 : 0.02) : Infinity, b0 = sz ? sz.bay[0] + 0.01 : -Infinity, b1 = sz ? sz.bay[1] - 0.01 : Infinity;
+      const lim = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
       let r = { ...R };
-      if (drag.h.type === 'body') r = this.clamp(this.name, { s0: R.s0 + ds, s1: R.s1 + ds, z0: R.z0 + dz, z1: R.z1 + dz });
-      else if (drag.h.k === 'sill') r.z0 = Math.min(R.z0 + dz, R.z1 - 0.2);
-      else if (drag.h.k === 'head') r.z1 = Math.max(R.z1 + dz, R.z0 + 0.2);
+      if (drag.h.type === 'body') {
+        const s = lim(ds, b0 - R.s0, b1 - R.s1), z = lim(dz, (sz ? floor : -Infinity) - R.z0, top - R.z1);
+        r = this.clamp(this.name, { s0: R.s0 + s, s1: R.s1 + s, z0: R.z0 + z, z1: R.z1 + z });
+      } else if (drag.h.k === 'sill') r.z0 = lim(R.z0 + dz, sz ? floor : -Infinity, R.z1 - 0.2);
+      else if (drag.h.k === 'head') r.z1 = lim(R.z1 + dz, R.z0 + 0.2, top);
       else {
-        // a jamb: the window grows both ways about its middle, at twice the pointer's run
-        const out = drag.h.k === 'right' ? ds : -ds, half = Math.max((R.s1 - R.s0) / 2 + out, 0.15), m = (R.s0 + R.s1) / 2;
+        // a jamb: the window grows both ways about its middle, at twice the pointer's run, up to its bay
+        const m = (R.s0 + R.s1) / 2, out = drag.h.k === 'right' ? ds : -ds, half = lim((R.s1 - R.s0) / 2 + out, 0.15, Math.min(m - b0, b1 - m));
         r.s0 = m - half; r.s1 = m + half;
       }
       this.draft = r;

@@ -6,8 +6,12 @@
 // a tag beside the pointer. The likeliest is offered as soon as the pointer is over it.
 
 import * as THREE from 'three';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 const LINE = '#2F6F68'; // --glass: the drawing style's colour for selection and editing
+const WIDTH = 2.6; // px: heavier than the edges under it, so it reads over them
 
 export class HoverPick {
   // candidatesAt(event) -> [{ kind, name, label, polys }] under the pointer, the likeliest first;
@@ -79,9 +83,9 @@ export class HoverPick {
     for (const o of [...this.outline.children]) { o.geometry.dispose(); o.material.dispose(); this.outline.remove(o); }
     const c = this.current;
     if (!c) { this.tag.hidden = true; this.view.render(); return; }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(this.edgesOf(c), 3));
-    const line = new THREE.LineSegments(g, new THREE.LineDashedMaterial({ color: LINE, dashSize: 0.22, gapSize: 0.15, depthTest: false, transparent: true, opacity: 0.95 }));
+    const g = new LineSegmentsGeometry().setPositions(this.edgesOf(c));
+    const size = this.view.renderer.getSize(new THREE.Vector2());
+    const line = new LineSegments2(g, new LineMaterial({ color: LINE, linewidth: WIDTH, dashed: true, dashSize: 0.3, gapSize: 0.18, depthTest: false, transparent: true, opacity: 0.95, resolution: size }));
     line.computeLineDistances();
     line.renderOrder = 16;
     this.outline.add(line);

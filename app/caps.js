@@ -35,6 +35,7 @@ export class SectionCaps {
     if (!solids.length && !glass.length) { v.render(); return; }
     const dpr = v.renderer.getPixelRatio(), size = v.renderer.getDrawingBufferSize(new THREE.Vector2());
     v.sections.planes.forEach((p, i) => {
+      if (p.off) return; // switched off: no cut to cap
       const f = frameOf(p), rect = p.b;
       const fill = [], edges = [];
       for (const tris of solids) {

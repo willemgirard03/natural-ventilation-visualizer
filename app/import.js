@@ -302,6 +302,7 @@ const amountOf = (l) => (amountSet.has(l.name) ? amountSet.get(l.name) : default
 const openFraction = (l) => freeFraction(sashOf(l.name).type, l.width, l.height, amountOf(l) * maxAngleOf(l));
 let weather = null, weatherHour = null, roseLabels = true; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
+let esoSource = null; // where the results file in use comes from: { name, blob() }, for Export .eso
 
 // The network's conditions at an hour index: the outdoor air given, rooms from the results (or the
 // Inside setting) and windows and doors as set, following the results' own openings where asked.
@@ -594,7 +595,7 @@ async function rerun(year = false) {
     const res = await fetch(`${runnerBase}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ epjson, ...weatherBody }) });
     const out = await res.json();
     if (!res.ok) throw new Error(out.error);
-    const eso = await fetch(runnerBase + out.eso);
+    const esoUrl = runnerBase + out.eso, eso = await fetch(esoUrl);
     const week = await readZoneResultsStream(eso.body, forModel, null, { hours: (b - a + 1) * 24 });
     if (model !== forModel) return;
     // A pivoted window reports its opening factor as angle / 90: read it as the share of the window
@@ -604,6 +605,7 @@ async function rerun(year = false) {
       if (series && l) week.windows[name.toUpperCase()] = series.map((f) => (f > 0 ? freeFraction(s.type, l.width, l.height, f * 90) : 0));
     }
     const merged = year ? week : mergeResults(results, week, hourIndex(a, 1));
+    esoSource = { name: `${(forModel.source.fileName || 'model').replace(/\.(epjson|json)$/i, '')}_${year ? 'year' : 'week'}.eso`, blob: () => fetch(esoUrl).then((x) => x.blob()) };
     windowSet.clear(); roomSet.clear(); // the run now holds these choices
     modelEdited = false; // and the model as it is
     $('windows').value = 'results';
@@ -792,6 +794,8 @@ async function loadWeather(name, read) {
 // Results: each zone's temperature, humidity and ventilation for the hour picked.
 function setResults(r, name = '') {
   results = r ? { ...r, name } : null;
+  if (!r) esoSource = null;
+  queueMicrotask(() => { $('export-eso').disabled = !esoSource?.blob; });
   const option = $('windows').querySelector('option[value=results]');
   option.disabled = !r;
   if (r) $('windows').value = 'results';
@@ -801,7 +805,7 @@ function setResults(r, name = '') {
   $('results-status').textContent = r ? `Zone temperatures from ${name}${missing}` : '';
   applyHour();
 }
-async function loadResults(name, stream, size) {
+async function loadResults(name, stream, size, blobOf = null) {
   if (!model) { $('results-status').textContent = 'Load a model first.'; return; }
   const forModel = model;
   $('results-status').textContent = `Reading ${name}…`;
@@ -812,6 +816,7 @@ async function loadResults(name, stream, size) {
     if (model !== forModel) return; // another model was loaded meanwhile
     if (!Object.keys(r.zones).length) throw new Error('it has no zone temperatures for this model');
     setResults(r, name);
+    esoSource = { name, blob: blobOf };
   } catch (err) {
     setResults(null);
     $('results-status').innerHTML = `<span class="error-text">Could not use ${esc(name)}: ${esc(err.message)}</span>`;
@@ -832,9 +837,9 @@ function offerResults(id) {
 $('results-file').addEventListener('change', async (e) => {
   const opt = e.target.selectedOptions[0];
   if (!e.target.value) return setResults(null);
-  if (opt.file) return loadResults(opt.file.name, opt.file.stream(), opt.file.size);
-  const res = await fetch(e.target.value);
-  loadResults(opt.textContent, res.body, Number(res.headers.get('content-length')) || 0);
+  if (opt.file) return loadResults(opt.file.name, opt.file.stream(), opt.file.size, async () => opt.file);
+  const url = e.target.value, res = await fetch(url);
+  loadResults(opt.textContent, res.body, Number(res.headers.get('content-length')) || 0, () => fetch(url).then((x) => x.blob()));
 });
 $('results-load').addEventListener('change', (e) => {
   const file = e.target.files[0];
@@ -842,7 +847,7 @@ $('results-load').addEventListener('change', (e) => {
   const option = new Option(file.name, `local:${file.name}`, true, true);
   option.file = file;
   $('results-file').add(option);
-  loadResults(file.name, file.stream(), file.size);
+  loadResults(file.name, file.stream(), file.size, async () => file);
 });
 for (const id of ['day', 'hour']) $(id).addEventListener('input', applyHour);
 $('weather-file').addEventListener('change', (e) => {
@@ -1064,9 +1069,10 @@ function planeRows(p) {
   const a = p.air, opt = (list, now) => list.map(([v, l]) => `<option value="${v}"${v === now ? ' selected' : ''}>${l}</option>`).join('');
   const fields = [['', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂']];
   return [
+    `<label class="chk" title="Switch the plane's cut off without removing it: the building, the air and the particles show whole; switch it on again to cut as before"><input type="checkbox" data-air="on"${p.off ? '' : ' checked'}> Cut on</label>`,
     `<span class="popkv"><span class="tipped" title="Colour the cut where it passes through rooms: the air's temperature, speed or CO2. Point at the cut to read the values there.">Cut colour</span><select class="popsel" data-air="field">${opt(fields, a.field)}</select></span>`,
     `<label class="chk" title="Particles moving with the air within this plane, trailing, as in a 2D section: their own, apart from the 3D particles"><input type="checkbox" data-air="particles"${a.particles ? ' checked' : ''}> Particles in the cut</label>`,
-    `<label class="chk" title="The 3D airflow particles behind the cut, within its bounds: off, only the cut's own particles show there"><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`,
+    `<label class="chk" title="The 3D airflow particles seen through this cut: off, only the cut's own particles show there. Each plane decides for what is seen through it."><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`,
     ...(a.particles ? [
       `<span class="popkv"><span>Colour</span><select class="popsel" data-air="color">${opt([['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['none', 'None (black)']], a.color)}</select></span>`,
       `<span class="popkv"><span class="tipped" title="How many particles for the same area of air">Density</span><span class="popv"><input type="range" data-air="density" min="-2" max="2" step="0.5" value="${Math.log2(a.density)}"> <output>${TIMES(a.density)}</output></span></span>`,
@@ -1079,6 +1085,7 @@ function onAir(e) {
   const t = e.target, key = t.dataset?.air, p = view.sections.selected;
   if (!key || !p) return;
   const a = p.air;
+  if (key === 'on') { p.off = !t.checked; view.sections.changed(); drawSlices(true); showInfo(current()); legend(); return; }
   if (key === 'particles') a.particles = t.checked;
   else if (key === 'beyond') { a.beyond = t.checked; view.sections.changed(); }
   else if (key === 'density') a.density = 2 ** Number(t.value);
@@ -2331,6 +2338,16 @@ drop.addEventListener('drop', (e) => {
   e.preventDefault();
   drop.classList.remove('over');
   if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
+});
+$('export-eso').addEventListener('click', async () => {
+  if (!esoSource?.blob) return;
+  try {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await esoSource.blob());
+    a.download = /\.eso$/i.test(esoSource.name) ? esoSource.name.replace(/^.*[\\/]/, '').replace(/^.*: /, '') : `${esoSource.name}.eso`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } catch (err) { $('results-status').innerHTML = `<span class="error-text">Could not save the results file: ${esc(err.message)}</span>`; }
 });
 $('export').addEventListener('click', () => {
   if (!model) return;

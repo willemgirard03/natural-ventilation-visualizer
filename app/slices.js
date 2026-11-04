@@ -101,7 +101,7 @@ export class FieldSlices {
     const gmax = gmin.clone().add(new THREE.Vector3(grid.nx, grid.ny, grid.nz).multiplyScalar(grid.h));
     planes.forEach((p, i) => {
       const { field, particles } = p.air;
-      if (!field && !particles) return;
+      if (p.off || (!field && !particles)) return;
       const f = frameOf(p);
       // The plane's bounds cropped to the grid's box, along u and v.
       const [u0, u1, v0, v1] = crop(p.b, f, gmin, gmax);
@@ -146,7 +146,7 @@ export class FieldSlices {
     ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), v.camera);
     let best = null;
     for (const p of v.sections.planes) {
-      if (!p.air.field && !p.air.particles) continue;
+      if (p.off || (!p.air.field && !p.air.particles)) continue;
       const f = frameOf(p), plane = new THREE.Plane().setFromNormalAndCoplanarPoint(f.n, f.o);
       if (ray.ray.direction.dot(f.n) >= 0) continue; // its cut is seen only from the side it removes
       const at = ray.ray.intersectPlane(plane, new THREE.Vector3());

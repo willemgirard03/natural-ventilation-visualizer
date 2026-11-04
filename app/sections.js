@@ -51,6 +51,7 @@ function squared(q) {
 
 // Whether a point (view coordinates) is removed by a plane.
 export function removes(p, point) {
+  if (p.off) return false; // switched off: it cuts nothing
   const { o, u, v, n } = frameOf(p);
   const d = point.clone().sub(o);
   if (d.dot(n) <= 0) return false;
@@ -115,11 +116,31 @@ for (int i = 0; i < ${MAX}; i++) {
   if (i >= secCount) break;
   if (i == ${skip}) continue;
   vec3 d = vSecW - secO[i];
-  if (dot(d, secN[i]) > 0.0${material.userData.beyond ? ' || secK[i] < 0.5' : ''}) {
+  if (dot(d, secN[i]) > 0.0) {
     float pu = dot(d, secU[i]), pv = dot(d, secV[i]);
     if (pu > secB[i].x && pu < secB[i].y && pv > secB[i].z && pv < secB[i].w) discard;
   }
 }`);
+      if (material.userData.beyond) {
+        shader.fragmentShader = shader.fragmentShader.replace(`${hook}\n`, `${hook}
+{
+  vec3 toEye = isOrthographic ? vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]) * 1.0e4 : cameraPosition - vSecW;
+  vec3 E = vSecW + toEye, D = vSecW - E;
+  float near = 2.0, shown = 1.0;
+  for (int i = 0; i < ${MAX}; i++) {
+    if (i >= secCount) break;
+    float den = dot(D, secN[i]);
+    if (abs(den) < 1e-6) continue;
+    float t = dot(secO[i] - E, secN[i]) / den;
+    if (t <= 0.0 || t >= 1.0 || t >= near) continue;
+    vec3 h = E + D * t - secO[i];
+    float pu = dot(h, secU[i]), pv = dot(h, secV[i]);
+    if (pu > secB[i].x && pu < secB[i].y && pv > secB[i].z && pv < secB[i].w) { near = t; shown = secK[i]; }
+  }
+  if (shown < 0.5) discard;
+}
+`);
+      }
       extra?.(shader);
     };
     material.customProgramCacheKey = () => `sec${skip}${material.userData.beyond ? 'b' : ''}`;
@@ -241,7 +262,7 @@ for (int i = 0; i < ${MAX}; i++) {
     this.planes.forEach((p, i) => {
       const f = frameOf(p);
       u.secO.value[i].copy(f.o); u.secN.value[i].copy(f.n); u.secU.value[i].copy(f.u); u.secV.value[i].copy(f.v);
-      u.secB.value[i].set(...p.b);
+      if (p.off) u.secB.value[i].set(1, 0, 1, 0); else u.secB.value[i].set(...p.b); // off: bounds nothing falls in
       u.secK.value[i] = p.air?.beyond ? 1 : 0;
     });
     this.draw();
