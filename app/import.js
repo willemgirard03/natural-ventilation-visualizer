@@ -184,7 +184,15 @@ function updateSky() {
 }
 $('show-sky').addEventListener('change', (e) => { sky.set({ shown: e.target.checked }); updateSky(); legend(); });
 $('show-sun').addEventListener('change', (e) => sky.set({ sunShown: e.target.checked }));
-$('sky-labels').addEventListener('change', (e) => sky.set({ labels: e.target.checked }));
+$('sun-shadows').addEventListener('change', (e) => sky.set({ shadows: e.target.checked }));
+// Each group's figures and names, switched on their own.
+for (const el of document.querySelectorAll('[data-labels]')) el.addEventListener('change', () => {
+  const on = el.checked, k = el.dataset.labels;
+  if (k === 'sky') sky.set({ labels: on });
+  else if (k === 'sun') sky.set({ sunLabels: on });
+  else if (k === 'preview') hover.setLabels(on);
+  else if (k === 'rose') { roseLabels = on; drawRose(); }
+});
 $('sky-opacity').addEventListener('input', (e) => { sky.set({ opacity: Number(e.target.value) / 100 }); $('sky-opacity-value').textContent = `${e.target.value}%`; });
 for (const el of document.querySelectorAll('[data-sky]')) el.addEventListener('change', () => { sky.set({ layers: { ...sky.layers, [el.dataset.sky]: el.checked } }); legend(); });
 let sliceRanges = {}, sliceTimer = 0, sliceLast = 0;
@@ -256,7 +264,7 @@ const defaultAmount = (l) => Math.min(1, sashFor(l, l.openFactor).angle / maxAng
 const amountOf = (l) => (amountSet.has(l.name) ? amountSet.get(l.name) : defaultAmount(l));
 // The free fraction of the opening at a window's amount: the opening factor EnergyPlus gets.
 const openFraction = (l) => freeFraction(sashOf(l.name).type, l.width, l.height, amountOf(l) * maxAngleOf(l));
-let weather = null, weatherHour = null; // the weather file and the hour picked from it
+let weather = null, weatherHour = null, roseLabels = true; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
 
 // The network's conditions at an hour index: the outdoor air given, rooms from the results (or the
@@ -449,6 +457,10 @@ function drawRose() {
     const group = windRoseGroup(data, { radius, northAxis, ink, wind });
     group.userData.key = key;
     view.setGroundOverlay(group);
+  }
+  if (view.overlay) {
+    for (const o of view.overlay.children) if (o.isSprite) o.visible = roseLabels;
+    view.render();
   }
   legend();
 }

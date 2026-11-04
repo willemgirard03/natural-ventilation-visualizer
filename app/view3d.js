@@ -134,6 +134,8 @@ export class View3D {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.localClippingEnabled = true;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
@@ -145,6 +147,16 @@ export class View3D {
     this.sun = new THREE.DirectionalLight(0xffffff, 1.4);
     this.sun.position.set(-0.5, -1, 1.4); // from the south-west, above
     this.scene.add(this.sun);
+    // The sun's shadows, from where the sun stands at the hour picked. The light lights nothing (the
+    // colours keep their fixed light); it only casts, onto a shadow-only skin over the building and a
+    // shadow-only ground, so the shadows read the same in every colouring, White included.
+    this.shadowLight = new THREE.DirectionalLight(0xffffff, 0);
+    this.shadowLight.castShadow = true;
+    this.shadowLight.shadow.mapSize.set(2048, 2048);
+    this.shadowLight.shadow.bias = -0.0004;
+    this.shadowLight.shadow.normalBias = 0.03;
+    this.shadowLight.visible = false;
+    this.scene.add(this.shadowLight, this.shadowLight.target);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: null }; // orbiting is this view's own (orbit())
@@ -360,6 +372,7 @@ export class View3D {
     this.edges = new THREE.LineSegments(this.edgesGeometry(), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
 
     this.group.add(this.front, this.back, this.glass, this.doorMesh, this.shading, this.edges, this.problemLayer());
+    this.shadowSkins();
     if (keep) {
       if (this.sections.planes.length) this.caps.update();
       this.render();
@@ -427,6 +440,44 @@ export class View3D {
     return g;
   }
 
+  // What the sun's shadows fall on: a skin over the surfaces that draws only shadow, and the ground
+  // round the building (shadow #7E95A3 at 0.34, as the shading tool's ground shadow).
+  shadowSkins() {
+    const shade = { color: '#7E95A3', opacity: 0.34, transparent: true, depthWrite: false };
+    this.skin = new THREE.Mesh(this.front.geometry, new THREE.ShadowMaterial({ ...shade, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }));
+    this.skin.receiveShadow = true;
+    this.skin.raycast = () => {};
+    this.skin.renderOrder = 2;
+    const r = Math.max(10, this.footprintRadius() * 6);
+    this.ground = new THREE.Mesh(new THREE.CircleGeometry(r, 64), new THREE.ShadowMaterial(shade));
+    this.ground.position.z = -0.005;
+    this.ground.receiveShadow = true;
+    this.ground.raycast = () => {};
+    this.ground.userData.noSection = true;
+    for (const m of [this.front, this.shading, this.doorMesh]) m.castShadow = true; // glass lets the sun through
+    this.group.add(this.skin, this.ground);
+    this.setSun(this.sunAt ?? null);
+  }
+
+  // The sun's direction (unit, view axes) or null when it is down or its shadows are off.
+  setSun(dir) {
+    this.sunAt = dir;
+    const L = this.shadowLight, on = !!dir && !!this.front;
+    L.visible = on;
+    if (this.skin) this.skin.visible = this.ground.visible = on;
+    if (on) {
+      const b = bounds(this.surfaces.flatMap((s) => s.vertices)), span = Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]);
+      const reach = span * 3, c = new THREE.Vector3(0, 0, (b.max[2] - b.min[2]) / 2);
+      L.target.position.copy(c);
+      L.position.copy(c).addScaledVector(new THREE.Vector3(...dir), reach * 2);
+      const cam = L.shadow.camera;
+      Object.assign(cam, { left: -reach, right: reach, top: reach, bottom: -reach, near: 0.1, far: reach * 4 });
+      cam.updateProjectionMatrix();
+      L.target.updateMatrixWorld();
+    }
+    this.render();
+  }
+
   // Outlines: of the modelled polygons when thin, of the solids' edges when thick.
   edgesGeometry() {
     if (this.walls && this.walls !== 'thin') return new THREE.EdgesGeometry(this.front.geometry, 25);
@@ -474,6 +525,7 @@ export class View3D {
     const g = this.surfaceGeometry();
     this.front.geometry = g;
     this.back.geometry = g;
+    if (this.skin) this.skin.geometry = g;
     old.dispose();
     this.edges.geometry.dispose();
     this.edges.geometry = this.edgesGeometry();
@@ -679,39 +731,51 @@ export class View3D {
     return out;
   }
 
-  // Only the outer bounds of the solids: the edges between their outermost faces (a face is outer
-  // when nothing of the same solids lies in front of it), so reveals, inner faces and openings drop
-  // out. For the hover preview. Kept per name until the model or walls change.
+  // Only the outer bounds, for the hover preview: the edges where a zone's (or a surface's) faces meet,
+  // each corner pushed out to the outside of the solids drawn, so openings, reveals and inner faces
+  // drop out. Kept per name until the model or walls change.
   outerOutlineOf(name, polys) {
     const memo = (this.outerMemo ??= new Map());
     if (memo.has(name)) return memo.get(name);
-    const solids = polys.map((p) => this.thickOf(p)).filter(Boolean);
-    if (!solids.length) { memo.set(name, null); return null; }
-    const V = (a, i) => new THREE.Vector3(a[i], a[i + 1], a[i + 2]), tris = [];
-    for (const s of solids) for (let i = 0; i + 8 < s.length; i += 9) {
-      const t = [V(s, i), V(s, i + 3), V(s, i + 6)], n = new THREE.Vector3().subVectors(t[1], t[0]).cross(new THREE.Vector3().subVectors(t[2], t[0]));
-      if (n.lengthSq() < 1e-12) continue;
-      tris.push({ t, n: n.normalize(), box: new THREE.Box3().setFromPoints(t) });
+    const o = this.origin, surfs = polys.filter((p) => this.model.surfaces[p.name]);
+    // Each surface: its outward normal and how far its solid stands out past it.
+    const info = surfs.map((p) => {
+      const v = p.vertices, n = [0, 0, 0];
+      for (let i = 0; i < v.length; i++) {
+        const a = v[i], b = v[(i + 1) % v.length];
+        n[0] += (a[1] - b[1]) * (a[2] + b[2]); n[1] += (a[2] - b[2]) * (a[0] + b[0]); n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+      }
+      const l = Math.hypot(...n) || 1, nn = n.map((x) => x / l), sol = this.thickOf(p);
+      let t = 0;
+      if (sol) for (let i = 0; i + 2 < sol.length; i += 3) t = Math.max(t, (sol[i] + o[0] - v[0][0]) * nn[0] + (sol[i + 1] + o[1] - v[0][1]) * nn[1] + (sol[i + 2] + o[2] - v[0][2]) * nn[2]);
+      return { p, n: nn, t };
+    });
+    if (!info.length) { memo.set(name, null); return null; }
+    // A corner pushed out by each way the faces meeting there face (each once, its furthest).
+    const key = (q) => q.map((x) => x.toFixed(3)).join(), at = new Map();
+    for (const f of info) for (const q of f.p.vertices) {
+      const k = key(q), list = at.get(k) || at.set(k, []).get(k), same = list.find((g) => g.n[0] * f.n[0] + g.n[1] * f.n[1] + g.n[2] * f.n[2] > 0.99);
+      if (same) same.t = Math.max(same.t, f.t); else list.push({ n: f.n, t: f.t });
     }
-    const ray = new THREE.Ray(), hit = new THREE.Vector3();
-    for (const a of tris) {
-      ray.origin.copy(a.t[0]).add(a.t[1]).add(a.t[2]).divideScalar(3).addScaledVector(a.n, 1e-3);
-      ray.direction.copy(a.n);
-      a.outer = !tris.some((b) => b !== a && ray.intersectsBox(b.box) && ray.intersectTriangle(b.t[0], b.t[1], b.t[2], false, hit));
-    }
-    // Each edge with the triangles on it: kept between two outer faces that meet at an angle, or at
-    // the solid's own boundary; dropped where it borders a face that is not outer (an opening's rim).
-    const key = (p) => `${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)}`, edges = new Map();
-    for (const a of tris) for (let k = 0; k < 3; k++) {
-      const p = a.t[k], q = a.t[(k + 1) % 3], ka = key(p), kb = key(q), id = ka < kb ? ka + '|' + kb : kb + '|' + ka;
-      if (!edges.has(id)) edges.set(id, { p, q, on: [] });
-      edges.get(id).on.push(a);
+    const moved = (q) => {
+      const r = [q[0] - o[0], q[1] - o[1], q[2] - o[2]];
+      for (const g of at.get(key(q))) for (let j = 0; j < 3; j++) r[j] += g.n[j] * g.t;
+      return r;
+    };
+    // The edges where faces meet at an angle, and the open ones: the zone's box, without its openings.
+    const edges = new Map();
+    for (const f of info) {
+      const v = f.p.vertices;
+      for (let i = 0; i < v.length; i++) {
+        const a = v[i], b = v[(i + 1) % v.length], ka = key(a), kb = key(b), id = ka < kb ? ka + '|' + kb : kb + '|' + ka;
+        if (!edges.has(id)) edges.set(id, { a, b, on: [] });
+        edges.get(id).on.push(f.n);
+      }
     }
     const out = [];
-    for (const { p, q, on } of edges.values()) {
-      if (!on.every((a) => a.outer)) continue;
-      if (on.length === 2 && on[0].n.dot(on[1].n) > Math.cos(THREE.MathUtils.degToRad(20))) continue;
-      out.push(p.x, p.y, p.z, q.x, q.y, q.z);
+    for (const { a, b, on } of edges.values()) {
+      if (on.length > 1 && on.every((n) => n[0] * on[0][0] + n[1] * on[0][1] + n[2] * on[0][2] > 0.94)) continue;
+      out.push(...moved(a), ...moved(b));
     }
     memo.set(name, out);
     return out;

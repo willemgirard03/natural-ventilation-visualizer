@@ -100,6 +100,7 @@ body.hasfull{overflow:hidden}
 .laygrp:first-child{border-top:0}
 .layhd{display:flex; justify-content:space-between; align-items:center; gap:10px; min-height:24px}
 .layhd b{font-weight:500; color:var(--ink)}
+.laylab{font-size:11px; color:var(--ink3); margin-left:auto}
 .layitem{padding-left:22px}
 .layrow{display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:26px; white-space:nowrap}
 .layrow input[type=range]{width:100px}

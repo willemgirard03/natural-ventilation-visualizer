@@ -46,6 +46,7 @@ export class HoverPick {
   }
 
   setEnabled(on) { this.enabled = on; if (!on) this.clear(); }
+  setLabels(on) { this.labels = on; this.show(); }
 
   // The pointer moved: what is under it now. The likeliest is offered (a window over its wall, the wall
   // between windows); a choice made with Tab holds only while the likeliest stays the same.
@@ -86,7 +87,7 @@ export class HoverPick {
     this.outline.add(line);
     const r = this.view.container.getBoundingClientRect();
     this.tag.textContent = this.list.length > 1 ? `${c.label}  ·  Tab ${this.index + 1}/${this.list.length}` : c.label;
-    this.tag.hidden = false;
+    this.tag.hidden = this.labels === false;
     this.tag.style.transform = `translate(${this.at[0] - r.left + 14}px, ${this.at[1] - r.top + 14}px)`;
     this.view.render();
   }

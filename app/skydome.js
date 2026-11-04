@@ -83,7 +83,7 @@ export class SkyDome {
   // onTime(dayOfYear, hourEnding): the sun was dragged. onNorth(degrees): the north axis was set.
   constructor(view, { onTime, onNorth }) {
     Object.assign(this, { view, onTime, onNorth });
-    this.shown = true; this.opacity = 0.5; this.sunShown = true; this.labels = true;
+    this.shown = true; this.opacity = 0.5; this.sunShown = true; this.labels = true; this.sunLabels = true; this.shadows = true;
     this.layers = Object.fromEntries(Object.entries(SKY_LAYERS).map(([k, l]) => [k, l.on]));
     this.state = null; // { R, north, doy, hour, weather, limits }
     this.group = new THREE.Group();
@@ -117,6 +117,7 @@ export class SkyDome {
     this.state = state;
     if (!this.drag) this.group.rotation.z = state.north * D2R;
     this.build();
+    this.castShadows();
     this.view.render();
   }
 
@@ -174,7 +175,15 @@ export class SkyDome {
       o.traverse((x) => { if (x.material) x.material.opacity = k * (x.userData.strength ?? 1); });
     }
   }
-  set(what) { Object.assign(this, what); this.build(); this.view.render(); }
+  set(what) { Object.assign(this, what); this.build(); this.castShadows(); this.view.render(); }
+  // The building's shadows from the sun at the hour picked, turned into the model's axes.
+  castShadows(north = this.state?.north) {
+    if (!this.state) return;
+    const sun = this.sunAt();
+    if (!this.sunShown || !this.shadows || sun.alt <= 0) { this.view.setSun(null); return; }
+    const a = north * D2R, [x, y, z] = sun.v;
+    this.view.setSun([x * Math.cos(a) - y * Math.sin(a), x * Math.sin(a) + y * Math.cos(a), z]);
+  }
 
   // A point of the sky (world axes, as sky.js gives them) or of the model, on the sheet.
   P = (p) => {
@@ -213,7 +222,7 @@ export class SkyDome {
     this.marks = {};
     if (this.sunShown) {
       const { m, d } = monthDayOf(s.doy), mid = this.day?.flat().reduce((a, p) => (p[2] > a[2] ? p : a), [0, 0, -1]);
-      if (this.labels && mid && mid[2] > 0) tag(mid, `${MONTHS[m - 1]} ${d} path`, { size: 8.5, fill: 'var(--sun)' });
+      if (this.sunLabels && mid && mid[2] > 0) tag(mid, `${MONTHS[m - 1]} ${d} path`, { size: 8.5, fill: 'var(--sun)' });
       const sun = this.sunAt();
       if (sun.alt > 0) {
         const q = P(sun.v.map((x) => x * R)), o = P([0, 0, 0]);
@@ -222,7 +231,7 @@ export class SkyDome {
           out.push(line(q[0], q[1], o[0] - u[0] * 2, o[1] - u[1] * 2, { stroke: 'var(--sun)', w: 1.1 }), head(o[0], o[1], u[0], u[1], 'var(--sun)', 7, 3));
           out.push(circle(q[0], q[1], 11, { fill: 'var(--sun)', opacity: 0.18 }), circle(q[0], q[1], 7, { fill: 'var(--sun)', stroke: 'var(--panel)', 'stroke-width': 1.2 }));
           // Azimuth from due south, east negative, as sun charts give it.
-          if (this.labels) out.push(label(q[0], q[1] - 14, `β ${sun.alt.toFixed(1)}° · az ${wrap180(sun.az - 180).toFixed(1)}°`, { size: 9, fill: 'var(--ink2)' }));
+          if (this.sunLabels) out.push(label(q[0], q[1] - 14, `β ${sun.alt.toFixed(1)}° · az ${wrap180(sun.az - 180).toFixed(1)}°`, { size: 9, fill: 'var(--ink2)' }));
           this.marks.sun = q; this.marks.ray = [q, o];
         }
       }
@@ -290,6 +299,7 @@ export class SkyDome {
         const step = e.shiftKey ? 15 : 1, bearing = Math.atan2(g.x, g.y) * R2D; // true north's bearing in the model's axes
         d.north = wrap360(Math.round(-bearing / step) * step);
         this.group.rotation.z = d.north * D2R;
+        this.castShadows(d.north);
         this.view.render();
       }
     });
