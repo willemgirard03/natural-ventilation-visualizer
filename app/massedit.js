@@ -14,7 +14,9 @@
 // that edge, so the storey stays square: a wall's top edge is the roof, its sides the walls either side.
 //
 // A side selected (a wall, or a window of it) shows its windows' array as a dotted bracket over their
-// heads, its number and spacing typed over (the facade-windows skill). Windows broken out of their
+// heads, its number and spacing typed over (the facade-windows skill); not while a window is isolated.
+// A window of an array pressed and moved 4 px is selected and dragged along its side: where the pointer
+// is sets the array's pitch (by spacing) or its count (by number), the windows drawn as they will be. Windows broken out of their
 // array are outlined dashed in the sun's colour whenever they are not selected.
 //
 // A press under 3 px is a click: an arrow, grip or arc then asks how far. Each drag or typed figure is
@@ -24,7 +26,7 @@
 import * as THREE from 'three';
 import { askNumber } from './sections.js';
 import { AXIS, CLICK_PX, gripMark, gripAt, cursorFor, dragLength, dragAngle, angleOf, dragOnPlane, screenDir, dim, label, line, head, path, poly, circle, arrayBracket } from './handles.js';
-import { storeyFrame, pushFace, moveStorey, SIDES, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide } from '../src/model/massing.js';
+import { storeyFrame, pushFace, moveStorey, SIDES, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows } from '../src/model/massing.js';
 
 const FACE_NAMES = { S: 'south wall', E: 'east wall', N: 'north wall', W: 'west wall', roof: 'roof', floor: 'floor' };
 const unit2 = (d) => { const l = Math.hypot(d[0], d[1]); return l < 1e-9 ? [1, 0] : [d[0] / l, d[1] / l]; };
@@ -32,8 +34,10 @@ const unit2 = (d) => { const l = Math.hypot(d[0], d[1]); return l < 1e-9 ? [1, 0
 export class MassingEditor {
   // massing() -> the massing; onChange(mutate, what).
   // brokenWindows() -> the outlines (model points) of the windows broken out of their arrays, unselected.
-  constructor(view, { massing, onChange, brokenWindows = () => [] }) {
-    Object.assign(this, { view, massing, onChange, brokenWindows });
+  // isolated() -> a window is being edited in 3D; windowAt(e) -> { storey, side, index, name } of a
+  // massing's window under the pointer, or null; onPick(name) selects it.
+  constructor(view, { massing, onChange, brokenWindows = () => [], isolated = () => false, windowAt = () => null, onPick = () => {} }) {
+    Object.assign(this, { view, massing, onChange, brokenWindows, isolated, windowAt, onPick });
     this.target = null; // { storey, face }: face null for the whole zone
     this.grips = [];
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -48,6 +52,7 @@ export class MassingEditor {
       this.typeFigure(e, f.dataset.edit);
     });
     this.wire();
+    this.wirePitch();
   }
 
   get active() { return !!this.target; }
@@ -107,7 +112,7 @@ export class MassingEditor {
       grips.push({ p, key: { kind: 'face', face: f.key }, from: 0, dir: screenDir(P, f.at, f.normal), low });
       return gripMark(p[0], p[1], half);
     };
-    if (this.target.window !== undefined) g += this.bracket(m, i, face); // a window: its array alone
+    if (this.target.window !== undefined) g += this.isolated() ? '' : this.bracket(m, i, face); // a window: its array alone
     else if (!face) {
       // the floor: its gumball, and the floor's own grip in the quarter the gumball leaves free
       const C = [fr.centre[0], fr.centre[1], fr.z0], ex = fr.x, ey = fr.y;
@@ -128,6 +133,7 @@ export class MassingEditor {
         if (SIDES.includes(face)) g += this.bracket(m, i, face);
       }
     }
+    if (this.pitchDraft) g += this.sideOutlines(this.pitchDraft);
     this.grips = grips;
     if (this.shown !== g) this.svg.innerHTML = this.shown = g; // only when it changed
     if (render) this.view.render();
@@ -173,6 +179,66 @@ export class MassingEditor {
     const v = Math.min(s.h - 0.15, Math.max(...heads) + 0.45);
     const pts = Array.from({ length: lay.n }, (_, j) => { const u = lay.first + j * lay.pitch; return this.P([mid[0] + U[0] * u + n[0] * 0.6, mid[1] + U[1] * u + n[1] * 0.6, fr.z0 + v]); });
     return arrayBracket(pts, true, lay.n, lay.pitch, 'window');
+  }
+
+  // A side's frame: its middle and its run (model axes) and the storey's floor level.
+  side(m, i, f) {
+    const fr = storeyFrame(m, i), k = SIDES.indexOf(f), A = fr.corners[k], B = fr.corners[(k + 1) % 4], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+    return { fr, len, U: [(B[0] - A[0]) / len, (B[1] - A[1]) / len], mid: [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], n: fr.faces.find((x) => x.key === f).normal };
+  }
+  // The windows of a side as a dragged pitch would make them, outlined.
+  sideOutlines({ m, storey: i, side: f }) {
+    const s = m.storeys[i], { fr, len, U, mid, n } = this.side(m, i, f), at = (u, v) => this.P([mid[0] + U[0] * u + n[0] * 0.05, mid[1] + U[1] * u + n[1] * 0.05, fr.z0 + v]);
+    return sideWindows(s.sides[f], len, s.h, s.slab).map((w) => poly([at(w.u0, w.v0), at(w.u1, w.v0), at(w.u1, w.v1), at(w.u0, w.v1)], { stroke: 'var(--glass)', w: 1.4, dash: '4 3' })).join('');
+  }
+  // Where the pointer is along a side, from its middle (m), on the side's plane.
+  alongSide(e, i, f) {
+    const m = this.massing(), { fr, U, mid, n } = this.side(m, i, f), o = this.view.origin, r = this.view.renderer.domElement.getBoundingClientRect();
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.view.camera);
+    const N = new THREE.Vector3(n[0], n[1], 0), P0 = new THREE.Vector3(mid[0] - o[0], mid[1] - o[1], fr.z0 - o[2]);
+    const hit = ray.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(N, P0), new THREE.Vector3());
+    return hit ? (hit.x - P0.x) * U[0] + (hit.y - P0.y) * U[1] : null;
+  }
+  wirePitch() {
+    const el = this.view.renderer.domElement;
+    let d = null;
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const w = this.windowAt(e), m = this.massing();
+      if (!w || !m) return;
+      const s = m.storeys[w.storey], g = s.sides[w.side];
+      if (!g || unitLayout(g, w.side === 'N' || w.side === 'S' ? s.w : s.d).n < 2) return;
+      d = { ...w, x: e.clientX, y: e.clientY, moved: false, id: e.pointerId }; // a click still selects
+    }, true);
+    el.addEventListener('pointermove', (e) => {
+      if (!d) return;
+      if (!d.moved) {
+        if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 4) return;
+        d.moved = true;
+        el.setPointerCapture(d.id);
+        this.onPick(d.name);
+      }
+      e.stopImmediatePropagation();
+      const u = this.alongSide(e, d.storey, d.side);
+      if (u === null) return;
+      const m = structuredClone(this.massing());
+      dragPitch(m, d.storey, d.side, d.index, u);
+      this.pitchDraft = { m, storey: d.storey, side: d.side, u };
+      this.draw();
+    }, true);
+    const end = (e) => {
+      if (!d) return;
+      const w = d, p = this.pitchDraft;
+      d = null; this.pitchDraft = null;
+      if (!w.moved) return;
+      e.stopImmediatePropagation();
+      el.releasePointerCapture?.(e.pointerId);
+      if (p) this.onChange((m) => { dragPitch(m, w.storey, w.side, w.index, p.u); spreadSide(m, w.storey, w.side); }, `${w.side} side: windows set out by dragging`);
+      else this.draw();
+    };
+    el.addEventListener('pointerup', end, true);
+    el.addEventListener('pointercancel', end, true);
   }
 
   // The storey's width, depth and height dimensioned along the edges nearest the eye, about 1 m out.

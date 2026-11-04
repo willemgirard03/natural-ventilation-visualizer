@@ -87,6 +87,44 @@ function polygonGeometry(polys, origin, colorOf, offset = 0) {
   return g;
 }
 
+// The convex hull of points in a plane ([x, y]), counterclockwise.
+function hull2(pts) {
+  const P = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]), cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], hi = [];
+  for (const p of P) { while (lo.length > 1 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 1e-9) lo.pop(); lo.push(p); }
+  for (const p of P.reverse()) { while (hi.length > 1 && cross(hi[hi.length - 2], hi[hi.length - 1], p) <= 1e-9) hi.pop(); hi.push(p); }
+  return lo.slice(0, -1).concat(hi.slice(0, -1));
+}
+
+// Edges (flat xyz pairs) less those inside a flat face: an edge with the same face on both sides of
+// it - triangles of one plane, facing the same way, cover a point just either side - is a seam between
+// coplanar pieces (two storeys' walls, a wall split around a slab) and is not drawn. tris: flat xyz.
+function dropSeams(edges, tris) {
+  const planes = new Map(), v = (a, i) => new THREE.Vector3(a[i], a[i + 1], a[i + 2]);
+  for (let i = 0; i + 8 < tris.length; i += 9) {
+    const a = v(tris, i), b = v(tris, i + 3), c = v(tris, i + 6), n = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
+    if (n.lengthSq() < 1e-12) continue;
+    n.normalize();
+    const d = n.dot(a), key = `${n.x.toFixed(3)},${n.y.toFixed(3)},${n.z.toFixed(3)},${d.toFixed(3)}`;
+    if (!planes.has(key)) planes.set(key, { n, d, t: [] });
+    planes.get(key).t.push(new THREE.Triangle(a, b, c));
+  }
+  const list = [...planes.values()], p = new THREE.Vector3(), q = new THREE.Vector3(), mid = new THREE.Vector3(), w = new THREE.Vector3(), x = new THREE.Vector3();
+  const covered = (pl, pt) => pl.t.some((t) => t.containsPoint(pt));
+  const out = [];
+  for (let i = 0; i + 5 < edges.length; i += 6) {
+    p.set(edges[i], edges[i + 1], edges[i + 2]); q.set(edges[i + 3], edges[i + 4], edges[i + 5]);
+    mid.addVectors(p, q).multiplyScalar(0.5);
+    const seam = list.some((pl) => {
+      if (Math.abs(pl.n.dot(p) - pl.d) > 1e-3 || Math.abs(pl.n.dot(q) - pl.d) > 1e-3) return false;
+      w.subVectors(q, p).cross(pl.n).normalize().multiplyScalar(0.01);
+      return covered(pl, x.copy(mid).add(w)) && covered(pl, x.copy(mid).sub(w));
+    });
+    if (!seam) out.push(edges[i], edges[i + 1], edges[i + 2], edges[i + 3], edges[i + 4], edges[i + 5]);
+  }
+  return out;
+}
+
 function edgeGeometry(polys, origin) {
   const pos = [];
   for (const { vertices: v } of polys) {
@@ -454,7 +492,12 @@ export class View3D {
     this.ground.receiveShadow = true;
     this.ground.raycast = () => {};
     this.ground.userData.noSection = true;
-    for (const m of [this.front, this.shading, this.doorMesh]) m.castShadow = true; // glass lets the sun through
+    for (const m of [this.front, this.shading, this.doorMesh]) {
+      m.castShadow = true; // glass lets the sun through
+      // what the clipping planes remove casts no shadow
+      m.customDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+      if (this.sections) this.sections.patch(m.customDepthMaterial);
+    }
     this.group.add(this.skin, this.ground);
     this.setSun(this.sunAt ?? null);
   }
@@ -480,8 +523,14 @@ export class View3D {
 
   // Outlines: of the modelled polygons when thin, of the solids' edges when thick.
   edgesGeometry() {
-    if (this.walls && this.walls !== 'thin') return new THREE.EdgesGeometry(this.front.geometry, 25);
-    return edgeGeometry([...this.surfaces, ...this.windows, ...this.doors], this.origin);
+    const e = this.walls && this.walls !== 'thin' ? new THREE.EdgesGeometry(this.front.geometry, 25) : edgeGeometry([...this.surfaces, ...this.windows, ...this.doors], this.origin);
+    // coplanar faces read as one: the seams inside them dropped
+    let kept;
+    try { kept = dropSeams(e.getAttribute('position').array, this.front.geometry.getAttribute('position').array); } catch { return e; }
+    e.dispose();
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(kept, 3));
+    return g;
   }
 
   // Draws the closed doors as panels; open ones leave their opening clear. open: a Set of door names.
@@ -751,6 +800,20 @@ export class View3D {
       return { p, n: nn, t };
     });
     if (!info.length) { memo.set(name, null); return null; }
+    // One surface: the outline of its solid's outer face at its fullest - out to the mitred corners -
+    // the hull of the solid seen square to the face, at the outside of the solid.
+    const sol = info.length === 1 && this.thickOf(info[0].p);
+    if (sol) {
+      const { n, t, p } = info[0], N = new THREE.Vector3(...n), up = Math.abs(n[2]) > 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+      const A = new THREE.Vector3().crossVectors(up, N).normalize(), B = new THREE.Vector3().crossVectors(N, A), O = new THREE.Vector3(...p.vertices[0].map((x, j) => x - o[j]));
+      const pts = [];
+      for (let i = 0; i + 2 < sol.length; i += 3) { const d = new THREE.Vector3(sol[i], sol[i + 1], sol[i + 2]).sub(O); pts.push([d.dot(A), d.dot(B)]); }
+      const hull = hull2(pts), out = [];
+      const at = ([x, y]) => O.clone().addScaledVector(A, x).addScaledVector(B, y).addScaledVector(N, t).toArray();
+      hull.forEach((h, i) => out.push(...at(h), ...at(hull[(i + 1) % hull.length])));
+      memo.set(name, out);
+      return out;
+    }
     // A corner pushed out by each way the faces meeting there face (each once, its furthest).
     const key = (q) => q.map((x) => x.toFixed(3)).join(), at = new Map();
     for (const f of info) for (const q of f.p.vertices) {
@@ -858,6 +921,14 @@ export class View3D {
     if (cut < this.zRange[1]) this.sections.planAt(cut - this.origin[2]);
     this.select(name);
     this.frame(zone ? zone.surfaces.map((n) => this.model.surfaces[n]) : found.polys, new THREE.Vector3(-0.45, -0.8, 1.4));
+  }
+
+  // The camera turned about the vertical through its target, by degrees anticlockwise seen from above.
+  turnCamera(deg) {
+    const t = this.controls.target, a = THREE.MathUtils.degToRad(deg);
+    this.camera.position.sub(t).applyAxisAngle(new THREE.Vector3(0, 0, 1), a).add(t);
+    this.camera.lookAt(t);
+    this.controls.update();
   }
 
   // Points the camera at a set of polygons (the whole building by default), from the south-west.

@@ -38,7 +38,7 @@ export function rampTemperature(t, lo, hi, out = new THREE.Color()) {
 // A new plane's settings: its slice coloured by temperature, with particles coloured the same way, at
 // density x1 and real-time speed. field: 'temperature', 'speed', 'co2' or '' (no colour); color:
 // the particles', 'temperature', 'speed', 'co2' or 'none' (black).
-export const AIR_DEFAULT = { field: 'temperature', particles: true, color: 'temperature', density: 1, speed: 1 };
+export const AIR_DEFAULT = { field: 'temperature', particles: true, color: 'temperature', density: 1, speed: 1, beyond: false };
 
 export class FieldSlices {
   constructor(view) {

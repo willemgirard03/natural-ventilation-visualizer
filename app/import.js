@@ -150,6 +150,18 @@ const winEdit = new WindowEditor(view, {
   floorOf: (name) => model.zones[model.windows[name].zone].bottom,
   depthOf: (name) => view.windowOffset(model.windows[name]),
   // a window of a massing's array is broken out of it, with the size and place it was given
+  // a massing's window: its Size, bay and the top of its wall, and its figures typed as its Size keeps them
+  sizeOf: (name) => {
+    const at = massing && massingWindow(massing, name);
+    if (!at) return null;
+    const s = massing.storeys[at.storey], g = s.sides[at.side], len = at.side === 'N' || at.side === 'S' ? s.w : s.d;
+    const lay = unitLayout(g, len), cc = lay.first + at.index * lay.pitch, mid = wallMiddle(name), u = unitOf(g, at.index);
+    return { size: u.size || (g.fillW || g.fillH ? 'offset' : 'fixed'), bay: [mid + Math.max(cc - lay.pitch / 2, -len / 2), mid + Math.min(cc + lay.pitch / 2, len / 2)], top: at.z0 + s.h - (s.slab || 0), slab: (s.slab || 0) > 0 };
+  },
+  onFigure: (name, key, v) => {
+    const at = massingWindow(massing, name);
+    sideEdit({ storey: at.storey, side: at.side }, (x) => setWindowFigure(x, at.storey, at.side, at.index, key, v), `window ${at.index + 1}'s ${key} set`);
+  },
   onCommit: (name, r) => (massing && massingWindow(massing, name)
     ? massingWindowEdit(name, r)
     : applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true })),
@@ -158,6 +170,13 @@ view.onRender = () => followPop();
 // A massing's storey pushed, pulled, moved and turned in the view (app/massedit.js).
 const massEdit = new MassingEditor(view, {
   massing: () => massing, onChange: massingChange,
+  isolated: () => winEdit.active,
+  windowAt: (e) => {
+    if (winEdit.active || !massing || !model) return null;
+    const h = view.hitAt(e), at = h?.kind === 'window' && massingWindow(massing, h.item.name);
+    return at ? { storey: at.storey, side: at.side, index: at.index, name: h.item.name } : null;
+  },
+  onPick: (name) => { if (selected !== name) view.select(name); },
   brokenWindows: () => (massing && model ? brokenNames().filter((n) => n !== selected).map((n) => model.windows[n]?.vertices).filter(Boolean) : []),
 });
 // The massing's windows broken out of their arrays, worked out again only when the massing changes.
@@ -1047,6 +1066,7 @@ function planeRows(p) {
   return [
     `<span class="popkv"><span class="tipped" title="Colour the cut where it passes through rooms: the air's temperature, speed or CO2. Point at the cut to read the values there.">Cut colour</span><select class="popsel" data-air="field">${opt(fields, a.field)}</select></span>`,
     `<label class="chk" title="Particles moving with the air within this plane, trailing, as in a 2D section: their own, apart from the 3D particles"><input type="checkbox" data-air="particles"${a.particles ? ' checked' : ''}> Particles in the cut</label>`,
+    `<label class="chk" title="The 3D airflow particles behind the cut, within its bounds: off, only the cut's own particles show there"><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`,
     ...(a.particles ? [
       `<span class="popkv"><span>Colour</span><select class="popsel" data-air="color">${opt([['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['none', 'None (black)']], a.color)}</select></span>`,
       `<span class="popkv"><span class="tipped" title="How many particles for the same area of air">Density</span><span class="popv"><input type="range" data-air="density" min="-2" max="2" step="0.5" value="${Math.log2(a.density)}"> <output>${TIMES(a.density)}</output></span></span>`,
@@ -1060,6 +1080,7 @@ function onAir(e) {
   if (!key || !p) return;
   const a = p.air;
   if (key === 'particles') a.particles = t.checked;
+  else if (key === 'beyond') { a.beyond = t.checked; view.sections.changed(); }
   else if (key === 'density') a.density = 2 ** Number(t.value);
   else if (key === 'speed') a.speed = Number(t.value);
   else a[key] = t.value;
@@ -1336,8 +1357,12 @@ function sideAction(el) {
   const act = el.dataset.act, i = at.storey, f = at.side, k = at.index;
   if (act !== 'sw-apply' && act !== 'sw-cancel') applyAsk = false;
   if (act === 'sw-more') { sideMore = !sideMore; showInfo(found); }
-  else if (act === 'sw-one') sideEdit(at, (x) => addWindows(x, i, f), 'a window added');
-  else if (act === 'sw-preset' && el.value) sideEdit(at, (x) => addWindows(x, i, f, el.value), `${PRESETS[el.value].label.toLowerCase()} added`);
+  else if (act === 'sw-one' || (act === 'sw-preset' && el.value)) {
+    if (!sideEdit(at, (x) => addWindows(x, i, f, act === 'sw-one' ? null : el.value), act === 'sw-one' ? 'a window added' : `${PRESETS[el.value].label.toLowerCase()} added`)) return;
+    // the window added (the first of a preset's) is selected
+    const w = massingGeometry(massing)[i]?.windows.find((x) => x.side === f);
+    if (w && model.windows[w.name]) view.select(w.name);
+  }
   else if (act === 'sw-size') sideEdit(at, (x) => setWindowSize(x, i, f, k, el.dataset.v), `windows sized ${el.dataset.v}`);
   else if (act === 'sw-array') sideEdit(at, (x, g) => setArray(g, el.checked), el.checked ? 'an array' : 'one window');
   else if (act === 'sw-by') sideEdit(at, (x) => setBy(x, i, f, el.dataset.v), `set out by ${el.dataset.v}`);
@@ -1957,6 +1982,7 @@ function render(m) {
   const a = ((footprintAxis(m).azimuth - m.site.northAxis) * Math.PI) / 180;
   view.longAxis = Math.atan2(Math.cos(a), Math.sin(a)); // the footprint's long side, from model x
   view.cube.setNorth(-m.site.northAxis);
+  sky.turned = null;
   setResults(null); // results belong to the previous model; this also solves the network
   if ($('show-air').checked) air.play();
   view.setColorBy($('color-by').value);

@@ -74,6 +74,7 @@ export class Sections {
       secU: { value: Array.from({ length: MAX }, () => new THREE.Vector3()) },
       secV: { value: Array.from({ length: MAX }, () => new THREE.Vector3()) },
       secB: { value: Array.from({ length: MAX }, () => new THREE.Vector4()) },
+      secK: { value: new Array(MAX).fill(0) }, // 1: the 3D particles beyond the plane are shown
     };
     this.layer = new THREE.Group(); // outlines, grips and the gumball: never cut themselves
     this.layer.userData.noSection = true;
@@ -102,24 +103,26 @@ export class Sections {
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vSecW;')
         .replace(world[0], world[1]);
+      // (a material without three.js's clipping hook, as the shadow skin's, is cut first thing)
+      const hook = shader.fragmentShader.includes('#include <clipping_planes_fragment>') ? '#include <clipping_planes_fragment>' : 'void main() {';
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>
 varying vec3 vSecW;
 uniform int secCount;
-uniform vec3 secO[${MAX}]; uniform vec3 secN[${MAX}]; uniform vec3 secU[${MAX}]; uniform vec3 secV[${MAX}]; uniform vec4 secB[${MAX}];`)
-        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+uniform vec3 secO[${MAX}]; uniform vec3 secN[${MAX}]; uniform vec3 secU[${MAX}]; uniform vec3 secV[${MAX}]; uniform vec4 secB[${MAX}]; uniform float secK[${MAX}];`)
+        .replace(hook, `${hook}
 for (int i = 0; i < ${MAX}; i++) {
   if (i >= secCount) break;
   if (i == ${skip}) continue;
   vec3 d = vSecW - secO[i];
-  if (dot(d, secN[i]) > 0.0) {
+  if (dot(d, secN[i]) > 0.0${material.userData.beyond ? ' || secK[i] < 0.5' : ''}) {
     float pu = dot(d, secU[i]), pv = dot(d, secV[i]);
     if (pu > secB[i].x && pu < secB[i].y && pv > secB[i].z && pv < secB[i].w) discard;
   }
 }`);
       extra?.(shader);
     };
-    material.customProgramCacheKey = () => `sec${skip}`;
+    material.customProgramCacheKey = () => `sec${skip}${material.userData.beyond ? 'b' : ''}`;
     material.needsUpdate = true;
   }
 
@@ -239,6 +242,7 @@ for (int i = 0; i < ${MAX}; i++) {
       const f = frameOf(p);
       u.secO.value[i].copy(f.o); u.secN.value[i].copy(f.n); u.secU.value[i].copy(f.u); u.secV.value[i].copy(f.v);
       u.secB.value[i].set(...p.b);
+      u.secK.value[i] = p.air?.beyond ? 1 : 0;
     });
     this.draw();
     this.view.caps?.update();
@@ -416,7 +420,7 @@ for (int i = 0; i < ${MAX}; i++) {
     const wall = v.hitAt(e)?.distance ?? Infinity;
     const seen = (p3) => p3.clone().sub(ray.ray.origin).dot(ray.ray.direction) < wall + 0.05;
     if (this.selected && this.gumball.visible) {
-      for (const g of this.grips(this.selected)) if (this.screen(g.at).distanceTo(m) < GRIP_HIT && seen(g.at)) return { type: 'grip', grip: g, plane: this.selected };
+      for (const g of this.grips(this.selected)) if (this.screen(g.at).distanceTo(m) < GRIP_HIT) return { type: 'grip', grip: g, plane: this.selected }; // through anything in front
     }
     // Outlines: the nearest within a few pixels.
     let best = null;
@@ -426,7 +430,7 @@ for (int i = 0; i < ${MAX}; i++) {
         const a = c[i], b = c[(i + 1) % 4], d = segmentDistance(m, a, b);
         if (!(d < PICK_PX) || (best && d >= best.d)) continue;
         const ab = b.clone().sub(a), t = Math.max(0, Math.min(1, m.clone().sub(a).dot(ab) / Math.max(1e-9, ab.lengthSq())));
-        if (seen(c3[i].clone().lerp(c3[(i + 1) % 4], t))) best = { type: 'slide', plane: p, d };
+        if (p === this.selected || seen(c3[i].clone().lerp(c3[(i + 1) % 4], t))) best = { type: 'slide', plane: p, d };
       }
     }
     return best;

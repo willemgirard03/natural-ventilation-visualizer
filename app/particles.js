@@ -50,6 +50,8 @@ export class AirflowParticles {
     const common = { vertexColors: true, transparent: true, depthWrite: false, clippingPlanes: view.clipping };
     this.heads = layer(view, CAPACITY, 1, THREE.Points, new THREE.PointsMaterial({ size: 3.5, sizeAttenuation: false, ...common })); // px: the same in perspective and parallel
     this.trails = layer(view, CAPACITY, HISTORY * 2, THREE.LineSegments, new THREE.LineBasicMaterial(common));
+    // cut behind a clipping plane too, within its bounds, unless the plane shows the particles beyond it
+    for (const l of [this.heads, this.trails]) l.obj.material.userData.beyond = true;
     this.live = [];
     this.speed = 5; // display time runs this many times faster than real time
     this.densityScale = 1; // the Particles slider

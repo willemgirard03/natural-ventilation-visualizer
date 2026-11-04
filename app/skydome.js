@@ -3,9 +3,10 @@
 // paths, the weather file's hours as dots, and the sun at the hour picked with its ray to the site.
 //
 // Where it departs from the shading tool, for this tool's views and data:
-//  - The camera orbits the building, not the sky, so the building stays put and the sky turns to
-//    the model's north axis (Building, north_axis). The knob sits on true north on the horizon:
-//    dragged round, true north follows the pointer and the north axis is set from it.
+//  - The view is in the model's axes, so the sky is turned to the model's north axis (Building,
+//    north_axis) - and the camera turns with it, so on screen the sky and compass stay still and the
+//    building turns under them, as in the shading tool. The knob is on the model's own north (its +y):
+//    dragged round, the building turns so that its north points at the pointer.
 //  - The weather is hourly: the clock is the weather file's standard time, the sun stands at the
 //    middle of the hour picked, and a sun dragged on the dome sets the date and the hour ending.
 //  - The weather dots are coloured by whether the windows may open that hour: too cold, within the
@@ -113,9 +114,16 @@ export class SkyDome {
 
   // R: the dome's radius (m); north: the model's north axis (°); doy and hour: the day picked and the
   // weather file's hour ending; weather: its hours, for the dots; limits: [lo, hi] °C outdoors.
+  // The sky turned to a north axis, and the camera with it: the sky stays still on screen and the
+  // building turns. The first north a model is shown with only sets the sky.
+  turnTo(north) {
+    if (this.turned !== null && this.turned !== undefined && north !== this.turned) this.view.turnCamera(north - this.turned);
+    this.turned = north;
+    this.group.rotation.z = north * D2R;
+  }
   update(state) {
     this.state = state;
-    if (!this.drag) this.group.rotation.z = state.north * D2R;
+    if (!this.drag) this.turnTo(state.north);
     this.build();
     this.castShadows();
     this.view.render();
@@ -140,7 +148,7 @@ export class SkyDome {
     for (let b = 0; b < 360; b += 15) ticks.push([compassPt(b, R), compassPt(b, R * (1 - (b % 90 === 0 ? 0.1 : b % 45 === 0 ? 0.06 : 0.035)))]);
     add('compass', lines(ticks, ink3, 0.9));
     const tri = new THREE.BufferGeometry();
-    tri.setAttribute('position', new THREE.Float32BufferAttribute([...compassPt(-2.2, R), ...compassPt(2.2, R), ...compassPt(0, R * 0.9)], 3));
+    tri.setAttribute('position', new THREE.Float32BufferAttribute([...compassPt(-2.6, R * 0.9), ...compassPt(2.6, R * 0.9), ...compassPt(0, R)], 3));
     const north = new THREE.Mesh(tri, new THREE.MeshBasicMaterial({ color: ink, side: THREE.DoubleSide, transparent: true, depthWrite: false }));
     north.userData.strength = 1;
     add('compass', north);
@@ -213,8 +221,7 @@ export class SkyDome {
       if (z) out.push(circle(z[0], z[1], 1.6, { fill: 'var(--ink3)' }), label(z[0] + 4, z[1] - 3, 'zenith', { size: 8, fill: 'var(--ink3)', anchor: 'start' }));
     }
     if (this.labels && on('compass')) {
-      // north is named on its knob
-      for (const [b, t] of [[90, 'E 90°'], [180, 'S 180°'], [270, 'W 270°']]) tag(compassPt(b, R * 1.14), t, { size: 10, fill: 'var(--ink2)' });
+      for (const [b, t] of [[0, 'N 0°'], [90, 'E 90°'], [180, 'S 180°'], [270, 'W 270°']]) tag(compassPt(b, R * 1.14), t, { size: 10, fill: b ? 'var(--ink2)' : 'var(--ink)' });
       for (const [b, t] of [[45, 'NE'], [135, 'SE'], [225, 'SW'], [315, 'NW']]) tag(compassPt(b, R * 1.1), t, { size: 8, fill: 'var(--ink3)' });
     }
     if (this.labels && on('hours')) for (const h of this.hours || []) if (h.tag && h.h % 2 === 0) tag(h.tag, `${h.h}h`, { size: 7.5, fill: 'var(--ink3)', bg: 0.75 });
@@ -236,15 +243,16 @@ export class SkyDome {
         }
       }
     }
-    // True north on the horizon: a knob that turns the sky about the building.
+    // The building's own north (its +y): an arrow on the ground out to a knob on the horizon, which
+    // turns the building under the sky.
     if (this.shown && on('compass')) {
-      const k = P(compassPt(0, R)), from = P(compassPt(0, R * 0.45));
-      if (k && from) {
-        out.push(line(from[0], from[1], k[0], k[1], { stroke: 'var(--glass)', w: 1.3 }));
-        out.push(circle(k[0], k[1], 6, { fill: 'var(--panel)', stroke: 'var(--glass)', 'stroke-width': 1.6 }), circle(k[0], k[1], 2.4, { fill: 'var(--glass)' }));
-        out.push(label(k[0], k[1] - 13, `N · north axis ${Math.round(this.drag?.north ?? s.north)}°`, { size: 9, edit: 'north' }));
-        this.marks.knob = k; this.marks.arrow = [from, k];
-      }
+      const M = (p) => { const q = this.view.sections.screen(new THREE.Vector3(...p)); return [q.x, q.y]; };
+      const k = M([0, R, 0]), tip = M([0, R * 0.97, 0]), o = M([0, 0, 0]), from = M([0, R * 0.45, 0]);
+      const L = Math.hypot(tip[0] - o[0], tip[1] - o[1]) || 1, u = [(tip[0] - o[0]) / L, (tip[1] - o[1]) / L];
+      out.push(line(o[0], o[1], tip[0] - u[0] * 6, tip[1] - u[1] * 6, { stroke: 'var(--glass)', w: 1.3 }), head(tip[0], tip[1], u[0], u[1], 'var(--glass)', 8, 3.5));
+      out.push(circle(k[0], k[1], 6, { fill: 'var(--panel)', stroke: 'var(--glass)', 'stroke-width': 1.6 }), circle(k[0], k[1], 2.4, { fill: 'var(--glass)' }));
+      out.push(label(k[0], k[1] - 13, `north axis ${Math.round(this.drag?.north ?? s.north)}°`, { size: 9, edit: 'north' }));
+      this.marks.knob = k; this.marks.arrow = [from, k];
     }
     const html = out.join('');
     if (this.html !== html) this.svg.innerHTML = this.html = html; // only when it changed
@@ -291,14 +299,15 @@ export class SkyDome {
         const hour = Math.min(24, Math.max(1, Math.floor(got.hour) + 1));
         if (got.doy !== d.doy || hour !== d.hour) { d.doy = got.doy; d.hour = hour; this.onTime(got.doy, hour); }
       } else {
-        // True north follows the pointer round the building: whole degrees, 15° with Shift.
+        // The building's north follows the pointer: whole degrees, 15° with Shift. The pointer's
+        // bearing in the model's axes, plus the turn shown now, is its compass bearing.
         const r = canvas.getBoundingClientRect(), ray = new THREE.Raycaster();
         ray.setFromCamera(new THREE.Vector2((m[0] / r.width) * 2 - 1, -(m[1] / r.height) * 2 + 1), this.view.camera);
         const g = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Vector3());
         if (!g) return;
-        const step = e.shiftKey ? 15 : 1, bearing = Math.atan2(g.x, g.y) * R2D; // true north's bearing in the model's axes
-        d.north = wrap360(Math.round(-bearing / step) * step);
-        this.group.rotation.z = d.north * D2R;
+        const step = e.shiftKey ? 15 : 1;
+        d.north = wrap360(Math.round((Math.atan2(g.x, g.y) * R2D + this.turned) / step) * step);
+        this.turnTo(d.north);
         this.castShadows(d.north);
         this.view.render();
       }

@@ -1,34 +1,41 @@
-// A window edited in the 3D view, as in the Solar Shading Explorer's Edit window in 3D: its sill, head
-// and jambs get handles that push or pull them, and the glass itself drags across its wall. A click on
-// a handle (without dragging) types its figure: the sill or head height above the floor, or the width.
-// The window's figures stay on the drawing beside it. Each drag or typed figure is one edit, made
-// through onCommit(name, rect) once the pointer is let go; while dragging, the new outline is drawn,
-// red where the wall will not take it.
+// A window edited in the 3D view, as the facade-windows skill's Edit window in 3D: grips on its sill, head
+// and jambs (9 px squares), the glass drawn selected, and its figures on the drawing, typed over with a
+// click. A jamb grows the window both ways about its middle, at twice the pointer's run; the sill moves
+// with the head held, the head with the sill held. The glass itself drags across its wall.
+//
+// A window of a massing has a Size (sizeOf): its figures are then those that Size keeps - Fixed: width,
+// height, sill; Offsets: the gap to the slab, to its bay's edge, the sill; Proportional: shares of the
+// bay and the wall - and its bay is drawn dashed. Any other window shows Fixed's. A drag commits a new
+// outline (onCommit(name, rect)); a typed figure goes to onFigure(name, key, value) for a massing's
+// window, else as an outline. While dragging, the outline is red where the wall will not take it.
 
 import * as THREE from 'three';
-import { askNumber, gripTexture } from './sections.js';
+import { askNumber } from './sections.js';
+import { gripMark, label, poly, CLICK_PX } from './handles.js';
 
-const GRIP_PX = 9, GRIP_HIT = 11, SNAP = 0.01; // m: drags move in 10 mm steps, 100 mm with Shift
-const LINE = '#F2A900', BAD = '#D93025';
+const GRIP_HIT = 11, SNAP = 0.005; // m: drags move in 5 mm steps, 100 mm with Shift
+const BAD = '#C0442B';
+const mm = (x) => Math.round(x * 1000);
+const pc = (x) => `${Math.round(x * 100)}%`;
 
 export class WindowEditor {
   // rectOf(name) -> { s0, s1, z0, z1, frame: { right, out, plane } } in building coordinates;
   // problem(name, rect) -> null or why the wall will not take it; clamp(name, rect) -> rect kept in the
   // wall's bounds; floorOf(name) -> the height of its room's floor; depthOf(name) -> how far the glass
-  // is drawn from the wall's modelled plane (thick walls); onCommit(name, rect).
-  constructor(view, { rectOf, problem, clamp, floorOf, depthOf = () => 0, onCommit }) {
-    Object.assign(this, { view, rectOf, problem, clamp, floorOf, depthOf, onCommit });
+  // is drawn from the wall's modelled plane; sizeOf(name) -> null, or for a massing's window
+  // { size, bay: [s0, s1], top, slab }; onCommit(name, rect); onFigure(name, key, value).
+  constructor(view, { rectOf, problem, clamp, floorOf, depthOf = () => 0, sizeOf = () => null, onCommit, onFigure = null }) {
+    Object.assign(this, { view, rectOf, problem, clamp, floorOf, depthOf, sizeOf, onCommit, onFigure });
     this.name = null;
-    this.layer = new THREE.Group();
-    this.layer.userData.noSection = true;
-    view.scene.add(this.layer);
-    this.figures = document.createElement('div');
-    this.figures.className = 'winfigs';
-    this.figures.hidden = true;
-    view.container.appendChild(this.figures);
-    this.figures.addEventListener('click', (e) => {
-      const f = e.target.closest('[data-fig]');
-      if (f) this.type(e, f.dataset.fig);
+    this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    this.svg.setAttribute('class', 'mhandles');
+    view.container.appendChild(this.svg);
+    // taken on press: the overlay is redrawn with every frame while the air moves
+    this.svg.addEventListener('pointerdown', (e) => {
+      const f = e.target.closest('[data-edit]');
+      if (!f || e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation();
+      this.type(e, f.dataset.edit);
     });
     this.wire();
   }
@@ -48,8 +55,7 @@ export class WindowEditor {
   stop() {
     this.name = null;
     this.draft = null;
-    this.clear();
-    this.figures.hidden = true;
+    this.svg.innerHTML = this.shown = '';
     this.view.renderer.domElement.style.cursor = '';
     this.view.render();
   }
@@ -64,15 +70,17 @@ export class WindowEditor {
     this.draw();
   }
 
-  clear() {
-    for (const o of [...this.layer.children]) { o.geometry?.dispose(); o.material?.dispose(); this.layer.remove(o); }
-  }
-
-  // A point in the wall's frame (s along it, z up) in view coordinates, just proud of the glass as drawn.
+  // A point in the wall's frame (s along it, z up) in view coordinates, on the glass as drawn.
   at(s, z) {
     const { right, out, plane } = this.rect.frame, o = this.view.origin, d = plane + this.depthOf(this.name) + 0.03;
     return new THREE.Vector3(right[0] * s + out[0] * d - o[0], right[1] * s + out[1] * d - o[1], z - o[2]);
   }
+  // ... on the wall's face (the bay's outline).
+  onWall(s, z) {
+    const { right, out, plane } = this.rect.frame, o = this.view.origin;
+    return new THREE.Vector3(right[0] * s + out[0] * (plane + 0.03) - o[0], right[1] * s + out[1] * (plane + 0.03) - o[1], z - o[2]);
+  }
+  P = (v) => { const s = this.view.sections.screen(v); return [s.x, s.y]; };
 
   grips(r = this.draft || this.rect) {
     const sm = (r.s0 + r.s1) / 2, zm = (r.z0 + r.z1) / 2;
@@ -84,62 +92,51 @@ export class WindowEditor {
     ];
   }
 
-  draw() {
-    this.clear();
+  // The window drawn selected (glass at 0.42, a 3 px outline, a dashed inner line), its bay under
+  // Offsets and Proportional, its grips and its figures.
+  draw(render = true) {
     if (!this.name) return;
-    const r = this.draft || this.rect, bad = this.draft && this.problem(this.name, this.draft);
-    const c = [this.at(r.s0, r.z0), this.at(r.s1, r.z0), this.at(r.s1, r.z1), this.at(r.s0, r.z1)];
-    const color = bad ? BAD : LINE;
-    const line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(c), new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }));
-    const fill = new THREE.Mesh(new THREE.BufferGeometry().setFromPoints([c[0], c[1], c[2], c[0], c[2], c[3]]),
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthTest: false, depthWrite: false }));
-    line.renderOrder = 22; fill.renderOrder = 21;
-    this.layer.add(fill, line);
-    for (const g of this.grips(r)) {
-      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: gripTexture(), depthTest: false, transparent: true }));
-      s.position.copy(g.at);
-      s.renderOrder = 23;
-      s.userData.grip = g;
-      this.layer.add(s);
+    const canvas = this.view.renderer.domElement, cr = canvas.getBoundingClientRect(), kr = this.view.container.getBoundingClientRect();
+    Object.assign(this.svg.style, { left: `${cr.left - kr.left}px`, top: `${cr.top - kr.top}px`, width: `${cr.width}px`, height: `${cr.height}px` });
+    const r = this.draft || this.rect, bad = this.draft && this.problem(this.name, this.draft), sz = this.sizeOf(this.name), P = this.P;
+    const col = bad ? BAD : 'var(--glass)', floor = this.floorOf(this.name);
+    const c = [this.at(r.s0, r.z0), this.at(r.s1, r.z0), this.at(r.s1, r.z1), this.at(r.s0, r.z1)].map(P);
+    let g = '';
+    if (sz && sz.size !== 'fixed') {
+      const b = [this.onWall(sz.bay[0], floor), this.onWall(sz.bay[1], floor), this.onWall(sz.bay[1], sz.top), this.onWall(sz.bay[0], sz.top)].map(P);
+      g += poly(b, { stroke: 'var(--glass)', w: 0.8, dash: '3 3' });
     }
-    this.figuresFor(r, bad);
-    this.view.render();
+    g += poly(c, { fill: col, op: 0.42 }) + poly(c, { stroke: col, w: 3 }) + poly(c, { stroke: 'var(--panel)', w: 1.2, dash: '3 2.5' });
+    for (const q of this.grips(r)) { const p = P(q.at); g += gripMark(p[0], p[1]); }
+    g += this.figures(r, sz, floor, c);
+    if (bad) { const p = P(this.at((r.s0 + r.s1) / 2, r.z1)); g += label(p[0], p[1] - 22, bad, { fill: BAD }); }
+    if (this.shown !== g) this.svg.innerHTML = this.shown = g;
+    if (render) this.view.render();
   }
 
-  // The window's figures beside it: width under the sill, height beside the right jamb, sill height
-  // under the left jamb. Each is typed over with a click.
-  figuresFor(r, bad) {
-    const mm = (x) => Math.round(x * 1000);
-    const floor = this.floorOf(this.name);
-    this.figures.innerHTML = [
-      ['width', `W ${mm(r.s1 - r.s0)}`, 'Width, mm: click to type it (the right jamb moves)'],
-      ['height', `H ${mm(r.z1 - r.z0)}`, 'Height, mm: click to type it (the head moves)'],
-      ['sill', `Sill ${mm(r.z0 - floor)}`, 'Sill height above the floor, mm: click to type it (the window moves up or down)'],
-    ].map(([k, t, tip]) => `<button type="button" class="wfig" data-fig="${k}" title="${tip}">${t}</button>`).join('')
-      + (bad ? `<span class="wfig bad">${bad}</span>` : '');
-    this.figures.hidden = false;
-    this.placeFigures(r);
-  }
-
-  placeFigures(r = this.draft || this.rect) {
-    if (!this.name || this.figures.hidden) return;
-    const spot = { width: this.at((r.s0 + r.s1) / 2, r.z0), height: this.at(r.s1, (r.z0 + r.z1) / 2), sill: this.at(r.s0, r.z0) };
-    const off = { width: [0, 16], height: [34, 0], sill: [-30, 16] };
-    for (const el of this.figures.querySelectorAll('[data-fig]')) {
-      const p = this.screen(spot[el.dataset.fig]), [dx, dy] = off[el.dataset.fig];
-      el.style.transform = `translate(${p.x + dx}px, ${p.y + dy}px) translate(-50%, -50%)`;
+  // The figures its Size keeps, each typed over: below the sill (18 px), above the head (12 px), right of
+  // the right jamb, and at the lower left corner.
+  figures(r, sz, floor, c) {
+    const size = sz?.size || 'fixed', P = this.P, w = r.s1 - r.s0, f = [];
+    const below = P(this.at((r.s0 + r.s1) / 2, r.z0)), above = P(this.at((r.s0 + r.s1) / 2, r.z1)), right = P(this.at(r.s1, (r.z0 + r.z1) / 2));
+    const corner = c[0], o = { size: 9 };
+    if (size === 'fixed') {
+      f.push(label(below[0], below[1] + 18, `w ${mm(w)} mm`, { ...o, edit: 'winW' }));
+      f.push(label(right[0] + 34, right[1] + 3, `h ${mm(r.z1 - r.z0)} mm`, { ...o, edit: 'winH' }));
+    } else if (size === 'offset') {
+      f.push(label(above[0], above[1] - 12, `to ${sz.slab ? 'slab' : 'roof'} ${mm(sz.top - r.z1)} mm`, { ...o, edit: 'headGap' }));
+      f.push(label(right[0] + 44, right[1] + 3, `to bay ${mm(sz.bay[1] - r.s1)} mm`, { ...o, edit: 'jamb' }));
+    } else {
+      f.push(label(below[0], below[1] + 18, `w ${pc(w / (sz.bay[1] - sz.bay[0]))} of bay`, { ...o, edit: 'widthR' }));
+      f.push(label(above[0], above[1] - 12, `head ${pc((r.z1 - floor) / (sz.top - floor))}`, { ...o, edit: 'headR' }));
     }
-    const bad = this.figures.querySelector('.bad');
-    if (bad) { const p = this.screen(this.at((r.s0 + r.s1) / 2, r.z1)); bad.style.transform = `translate(${p.x}px, ${p.y - 20}px) translate(-50%, -50%)`; }
+    const sill = size === 'ratio' ? `sill ${pc((r.z0 - floor) / (sz.top - floor))}` : `sill ${mm(r.z0 - floor)} mm`;
+    f.push(label(corner[0] - 6, corner[1] + 14, sill, { ...o, anchor: 'end', edit: size === 'ratio' ? 'sillR' : 'sill' }));
+    return f.join('');
   }
 
-  // Before each render: handles keep their size on screen, figures follow the window.
-  beforeRender() {
-    if (!this.name) return;
-    const sec = this.view.sections;
-    for (const o of this.layer.children) if (o.isSprite) o.scale.setScalar(sec.scaleAt(o.position) * GRIP_PX * 2);
-    this.placeFigures();
-  }
+  // Before each render: redrawn where the camera now puts it.
+  beforeRender() { if (this.name) this.draw(false); }
 
   screen(point) { return this.view.sections.screen(point); }
 
@@ -176,7 +173,7 @@ export class WindowEditor {
         return;
       }
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-      if (!drag.moved && Math.hypot(dx, dy) < 3) return;
+      if (!drag.moved && Math.hypot(dx, dy) < CLICK_PX) return;
       drag.moved = true;
       e.stopImmediatePropagation();
       const step = e.shiftKey ? 0.1 : SNAP, delta = new THREE.Vector2(dx, dy), R = drag.r;
@@ -188,8 +185,11 @@ export class WindowEditor {
       if (drag.h.type === 'body') r = this.clamp(this.name, { s0: R.s0 + ds, s1: R.s1 + ds, z0: R.z0 + dz, z1: R.z1 + dz });
       else if (drag.h.k === 'sill') r.z0 = Math.min(R.z0 + dz, R.z1 - 0.2);
       else if (drag.h.k === 'head') r.z1 = Math.max(R.z1 + dz, R.z0 + 0.2);
-      else if (drag.h.k === 'left') r.s0 = Math.min(R.s0 + ds, R.s1 - 0.2);
-      else r.s1 = Math.max(R.s1 + ds, R.s0 + 0.2);
+      else {
+        // a jamb: the window grows both ways about its middle, at twice the pointer's run
+        const out = drag.h.k === 'right' ? ds : -ds, half = Math.max((R.s1 - R.s0) / 2 + out, 0.15), m = (R.s0 + R.s1) / 2;
+        r.s0 = m - half; r.s1 = m + half;
+      }
       this.draft = r;
       this.draw();
     }, true);
@@ -205,28 +205,35 @@ export class WindowEditor {
         else this.draw();
         return;
       }
-      if (d.h.type === 'grip') this.type(e, { sill: 'sill', head: 'head', left: 'width-left', right: 'width' }[d.h.k]);
+      if (d.h.type === 'grip') {
+        const size = this.sizeOf(this.name)?.size || 'fixed';
+        const key = { sill: size === 'ratio' ? 'sillR' : 'sill', head: { fixed: 'winH', offset: 'headGap', ratio: 'headR' }[size], left: { fixed: 'winW', offset: 'jamb', ratio: 'widthR' }[size] }[d.h.k] || { fixed: 'winW', offset: 'jamb', ratio: 'widthR' }[size];
+        this.type(e, key);
+      }
     };
     el.addEventListener('pointerup', end, true);
     el.addEventListener('pointercancel', end, true);
   }
 
-  // A figure typed: 'sill' or 'head' (mm above the floor), 'height' (mm, the head moves), 'width'
-  // (mm, the right jamb moves) or 'width-left' (the left jamb moves).
-  type(e, fig) {
-    const R = this.rect, floor = this.floorOf(this.name), mm = (x) => Math.round(x * 1000);
-    const now = { sill: R.z0 - floor, head: R.z1 - floor, height: R.z1 - R.z0, width: R.s1 - R.s0, 'width-left': R.s1 - R.s0 }[fig];
-    const label = { sill: 'sill height', head: 'head height', height: 'height', width: 'width', 'width-left': 'width' }[fig];
-    askNumber(this.view.container, e, `${label} mm, now ${mm(now)}`, (x) => {
-      const v = x / 1000, r = { ...R };
-      if (fig === 'sill') { r.z0 = floor + v; r.z1 = r.z0 + (R.z1 - R.z0); }
-      else if (fig === 'head') r.z1 = floor + v;
-      else if (fig === 'height') r.z1 = R.z0 + v;
-      else if (fig === 'width') r.s1 = R.s0 + v;
-      else r.s0 = R.s1 - v;
+  // A figure typed over: lengths in mm, shares in %. A massing's window takes it as its Size keeps it
+  // (onFigure); any other window as a new outline, the width about its middle, a height keeping the sill.
+  type(e, key) {
+    const R = this.rect, floor = this.floorOf(this.name), sz = this.sizeOf(this.name), w = R.s1 - R.s0;
+    const now = {
+      winW: mm(w), winH: mm(R.z1 - R.z0), sill: mm(R.z0 - floor),
+      headGap: sz && mm(sz.top - R.z1), jamb: sz && mm(sz.bay[1] - R.s1),
+      widthR: sz && Math.round((100 * w) / (sz.bay[1] - sz.bay[0])), headR: sz && Math.round((100 * (R.z1 - floor)) / (sz.top - floor)), sillR: sz && Math.round((100 * (R.z0 - floor)) / (sz.top - floor)),
+    }[key];
+    const ratio = key.endsWith('R'), what = { winW: 'width', winH: 'height', sill: 'sill', headGap: `gap to the ${sz?.slab ? 'slab' : 'roof'}`, jamb: 'gap to the bay', widthR: 'width, % of the bay', headR: 'head, % of the wall', sillR: 'sill, % of the wall' }[key];
+    askNumber(this.view.container, e, `${what}${ratio ? '' : ' mm'}, now ${now}${ratio ? '%' : ''}`, (x) => {
+      const v = ratio ? x / 100 : x / 1000;
+      if (sz && this.onFigure) { this.onFigure(this.name, key, v); return; }
+      const r = { ...R }, m = (R.s0 + R.s1) / 2;
+      if (key === 'sill') { r.z0 = floor + v; r.z1 = r.z0 + (R.z1 - R.z0); } else if (key === 'winH') r.z1 = R.z0 + v;
+      else if (key === 'winW') { r.s0 = m - v / 2; r.s1 = m + v / 2; }
       const why = this.problem(this.name, r);
       if (why) { this.draft = r; this.draw(); setTimeout(() => { this.draft = null; this.draw(); }, 1600); return; }
       this.onCommit(this.name, r);
-    }, fig === 'sill');
+    }, key === 'sill' || key === 'headGap' || key === 'jamb');
   }
 }
