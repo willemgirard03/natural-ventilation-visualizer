@@ -28,7 +28,11 @@ import {
 } from '../src/model/edit.js';
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
-import { massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry } from '../src/model/massing.js';
+import {
+  massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, SIDES, unitLayout, unitOf, isArray, brokenOf,
+  setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch,
+} from '../src/model/massing.js';
+import { PRESETS, SIZES } from '../src/model/windows.js';
 import { massingPanel } from './massing-panel.js';
 import { MassingEditor } from './massedit.js';
 
@@ -147,12 +151,25 @@ const winEdit = new WindowEditor(view, {
   depthOf: (name) => view.windowOffset(model.windows[name]),
   // a window of a massing's array is broken out of it, with the size and place it was given
   onCommit: (name, r) => (massing && massingWindow(massing, name)
-    ? massingChange((x) => breakOutWindow(x, name, r, wallMiddle(name)), `window ${name} broken out of its array`)
+    ? massingWindowEdit(name, r)
     : applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true })),
 });
 view.onRender = () => followPop();
 // A massing's storey pushed, pulled, moved and turned in the view (app/massedit.js).
-const massEdit = new MassingEditor(view, { massing: () => massing, onChange: massingChange });
+const massEdit = new MassingEditor(view, {
+  massing: () => massing, onChange: massingChange,
+  brokenWindows: () => (massing && model ? brokenNames().filter((n) => n !== selected).map((n) => model.windows[n]?.vertices).filter(Boolean) : []),
+});
+// The massing's windows broken out of their arrays, worked out again only when the massing changes.
+let brokenKey = '', brokenList = [];
+function brokenNames() {
+  const key = JSON.stringify(massing);
+  if (key !== brokenKey) {
+    brokenKey = key;
+    brokenList = massingGeometry(massing).flatMap((z) => z.windows.filter((w) => massing.storeys[z.storey].sides[w.side]?.broken?.[w.index]).map((w) => w.name));
+  }
+  return brokenList;
+}
 // The sky over the building (app/skydome.js): the sun at the hour picked, dragged to pick another,
 // and true north on the horizon, dragged to set the model's north axis.
 const sky = new SkyDome(view, {
@@ -979,6 +996,7 @@ function popContent(kind, item) {
     rows.push(`<span class="muted">${esc(item.name)}</span>`,
       `${fmt(item.area, 2)} m² · ${item.azimuth === null ? (item.tilt < 90 ? 'faces up' : 'faces down') : `faces ${deg(item.azimuth)} from north`} · tilt ${deg(item.tilt)}`);
     if (item.adjacentZone) rows.push(`Shared with zone ${esc(item.adjacentZone)}`);
+    { const ms = massingSide(kind, item); if (ms) rows.push(...sideRows(ms)); }
     rows.push(...assemblyRows(item));
   } else if (kind === 'window') {
     const r = windowRect(model, item.name), floor = model.zones[item.zone].bottom;
@@ -986,7 +1004,10 @@ function popContent(kind, item) {
     rows.push(`<span class="muted">${esc(item.name)}, ${esc(item.zone)}</span>`,
       r ? `${fmt(r.s1 - r.s0, 2)} × ${fmt(r.z1 - r.z0, 2)} m, sill ${fmt(r.z0 - floor, 2)} m · ${fmt(item.area, 2)} m²` : `${fmt(item.area, 2)} m² · ${fmt(item.height, 2)} m tall`,
       item.operableFraction ? `Operable fraction ${fmt(item.operableFraction.value, 2)}` : 'Not operable');
+    const ms = massingSide(kind, item);
+    if (ms) title = `Window ${ms.index + 1} of ${ms.n}`;
     if (r) rows.push(`<button class="pbtn${winEdit.name === item.name ? ' on' : ''}" data-act="winedit" title="${winEdit.name === item.name ? 'Back to the building: the handles go (Esc)' : 'Its sill, head and jambs get handles in the view to push or pull; drag the glass to move it across its wall; click a handle or a figure to type it'}">${winEdit.name === item.name ? 'Done' : 'Edit window in 3D'}</button>`);
+    if (ms) rows.push(...sideRows(ms, winEdit.name === item.name));
   } else if (kind === 'door') {
     title = 'Door';
     rows.push(`Between ${esc(item.zone)} and ${esc(item.partnerZone)}`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m`,
@@ -1258,6 +1279,83 @@ function amountText(l) {
   const angle = sashFor(l, now).angle;
   return `${fmt((100 * angle) / maxAngleOf(l), 0)}% of its travel: ${fmt(angle, 0)}°, ${fmt(100 * now, 0)}% free (EnergyPlus opening factor ${fmt(now, 2)})`;
 }
+
+// ---------- a massing's windows in its pop-ups (the facade-windows skill) ----------
+// The side a selected wall or window of a massing is on: its storey, side, the window's place and how
+// many the array makes. null for anything else.
+function massingSide(kind, item) {
+  if (!massing) return null;
+  let at;
+  if (kind === 'window') { const w = massingWindow(massing, item.name); at = w && { storey: w.storey, side: w.side, index: w.index }; }
+  else if (kind === 'surface') { const t = massingTarget({ kind, item }); at = t && SIDES.includes(t.face) ? { storey: t.storey, side: t.face } : null; }
+  if (!at) return null;
+  const s = massing.storeys[at.storey], g = s.sides[at.side];
+  return { ...at, n: g ? unitLayout(g, at.side === 'N' || at.side === 'S' ? s.w : s.d).n : 0 };
+}
+const SIDE_WORD = { S: 'South', E: 'East', N: 'North', W: 'West' };
+let sideMore = false, applyAsk = false; // More ▸ open; Apply to array asking about the others broken out
+function sideRows(at, isolated = false) {
+  const s = massing.storeys[at.storey], g = s.sides[at.side], rows = [], k = at.index;
+  const seg = (act, opts, now, tip) => `<span class="seg mini" title="${esc(tip)}">${opts.map(([v, l]) => `<button type="button" data-act="${act}" data-v="${v}" aria-pressed="${v === now}">${l}</button>`).join('')}</span>`;
+  const chk = (act, on, text, tip) => `<label class="chk" title="${esc(tip)}"><input type="checkbox" data-act="${act}"${on ? ' checked' : ''}> ${text}</label>`;
+  rows.push(popSec(`${SIDE_WORD[at.side]} side · windows`, 'The window array on this side of the storey: set out along it by number or spacing, every window of it the same type unless broken out'));
+  if (!g) {
+    rows.push(`<div class="poprow"><button type="button" class="pbtn" data-act="sw-one" title="A 1.5 × 1.8 m window, sill 900 mm, in the middle of the side (lower if the wall is short). Make it an array from its pop-up.">One window</button>`
+      + `<select class="popsel" data-act="sw-preset" title="Punched windows: 1.5 × 1.8 m at 3 m spacing. Window wall: glass from the floor to the slab, bay to bay, at 1.5 m spacing. Curtain wall: the same, flush."><option value="" selected hidden>From preset…</option>${Object.entries(PRESETS).map(([key, p]) => `<option value="${key}">${p.label}</option>`).join('')}</select></div>`);
+    return rows;
+  }
+  if (isolated && k !== undefined) rows.push(`<div class="poprow"><span class="tipped" title="How this window type's edges hold as the storey's height or the window's bay changes. Fixed: its own width and height, the sill above the floor. Offsets: the sill above the floor, the head a set distance under the slab, each jamb a set distance in from its bay - a window wall is Offsets of 0. Proportional: each edge a share of the wall's height and of the bay. Switching never moves the glass.">Size</span> ${seg('sw-size', SIZES, unitOf(g, k).size || 'fixed', 'How the edges hold')}</div>`);
+  rows.push(`<div class="poprow">${chk('sw-array', isArray(g), 'Array', 'On: the window repeats along the side at a spacing that leaves wall between. Off: one window, in the middle.')}`
+    + (isArray(g) ? seg('sw-by', [['spacing', 'Spacing'], ['number', 'Number']], g.winBy === 'spacing' ? 'spacing' : 'number', 'Spacing keeps the pitch as the side changes length; Number keeps the count. Switching keeps the layout as it is.') : '') + '</div>');
+  rows.push(`<div class="poprow">${chk('sw-sides', s.linkSides, 'Apply to all sides', 'On: the storey\'s other sides take these windows and follow every later change to them. Off: each side keeps its own.')}`
+    + chk('sw-above', s.linkAbove, 'Apply to storeys above', 'On: the storeys above take these windows and follow every later change to them.') + '</div>');
+  rows.push(`<button type="button" class="pbtn more" data-act="sw-more" aria-expanded="${sideMore}">${sideMore ? 'More ▴' : 'More ▸'}</button>`);
+  if (sideMore) {
+    const broken = brokenOf(g), others = broken.filter((j) => j !== k);
+    if (k !== undefined && isArray(g)) {
+      if (g.broken?.[k]) {
+        rows.push(`<b>Window ${k + 1} · broken from array</b>`);
+        if (applyAsk && others.length) rows.push(`<div class="poprow">${others.length === 1 ? `Window ${others[0] + 1} is` : `Windows ${others.map((j) => j + 1).join(', ')} are`} broken too: <button type="button" class="pbtn" data-act="sw-apply" data-o="rebind" title="They take the array's new type too">Rebind them</button><button type="button" class="pbtn" data-act="sw-apply" data-o="keep" title="They keep their own types">Keep broken</button><button type="button" class="quiet" data-act="sw-cancel">Cancel</button></div>`);
+        else rows.push(`<div class="poprow"><button type="button" class="pbtn" data-act="sw-revert" title="It drops its own type and follows the array again">Revert to array</button><button type="button" class="pbtn" data-act="sw-apply" title="The array lays this window's type from now on">Apply to array</button></div>`);
+      } else {
+        rows.push(`<div class="poprow"><button type="button" class="pbtn" data-act="sw-break" title="This window takes a copy of the array's type as its own, so its edits are its own. It keeps its place in the array.">Break window ${k + 1} from array</button></div>`);
+        if (others.length) rows.push(`<div class="poprow">${others.length === 1 ? `Window ${others[0] + 1} is` : `Windows ${others.map((j) => j + 1).join(', ')} are`} broken. <button type="button" class="pbtn" data-act="sw-rebind-all" title="Every broken window of the side follows the array again">Rebind all</button></div>`);
+      }
+    } else if (broken.length) rows.push(`<div class="poprow">${broken.length === 1 ? `Window ${broken[0] + 1} is` : `Windows ${broken.map((j) => j + 1).join(', ')} are`} broken. <button type="button" class="pbtn" data-act="sw-rebind-all" title="Every broken window of the side follows the array again">Rebind all</button></div>`);
+    rows.push('<button type="button" class="quiet" data-act="sw-remove" title="Take the windows off this side (Delete)">Remove windows</button>');
+  }
+  return rows;
+}
+// An edit to a selected side's windows, carried to the sides and storeys linked to it.
+function sideEdit(at, fn, what) {
+  return massingChange((x) => { fn(x, x.storeys[at.storey].sides[at.side]); spreadSide(x, at.storey, at.side); }, `${SIDE_WORD[at.side]} side: ${what}`);
+}
+function sideAction(el) {
+  const found = current(), at = found && massingSide(found.kind, found.item);
+  if (!at) return;
+  const act = el.dataset.act, i = at.storey, f = at.side, k = at.index;
+  if (act !== 'sw-apply' && act !== 'sw-cancel') applyAsk = false;
+  if (act === 'sw-more') { sideMore = !sideMore; showInfo(found); }
+  else if (act === 'sw-one') sideEdit(at, (x) => addWindows(x, i, f), 'a window added');
+  else if (act === 'sw-preset' && el.value) sideEdit(at, (x) => addWindows(x, i, f, el.value), `${PRESETS[el.value].label.toLowerCase()} added`);
+  else if (act === 'sw-size') sideEdit(at, (x) => setWindowSize(x, i, f, k, el.dataset.v), `windows sized ${el.dataset.v}`);
+  else if (act === 'sw-array') sideEdit(at, (x, g) => setArray(g, el.checked), el.checked ? 'an array' : 'one window');
+  else if (act === 'sw-by') sideEdit(at, (x) => setBy(x, i, f, el.dataset.v), `set out by ${el.dataset.v}`);
+  else if (act === 'sw-sides') sideEdit(at, (x) => { x.storeys[i].linkSides = el.checked; }, el.checked ? 'applied to all sides' : 'sides kept apart');
+  else if (act === 'sw-above') sideEdit(at, (x) => { x.storeys[i].linkAbove = el.checked; }, el.checked ? 'applied to the storeys above' : 'storeys above kept apart');
+  else if (act === 'sw-break') sideEdit(at, (x, g) => breakWindow(g, k), `window ${k + 1} broken from its array`);
+  else if (act === 'sw-revert') sideEdit(at, (x, g) => revertWindow(g, k), `window ${k + 1} back in its array`);
+  else if (act === 'sw-apply') {
+    const others = brokenOf(massing.storeys[i].sides[f]).filter((j) => j !== k);
+    if (others.length && !el.dataset.o) { applyAsk = true; showInfo(found); return; }
+    applyAsk = false;
+    sideEdit(at, (x, g) => applyToArray(g, k, el.dataset.o || 'keep'), `window ${k + 1}'s type given to the array`);
+  } else if (act === 'sw-cancel') { applyAsk = false; showInfo(found); }
+  else if (act === 'sw-rebind-all') sideEdit(at, (x, g) => { g.broken = {}; }, 'broken windows back in the array');
+  else if (act === 'sw-remove') sideEdit(at, (x) => { x.storeys[i].sides[f] = null; }, 'windows removed');
+}
+$('info').addEventListener('click', (e) => { const b = e.target.closest('button[data-act^="sw-"]'); if (b && massing) sideAction(b); });
+$('info').addEventListener('change', (e) => { const el = e.target.closest('[data-act^="sw-"]'); if (el && massing) sideAction(el); });
 
 // A button to open or close all the operable windows on one wall.
 function wallButton(surface) {
@@ -1937,6 +2035,9 @@ document.addEventListener('keydown', (e) => {
   else if ((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))) { redo(); e.preventDefault(); }
   else if (e.key === 'Escape' && !view.sections.selected && !$('view3d').classList.contains('full')) {
     if (winEdit.active) { winEdit.stop(); showInfo(current()); } else if (selected) view.select(null);
+  } else if (e.key === 'Delete' && massing && selected) {
+    const found = current(), at = found && massingSide(found.kind, found.item);
+    if (at && massing.storeys[at.storey].sides[at.side]) { sideEdit(at, (x) => { x.storeys[at.storey].sides[at.side] = null; }, 'windows removed'); e.preventDefault(); }
   }
 });
 $('edited').addEventListener('click', undo);
@@ -2034,7 +2135,7 @@ function massingChange(mutate, what) {
 // The massing rewritten renumbers its surfaces: the face that was selected, found again by its storey
 // and side (its largest piece), stays selected.
 function reselect(target) {
-  if (!target?.face || !massing) return;
+  if (!target?.face || target.window !== undefined || !massing) return;
   const zone = massingGeometry(massing)[target.storey];
   if (!zone) return;
   const kinds = target.face === 'roof' ? ['Roof', 'Ceiling'] : target.face === 'floor' ? ['Floor'] : ['Wall'];
@@ -2045,6 +2146,7 @@ function reselect(target) {
 // Which storey a selected zone or surface of a massing is, and which face of it (null: the whole
 // zone). The ground floor has no handle of its own.
 function massingTarget(found) {
+  if (found?.kind === 'window') { const at = massingWindow(massing, found.item.name); return at ? { storey: at.storey, face: at.side, window: at.index } : null; }
   if (found?.kind !== 'zone' && found?.kind !== 'surface') return null;
   const zones = massingGeometry(massing);
   if (found.kind === 'zone') { const i = zones.findIndex((z) => z.name === found.item.name); return i < 0 ? null : { storey: i, face: null }; }
@@ -2055,6 +2157,24 @@ function massingTarget(found) {
     return face ? { storey: z.storey, face } : null;
   }
   return null;
+}
+// A massing's window edited in 3D (the facade-windows skill): its edges set its type - the array's, so
+// every window of the array changes, unless it is broken out - each kept as its Size says; the glass
+// moved along its wall sets the array's pitch. A broken window keeps its own size and place.
+function massingWindowEdit(name, r) {
+  const at = massingWindow(massing, name), was = windowRect(model, name), g = massing.storeys[at.storey].sides[at.side];
+  const i = at.storey, f = at.side, k = at.index, mid = wallMiddle(name);
+  if (g.broken?.[k]) return massingChange((x) => { breakOutWindow(x, name, r, mid); spreadSide(x, i, f); }, `window ${k + 1} of the ${f} side moved or resized`);
+  const eq = (a, b) => Math.abs(a - b) < 1e-3, w0 = was.s1 - was.s0, w = r.s1 - r.s0;
+  return massingChange((x) => {
+    if (!eq(w, w0)) setWindowFigure(x, i, f, k, 'winW', w);
+    for (const key of r.z1 > was.z1 ? ['head', 'sill'] : ['sill', 'head']) {
+      const v = (key === 'sill' ? r.z0 : r.z1) - at.z0, old = (key === 'sill' ? was.z0 : was.z1) - at.z0;
+      if (!eq(v, old)) setWindowFigure(x, i, f, k, key, v);
+    }
+    if (eq(w, w0) && !eq(r.s0 + r.s1, was.s0 + was.s1)) dragPitch(x, i, f, k, (r.s0 + r.s1) / 2 - mid);
+    spreadSide(x, i, f);
+  }, `windows of the ${f} side changed`);
 }
 // Where a window's wall has its middle, along the wall (as windowRect measures it).
 function wallMiddle(name) {

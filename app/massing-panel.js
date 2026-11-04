@@ -2,7 +2,8 @@
 // array on each side (as the Solar Shading Explorer's massing). Every change goes through `change`,
 // which rewrites the model from the massing (src/model/massing.js applyMassing) as one undoable edit.
 
-import { SIDES, WINDOWS0, storey0, unitLayout, sideWindows } from '../src/model/massing.js';
+import { SIDES, WINDOWS0, storey0, unitLayout, sideWindows, setWindowFigure, setWindowSize, spreadSide } from '../src/model/massing.js';
+import { SIZES } from '../src/model/windows.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const SIDE_NAMES = { S: 'South', E: 'East', N: 'North', W: 'West' };
@@ -60,8 +61,7 @@ export function massingPanel(box, { get, change }) {
         + (g.winBy === 'spacing' ? `<span class="tipped" title="Centre to centre">Spacing</span> ${num('glz', 'winSp', g.winSp, 'Spacing (m), centre to centre', 0.3)} m <span class="muted">${lay.n} windows</span>`
           : `<span>Count</span> ${num('glz', 'winN', g.winN, 'How many windows', 1, 0)} <span class="muted">${fmt(lay.pitch)} m bays</span>`) + '</div><div class="poprow">'
         + GLAZING.map(([f, l, u, t, min]) => `<span class="tipped" title="${esc(t)}">${l}</span> ${num('glz', f, g[f], `${l} (${u})`, min)} ${u}`).join(' ')
-        + `<label class="chk" title="Each window as wide as its bay: glass to glass"><input type="checkbox" data-act="glz-chk" data-f="fillW"${g.fillW ? ' checked' : ''}> Fill width</label>`
-        + `<label class="chk" title="Each window from its sill up to the slab"><input type="checkbox" data-act="glz-chk" data-f="fillH"${g.fillH ? ' checked' : ''}> Fill height</label></div>`;
+        + `<span class="tipped" title="How the windows' edges hold as the storey's height or the bay changes. Fixed: their own width and height. Offsets: the head a set distance under the slab, each jamb a set distance in from its bay (glass bay to bay, up to the slab, is Offsets of 0). Proportional: shares of the wall's height and the bay. Switching never moves the glass.">Size</span> <select class="popsel" data-act="glz-size">${SIZES.map(([v, l]) => `<option value="${v}"${(g.size || (g.fillW || g.fillH ? 'offset' : 'fixed')) === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>`;
       if (made < lay.n) h += `<div class="poprow muted">${lay.n - made} of the windows are too small to make.</div>`;
       const broken = Object.keys(g.broken || {}).map(Number).sort((a, b) => a - b);
       if (broken.length) {
@@ -77,7 +77,7 @@ export function massingPanel(box, { get, change }) {
   // The sides and storeys an edit to the selected side's windows goes to.
   const glazingTargets = (m) => {
     const out = [];
-    for (let i = sel; i < (matchGlazing ? m.storeys.length : sel + 1); i++) for (const f of allSides ? SIDES : [side]) out.push([m.storeys[i], f]);
+    for (let i = sel; i < (matchGlazing ? m.storeys.length : sel + 1); i++) for (const f of allSides ? SIDES : [side]) out.push([m.storeys[i], f, i]);
     return out;
   };
   function commit(el) {
@@ -91,7 +91,14 @@ export function massingPanel(box, { get, change }) {
     else if (act === 'plate') {
       const i0 = Number(el.closest('[data-st]').dataset.st);
       change((x) => { for (let i = i0; i < (matchPlate ? x.storeys.length : i0 + 1); i++) x.storeys[i][f] = v; }, `storey ${f} set`);
-    } else if (act === 'glz') change((x) => { for (const [s, sd] of glazingTargets(x)) if (s.sides[sd]) s.sides[sd][f] = f === 'winN' ? Math.round(v) : v; }, `windows ${f} set`);
+    } else if (act === 'glz') change((x) => {
+      for (const [s, sd, i] of glazingTargets(x)) {
+        if (!s.sides[sd]) continue;
+        // a window's own figures go through its Size, so each way it keeps them stays true
+        if (['winW', 'winH', 'sill'].includes(f)) setWindowFigure(x, i, sd, undefined, f, v); else s.sides[sd][f] = f === 'winN' ? Math.round(v) : v;
+        spreadSide(x, i, sd);
+      }
+    }, `windows ${f} set`);
   }
 
   box.addEventListener('change', (e) => {
@@ -101,7 +108,7 @@ export function massingPanel(box, { get, change }) {
     if (act === 'match-glazing') { matchGlazing = el.checked; return; }
     if (act === 'all-sides') { allSides = el.checked; return; }
     if (act === 'has-win') { change((x) => { for (const [s, sd] of glazingTargets(x)) s.sides[sd] = el.checked ? (s.sides[sd] || WINDOWS0()) : null; }, el.checked ? 'windows added' : 'windows removed'); return; }
-    if (act === 'glz-chk') { const f = el.dataset.f; change((x) => { for (const [s, sd] of glazingTargets(x)) if (s.sides[sd]) s.sides[sd][f] = el.checked; }, `windows ${f}`); return; }
+    if (act === 'glz-size') { change((x) => { for (const [s, sd, i] of glazingTargets(x)) if (s.sides[sd]) { setWindowSize(x, i, sd, undefined, el.value); spreadSide(x, i, sd); } }, `windows sized ${el.value}`); return; }
     if (act === 'glz' && el.tagName === 'SELECT') { change((x) => { for (const [s, sd] of glazingTargets(x)) if (s.sides[sd]) s.sides[sd].winBy = el.value; }, 'windows set out'); return; }
     commit(el);
   });

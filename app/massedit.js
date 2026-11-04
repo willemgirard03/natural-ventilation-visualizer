@@ -13,22 +13,27 @@
 // With one surface selected: its own grip, and a grip on each of its edges that moves the face beyond
 // that edge, so the storey stays square: a wall's top edge is the roof, its sides the walls either side.
 //
+// A side selected (a wall, or a window of it) shows its windows' array as a dotted bracket over their
+// heads, its number and spacing typed over (the facade-windows skill). Windows broken out of their
+// array are outlined dashed in the sun's colour whenever they are not selected.
+//
 // A press under 3 px is a click: an arrow, grip or arc then asks how far. Each drag or typed figure is
 // one edit, made through onChange(mutate, what) when the pointer is let go; while dragging, the
 // storeys as they will be are drawn in outline.
 
 import * as THREE from 'three';
 import { askNumber } from './sections.js';
-import { AXIS, CLICK_PX, gripMark, gripAt, cursorFor, dragLength, dragAngle, angleOf, dragOnPlane, screenDir, dim, label, line, head, path, poly, circle } from './handles.js';
-import { storeyFrame, pushFace, moveStorey, SIDES } from '../src/model/massing.js';
+import { AXIS, CLICK_PX, gripMark, gripAt, cursorFor, dragLength, dragAngle, angleOf, dragOnPlane, screenDir, dim, label, line, head, path, poly, circle, arrayBracket } from './handles.js';
+import { storeyFrame, pushFace, moveStorey, SIDES, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide } from '../src/model/massing.js';
 
 const FACE_NAMES = { S: 'south wall', E: 'east wall', N: 'north wall', W: 'west wall', roof: 'roof', floor: 'floor' };
 const unit2 = (d) => { const l = Math.hypot(d[0], d[1]); return l < 1e-9 ? [1, 0] : [d[0] / l, d[1] / l]; };
 
 export class MassingEditor {
   // massing() -> the massing; onChange(mutate, what).
-  constructor(view, { massing, onChange }) {
-    Object.assign(this, { view, massing, onChange });
+  // brokenWindows() -> the outlines (model points) of the windows broken out of their arrays, unselected.
+  constructor(view, { massing, onChange, brokenWindows = () => [] }) {
+    Object.assign(this, { view, massing, onChange, brokenWindows });
     this.target = null; // { storey, face }: face null for the whole zone
     this.grips = [];
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -76,15 +81,20 @@ export class MassingEditor {
   }
 
   // Redrawn before every render, as the camera moves.
-  beforeRender() { if (this.target) this.draw(false); }
+  beforeRender() { this.draw(false); }
 
   draw(render = true) {
     const m = this.draft || this.massing();
-    if (!this.target || !m) return;
     const canvas = this.view.renderer.domElement, cr = canvas.getBoundingClientRect(), kr = this.view.container.getBoundingClientRect();
     Object.assign(this.svg.style, { left: `${cr.left - kr.left}px`, top: `${cr.top - kr.top}px`, width: `${cr.width}px`, height: `${cr.height}px` });
-    const { storey: i, face } = this.target, fr = storeyFrame(m, i), P = this.P, grips = [];
-    let g = '';
+    const P = this.P, grips = [];
+    let g = m ? this.brokenWindows().map((v) => poly(v.map(P), { stroke: 'var(--sun)', w: 1.2, dash: '3 2' })).join('') : '';
+    if (!this.target || !m) {
+      this.grips = [];
+      if (this.shown !== g) this.svg.innerHTML = this.shown = g;
+      return;
+    }
+    const { storey: i, face } = this.target, fr = storeyFrame(m, i);
     if (this.draft) { // the storeys as they will be
       for (let k = 0; k < m.storeys.length; k++) {
         const f = storeyFrame(m, k), lo = f.corners.map((c) => P([c[0], c[1], f.z0])), hi = f.corners.map((c) => P([c[0], c[1], f.z1]));
@@ -97,7 +107,8 @@ export class MassingEditor {
       grips.push({ p, key: { kind: 'face', face: f.key }, from: 0, dir: screenDir(P, f.at, f.normal), low });
       return gripMark(p[0], p[1], half);
     };
-    if (!face) {
+    if (this.target.window !== undefined) g += this.bracket(m, i, face); // a window: its array alone
+    else if (!face) {
       // the floor: its gumball, and the floor's own grip in the quarter the gumball leaves free
       const C = [fr.centre[0], fr.centre[1], fr.z0], ex = fr.x, ey = fr.y;
       const s = m.storeys[i], GL = Math.min(10, Math.max(2, Math.min(s.w, s.d) / 4));
@@ -114,6 +125,7 @@ export class MassingEditor {
       if (f) {
         g += this.edges(grips, fr, face, i);
         g += faceGrip(f);
+        if (SIDES.includes(face)) g += this.bracket(m, i, face);
       }
     }
     this.grips = grips;
@@ -146,6 +158,21 @@ export class MassingEditor {
       g += poly(sq, { fill: 'var(--glass)', op: 0.35, stroke: 'var(--glass)', w: 1.2 });
     }
     return g + circle(o[0], o[1], 3, { fill: 'var(--ink2)' });
+  }
+
+  // A side's array bracketed: a dotted line through its windows' middles 0.6 m out from the facade, at
+  // the storey less 150 mm or 450 mm over the heads, a tick at each window, its number and spacing.
+  bracket(m, i, f) {
+    const s = m.storeys[i], g = s.sides[f];
+    if (!g) return '';
+    const fr = storeyFrame(m, i), k = SIDES.indexOf(f), A = fr.corners[k], B = fr.corners[(k + 1) % 4], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+    const lay = unitLayout(g, len);
+    if (!lay.n) return '';
+    const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len], n = fr.faces.find((x) => x.key === f).normal, mid = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
+    const top = s.h - (s.slab || 0), heads = Array.from({ length: lay.n }, (_, j) => windowHeights(unitOf(g, j), top).head);
+    const v = Math.min(s.h - 0.15, Math.max(...heads) + 0.45);
+    const pts = Array.from({ length: lay.n }, (_, j) => { const u = lay.first + j * lay.pitch; return this.P([mid[0] + U[0] * u + n[0] * 0.6, mid[1] + U[1] * u + n[1] * 0.6, fr.z0 + v]); });
+    return arrayBracket(pts, true, lay.n, lay.pitch, 'window');
   }
 
   // The storey's width, depth and height dimensioned along the edges nearest the eye, about 1 m out.
@@ -271,7 +298,13 @@ export class MassingEditor {
 
   // A figure on the drawing typed over: width, depth or height (mm), or the turn (degrees clockwise).
   typeFigure(e, k) {
-    const i = this.target.storey, s = this.massing().storeys[i];
+    const i = this.target.storey, s = this.massing().storeys[i], f = this.target.face;
+    if (k === 'a.count' || k === 'a.spacing') {
+      const g = s.sides[f], lay = unitLayout(g, f === 'N' || f === 'S' ? s.w : s.d);
+      if (k === 'a.count') askNumber(this.view.container, e, `windows, now ${lay.n}`, (x) => this.onChange((m) => { setCount(m.storeys[i].sides[f], x); spreadSide(m, i, f); }, `${f} side: ${Math.round(x)} windows`));
+      else askNumber(this.view.container, e, `spacing mm, now ${Math.round(lay.pitch * 1000)}`, (x) => this.onChange((m) => { setSpacing(m.storeys[i].sides[f], x / 1000); spreadSide(m, i, f); }, `${f} side: windows at ${Math.round(x)} mm`));
+      return;
+    }
     if (k === 'rot') {
       askNumber(this.view.container, e, `turn °, now ${+(s.rot || 0).toFixed(1)}`, (x) => this.onChange((m) => { m.storeys[i].rot = x; }, `storey ${i + 1} turned`), true);
       return;

@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { importEpJSON } from '../src/model/import-epjson.js';
 import { enclosedVolume } from '../src/model/geometry.js';
-import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0 } from '../src/model/massing.js';
+import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0, applyMassing, setWindowSize, setWindowFigure, breakWindow, applyToArray, dragPitch, addWindows } from '../src/model/massing.js';
+import { edit } from '../src/model/edit.js';
 
 const near = (a, b, tol = 1e-6) => assert.ok(Math.abs(a - b) <= tol, `${a} is not within ${tol} of ${b}`);
 const volumes = (model) => Object.fromEntries(Object.keys(model.zones).map((z) => [z, enclosedVolume(model.zones[z].surfaces.map((s) => model.surfaces[s].vertices))]));
@@ -97,4 +98,36 @@ test('a storey turned on its own over the one below splits into convex slab, roo
   // the lower roof and ceiling tile its plate; the upper floor's pieces tile the upper plate
   const areaOf = (z, kinds) => z.surfaces.filter((s) => kinds.includes(s.kind) && s.type !== 'Wall').reduce((a, s) => a + model.surfaces[s.name].area, 0);
   near(areaOf(zones[0], ['roof', 'slab']), 200, 1e-4); near(areaOf(zones[1], ['slab', 'exposed']), 128, 1e-4);
+});
+
+test('windows stay under the floor assembly above; Size keeps the glass as the storey changes', () => {
+  const m = massing0(), ep = massingEpJSON(m);
+  // the slab over the ground floor is the floor assembly above (screed 60 + concrete 250); the roof has none
+  assert.deepEqual(m.storeys.map((s) => s.slab), [0.31, 0]);
+  // a thicker floor above lowers the top of the walls below it
+  const floor = Object.values(ep['BuildingSurface:Detailed']).find((o) => o.zone_name === massingGeometry(m)[1].name && o.surface_type === 'Floor').construction_name;
+  const e = edit(ep, (tx) => { for (const n of Object.values(tx.epjson.Construction[floor])) tx.get('Material', n).thickness *= 2; applyMassing(tx, m); });
+  assert.ok(e.changed); near(m.storeys[0].slab, 0.62, 1e-9);
+  // Offsets: a taller storey makes taller windows, the gap to the slab the same
+  const g = m.storeys[0].sides.S;
+  setWindowSize(m, 0, 'S', undefined, 'offset');
+  const head = (x) => Math.max(...sideWindows(x.storeys[0].sides.S, x.storeys[0].w, x.storeys[0].h, x.storeys[0].slab).map((w) => w.v1));
+  const before = head(m);
+  m.storeys[0].h += 0.5;
+  near(head(m) - before, 0.5, 1e-9);
+  // Fixed: the window keeps its height
+  setWindowSize(m, 0, 'S', undefined, 'fixed');
+  const fixed = head(m); m.storeys[0].h += 0.5; near(head(m), fixed, 1e-9);
+  // a figure set writes every form; a broken window's edits are its own until applied to the array
+  setWindowFigure(m, 0, 'S', 0, 'winW', 1.2); near(g.winW, 1.2, 1e-9); near(g.jamb, (unitLayout(g, 20).pitch - 1.2) / 2, 1e-9);
+  breakWindow(g, 1); setWindowFigure(m, 0, 'S', 1, 'winW', 0.8);
+  near(g.winW, 1.2, 1e-9); near(g.broken[1].winW, 0.8, 1e-9);
+  applyToArray(g, 1); near(g.winW, 0.8, 1e-9); assert.deepEqual(g.broken, {});
+  // a window dragged along its side sets the pitch
+  setWindowSize(m, 0, 'S', undefined, 'fixed'); Object.assign(g, { winBy: 'spacing', winSp: 4 });
+  const { first } = unitLayout(g, 20); dragPitch(m, 0, 'S', 2, first + 2 * 3); near(g.winSp, 3, 1e-9);
+  // a bare side given a window wall: glass from the floor up to the slab, bay to bay
+  m.storeys[0].sides.E = null; addWindows(m, 0, 'E', 'windowwall');
+  const ws = sideWindows(m.storeys[0].sides.E, m.storeys[0].d, m.storeys[0].h, m.storeys[0].slab);
+  near(ws[0].v1, m.storeys[0].h - m.storeys[0].slab, 1e-9);
 });

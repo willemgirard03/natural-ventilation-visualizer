@@ -22,12 +22,13 @@
 // The default loads and schedules are those of an office (public ASHRAE 90.1 / DOE prototype values).
 
 import { LAYER_FIELDS } from './constructions.js';
+import { glassWidth as unitWidth, glassHeights, setSize, setFigure, PRESETS, UNIT_KEYS } from './windows.js';
 
 export const SIDES = ['S', 'E', 'N', 'W']; // in the order the faces are numbered
 export const SIDE_AZIMUTH = { N: 0, E: 90, S: 180, W: 270 };
 export const WINDOW_EDGE = 0.02; // m, kept between a window and its wall's edges or the next window
 
-export const WINDOWS0 = () => ({ winBy: 'number', winN: 4, winSp: 4.5, winW: 2.0, winH: 1.6, sill: 0.9, fillW: false, fillH: false, broken: {} });
+export const WINDOWS0 = () => ({ winBy: 'number', winN: 4, winSp: 4.5, winW: 2.0, winH: 1.6, sill: 0.9, size: 'fixed', broken: {} });
 export const storey0 = (h = 3.5, w = 20, d = 10) => ({ name: null, h, w, d, ox: 0, oy: 0, rot: 0, slab: 0.3, sides: { N: WINDOWS0(), E: WINDOWS0(), S: WINDOWS0(), W: WINDOWS0() } });
 
 export const MASSING_SETTINGS0 = () => ({
@@ -43,8 +44,20 @@ export function massing0() {
 // ---------- the window arrays (as the shading tool's cells) ----------
 
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
-// A window's glass in a bay of `pitch`: the bay, or its own width held to it.
-export const glassWidth = (g, pitch) => (g.fillW ? pitch : Math.min(Math.max(0.05, g.winW), pitch));
+// A window's glass in a bay of `pitch`, by its Size (windows.js): its own width (Fixed), the bay less
+// its jambs (Offsets) or a share of the bay (Proportional). An array saved before Size had Fill width
+// and Fill height, read as Offsets of 0.
+const legacy = (g) => (!g.size && (g.fillW || g.fillH) ? { ...g, size: 'offset', jamb: g.fillW ? 0 : undefined, headGap: g.fillH ? 0 : undefined } : g);
+export const glassWidth = (g, pitch) => {
+  const u = legacy(g);
+  return u.size === 'offset' && u.jamb === undefined ? Math.min(Math.max(0.05, u.winW), pitch) : unitWidth(u, pitch);
+};
+// A window's sill and head on a wall `top` high (floor to the underside of the floor above).
+export function windowHeights(g, top) {
+  const u = legacy(g);
+  if (u.size === 'offset' && u.headGap === undefined) { const { sill } = glassHeights({ ...u, size: 'fixed' }, top); return glassHeights({ ...u, headGap: top - sill - u.winH }, top); }
+  return glassHeights(u, top);
+}
 
 // How the windows are set out along a side of length `len`: by number, they divide it evenly; by
 // spacing, they stand at that pitch, centred on the side, each wholly on it. The count, the pitch and
@@ -73,13 +86,35 @@ export function sideWindows(g, len, h, slab = 0.3) {
     // the room the window has: its bay, less half the gap to the next and the gap to a corner
     const lo = Math.max(c - pitch / 2 + WINDOW_EDGE / 2, -len / 2 + WINDOW_EDGE), hi = Math.min(c + pitch / 2 - WINDOW_EDGE / 2, len / 2 - WINDOW_EDGE);
     const w = Math.min(glassWidth(u, pitch), hi - lo), mid = clamp(c + (u.offU || 0), lo + w / 2, hi - w / 2);
-    const sill = clamp(u.sill || 0, 0, Math.max(0, top - 0.05));
-    const hh = u.fillH ? top - sill : Math.min(Math.max(0.05, u.winH), top - sill);
+    const { sill, head } = windowHeights(u, top);
     const u0 = mid - w / 2, u1 = mid + w / 2;
-    const v0 = Math.max(sill, WINDOW_EDGE), v1 = Math.min(sill + hh, h - WINDOW_EDGE);
+    const v0 = Math.max(sill, WINDOW_EDGE), v1 = Math.min(head, h - WINDOW_EDGE);
     if (u1 - u0 > 0.05 && v1 - v0 > 0.05) out.push({ index: i, u0, u1, v0, v1 });
   }
   return out;
+}
+
+// ---------- the top of the wall ----------
+
+// How thick an assembly is, from its layers' materials (a layer without a thickness counts 0).
+function assemblyThickness(ep, name) {
+  const c = ep.Construction?.[name];
+  if (!c) return null;
+  return LAYER_FIELDS.reduce((t, f) => t + (c[f] ? ep.Material?.[c[f]]?.thickness || 0 : 0), 0);
+}
+// Each storey's slab: the band at the top of its walls the windows stay under. Floors hang below their
+// level, so it is the thickness of the floor assembly of the storey above (from the model `ep` where it
+// has one, else the massing's own slab). The top storey's roof stands on its walls: no band.
+export function setSlabs(m, ep = null) {
+  m.storeys.forEach((s, i) => {
+    const above = m.storeys[i + 1];
+    if (!above) { s.slab = 0; return; }
+    const Z = zoneName(m, above, i + 1), floors = Object.values(ep?.['BuildingSurface:Detailed'] || {}).filter((o) => o.zone_name === Z && o.surface_type === 'Floor');
+    const f = floors.find((o) => o.outside_boundary_condition === 'Surface') || floors[0];
+    const t = f && assemblyThickness(ep, f.construction_name);
+    s.slab = +(t ?? MASSING_ASSEMBLIES_SLAB_T).toFixed(4);
+  });
+  return m;
 }
 
 // ---------- geometry ----------
@@ -198,6 +233,7 @@ export const MASSING_ASSEMBLIES = {
   ground: ['Massing Ground Slab', ['XPS 100mm', 'Concrete 250mm', 'Screed 60mm']],
   exposed: ['Massing Exposed Floor', ['Insulation board 150mm', 'Concrete 250mm', 'Screed 60mm']],
 };
+const MASSING_ASSEMBLIES_SLAB_T = MASSING_ASSEMBLIES.slab[1].reduce((t, n) => t + MATERIALS[n][0], 0);
 export const MASSING_GLAZING = ['Massing Double Glazing', { u_factor: 1.4, solar_heat_gain_coefficient: 0.4, visible_transmittance: 0.6 }];
 
 // Office day profiles, hour by hour (public DOE prototype office shape).
@@ -268,7 +304,8 @@ const polygonArea = (pts) => {
 
 // The model as EnergyPlus .epJSON. `weather` (parseEPW) makes the natural-ventilation schedules from
 // its hours, as ClimateStudio does; without it they are always on (the outdoor limits still apply).
-export function massingEpJSON(m, { weather = null, runPeriod = null } = {}) {
+export function massingEpJSON(m, { weather = null, runPeriod = null, ep: from = null } = {}) {
+  setSlabs(m, from);
   const set = { ...MASSING_SETTINGS0(), ...(m.settings || {}) }, zones = massingGeometry(m);
   const ep = {
     Version: { 'Version 1': { version_identifier: '23.1' } },
@@ -393,7 +430,7 @@ const KEEP_VENT = ['minimum_indoor_temperature', 'maximum_indoor_temperature', '
 // assembly and schedule. Zones that are gone take their own objects with them; new ones start with
 // the massing's settings. The operable fraction a zone's openings had is kept.
 export function applyMassing(tx, m, opts = {}) {
-  const fresh = massingEpJSON(m, opts), ep = tx.epjson, zones = new Set(Object.keys(fresh.Zone));
+  const fresh = massingEpJSON(m, { ...opts, ep: tx.epjson }), ep = tx.epjson, zones = new Set(Object.keys(fresh.Zone));
   for (const Z of Object.keys(ep.Zone || {})) {
     if (zones.has(Z)) continue;
     for (const [type, objs] of Object.entries(ep)) for (const [n, o] of Object.entries(objs || {})) if (zoneField(o) === Z && !GEOMETRY.includes(type)) tx.remove(type, n);
@@ -453,8 +490,104 @@ export function breakOutWindow(m, name, r, wallMid) {
   const len = at.side === 'N' || at.side === 'S' ? s.w : s.d, { first, pitch } = unitLayout(g, len);
   const mid = (r.s0 + r.s1) / 2 - wallMid;
   g.broken = { ...(g.broken || {}) };
-  g.broken[at.index] = { winW: +(r.s1 - r.s0).toFixed(3), winH: +(r.z1 - r.z0).toFixed(3), sill: +(r.z0 - at.z0).toFixed(3), offU: +(mid - (first + at.index * pitch)).toFixed(3), fillW: false, fillH: false };
+  g.broken[at.index] = { ...unitOf(g, at.index), size: 'fixed', winW: +(r.s1 - r.s0).toFixed(3), winH: +(r.z1 - r.z0).toFixed(3), sill: +(r.z0 - at.z0).toFixed(3), offU: +(mid - (first + at.index * pitch)).toFixed(3) };
   return true;
+}
+
+// ---------- a side's windows, as the facade-windows skill edits them ----------
+// A side's array stands in for the skill's system and its unit at once: winBy, winN and winSp set it
+// out; winW, winH, sill, size and the edges' other forms (jamb, headGap, widthR, sillR, headR) are its
+// window type. A broken window keeps a type of its own in broken[i], with offU along its bay.
+
+const sideLength = (s, f) => (f === 'N' || f === 'S' ? s.w : s.d);
+const top = (s) => Math.max(0.1, s.h - clamp(s.slab ?? 0, 0, s.h - 0.1));
+// The window type window i lays: its own when broken out, else the array's.
+export function unitOf(g, i) {
+  const b = g.broken?.[i], u = Object.fromEntries(UNIT_KEYS.filter((k) => k in g).map((k) => [k, g[k]]));
+  return b ? { ...u, ...b } : u;
+}
+// Where window i's figures are measured from: its bay and the top of its wall.
+export function windowContext(m, i, f) {
+  const s = m.storeys[i], g = s.sides[f], { pitch } = unitLayout(g, sideLength(s, f));
+  return { pitch, top: top(s), slab: s.slab ?? 0 };
+}
+// A bare side given windows: one window in its middle, or a preset (punched, window wall, curtain wall).
+export function addWindows(m, i, f, preset = null) {
+  const s = m.storeys[i];
+  if (preset) {
+    const p = PRESETS[preset];
+    s.sides[f] = { ...WINDOWS0(), winW: 1.5, winH: 1.8, sill: 0.9, ...p.sys, ...p.unit, broken: {} };
+    delete s.sides[f].name;
+    if (p.unit.size === 'offset') setSize(s.sides[f], 'offset', p.sys.winSp, top(s));
+  } else {
+    const winH = Math.max(0.6, Math.min(1.8, top(s) - 0.9));
+    s.sides[f] = { ...WINDOWS0(), winBy: 'number', winN: 1, winW: 1.5, winH, sill: 0.9 };
+  }
+}
+// One window, or an array that repeats it at a spacing leaving wall between.
+export const isArray = (g) => !!g && !(g.winBy !== 'spacing' && g.winN <= 1);
+export function setArray(g, on) {
+  if (on) Object.assign(g, { winBy: 'spacing', winSp: +Math.max(3, (g.winW || 1.5) + 1.2).toFixed(4) });
+  else Object.assign(g, { winBy: 'number', winN: 1, broken: {} });
+}
+// Set out by number or by spacing, keeping the layout it has.
+export function setBy(m, i, f, by) {
+  const s = m.storeys[i], g = s.sides[f];
+  if (g.winBy === by) return;
+  const lay = unitLayout(g, sideLength(s, f));
+  g.winBy = by;
+  if (by === 'number') g.winN = Math.max(1, lay.n); else g.winSp = +lay.pitch.toFixed(4);
+}
+export const setCount = (g, n) => Object.assign(g, { winBy: 'number', winN: clamp(Math.round(n), 1, 200) });
+export const setSpacing = (g, sp) => Object.assign(g, { winBy: 'spacing', winSp: clamp(sp, 0.3, 60) });
+// A window dragged along its side: the pitch the pointer implies (u from the side's middle), from the
+// first window, or from the last when the first is dragged. By number, the nearest count.
+export function dragPitch(m, i, f, idx, u) {
+  const s = m.storeys[i], g = s.sides[f], len = sideLength(s, f), { n, pitch, first } = unitLayout(g, len);
+  if (n < 2) return;
+  const last = first + (n - 1) * pitch, p = Math.max(0.3, idx > 0 ? (u - first) / idx : (last - u) / (n - 1));
+  if (g.winBy !== 'spacing') g.winN = clamp(Math.round(len / p), 1, 200); else g.winSp = Math.round(p / 0.05) * 0.05;
+}
+// How the type's edges hold (Fixed, Offsets, Proportional), switched without moving the glass.
+export function setWindowSize(m, i, f, k, mode) {
+  const g = m.storeys[i].sides[f], ctx = windowContext(m, i, f), u = g.broken?.[k] ? g.broken[k] : g;
+  const was = legacy(u === g ? g : unitOf(g, k));
+  if (u === g) { delete g.fillW; delete g.fillH; }
+  const w = glassWidth(was, ctx.pitch), { sill, head } = windowHeights(was, ctx.top);
+  Object.assign(u, { size: was.size || 'fixed', winW: w, sill, winH: head - sill });
+  setSize(u, mode, ctx.pitch, ctx.top);
+}
+// One of window k's figures set ('winW', 'sill', 'head', 'winH', 'jamb', 'headGap', 'widthR', 'sillR',
+// 'headR'): on its own type when broken out, else on the array's, so every window of it changes.
+export function setWindowFigure(m, i, f, k, key, v) {
+  const g = m.storeys[i].sides[f], ctx = windowContext(m, i, f), u = g.broken?.[k] ? g.broken[k] : g;
+  if (u === g && (g.fillW || g.fillH) && !g.size) setWindowSize(m, i, f, k, 'offset');
+  setFigure(u, key, v, ctx);
+}
+// Broken out of its array: window k takes a copy of the array's type as its own.
+export function breakWindow(g, k) { g.broken = { ...(g.broken || {}), [k]: { ...unitOf(g, k), offU: 0 } }; }
+// Back into the array (revert); or its type given to the array (apply), the others broken out kept or
+// bound back too.
+export function revertWindow(g, k) { if (g.broken) delete g.broken[k]; }
+export function applyToArray(g, k, others = 'keep') {
+  const b = g.broken?.[k];
+  if (!b) return;
+  const { offU, ...unit } = b;
+  for (const key of UNIT_KEYS) delete g[key];
+  Object.assign(g, unit);
+  delete g.fillW; delete g.fillH;
+  delete g.broken[k];
+  if (others === 'rebind') g.broken = {};
+}
+export const brokenOf = (g) => Object.keys(g?.broken || {}).map(Number).sort((a, b) => a - b);
+// The links a storey keeps: its other sides follow side f (linkSides), the storeys above follow it
+// (linkAbove). After every edit to side f, they take a copy of it.
+export function spreadSide(m, i, f) {
+  const s = m.storeys[i], g = s.sides[f];
+  const to = [];
+  if (s.linkSides) for (const x of SIDES) if (x !== f) to.push([i, x]);
+  if (s.linkAbove) for (let j = i + 1; j < m.storeys.length; j++) for (const x of s.linkSides ? SIDES : [f]) to.push([j, x]);
+  for (const [j, x] of to) m.storeys[j].sides[x] = g ? structuredClone(g) : null;
 }
 
 // ---------- a storey's handles ----------
