@@ -1,10 +1,12 @@
-// Massing (src/model/massing.js): storeys of floor plates written as a ClimateStudio-style .epJSON,
+// Massing (src/model/massing.js): zones on levels written as a ClimateStudio-style .epJSON,
 // read back as the tool reads any model.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { importEpJSON } from '../src/model/import-epjson.js';
 import { enclosedVolume } from '../src/model/geometry.js';
-import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0, applyMassing, setWindowSize, setWindowFigure, breakWindow, applyToArray, dragPitch, addWindows } from '../src/model/massing.js';
+import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0, applyMassing, setWindowSize, setWindowFigure, breakWindow, applyToArray, dragPitch, addWindows, upgradeMassing, MASSING_SETTINGS0, zoneHeight, faceLength, moveLevel, pushFace, WINDOWS0 } from '../src/model/massing.js';
+// A massing from older storeys (rectangular plates stacked), as the tool upgrades them.
+const stack = (...storeys) => upgradeMassing({ name: 'Floor', rot: 0, storeys, settings: MASSING_SETTINGS0() });
 import { edit } from '../src/model/edit.js';
 
 const near = (a, b, tol = 1e-6) => assert.ok(Math.abs(a - b) <= tol, `${a} is not within ${tol} of ${b}`);
@@ -34,8 +36,7 @@ test('a two-storey pancake reads back closed, paired and ventilated', () => {
 });
 
 test('a set-back storey has a roof on the one below and an overhang has an exposed floor', () => {
-  const m = massing0();
-  m.storeys = [storey0(3.5, 20, 10), Object.assign(storey0(3.5, 12, 14), { ox: 4 })];
+  const m = stack(storey0(3.5, 20, 10), Object.assign(storey0(3.5, 12, 14), { ox: 4 }));
   const zones = massingGeometry(m), model = importEpJSON(massingEpJSON(m));
   assert.ok(zones[0].surfaces.some((s) => s.kind === 'roof'));
   assert.ok(zones[1].surfaces.some((s) => s.kind === 'exposed'));
@@ -51,7 +52,8 @@ test('a massing changed keeps the edits made since, where they still apply, and 
   ep['BuildingSurface:Detailed']['Floor1_0:f1'].construction_name = 'Massing Roof';
   edit(ep, (tx) => setZoneSetting(tx, 'Floor2_1', 'peoplePerArea', 0.1));
   const edited = JSON.stringify(ep);
-  m.storeys.push(storey0()); m.storeys[0].w = 24; m.storeys[0].sides.S.winN = 6;
+  m.levels.push({ name: 'Level 4', z: 10.5 }); m.zones.push({ ...structuredClone(m.zones[1]), base: 2, top: 3 });
+  m.zones[0].plate = [[-12, -5], [12, -5], [12, 5], [-12, 5]]; m.zones[0].faces[0].winN = 6;
   const e = edit(ep, (tx) => applyMassing(tx, m));
   let model = importEpJSON(ep);
   assert.deepEqual(Object.keys(model.zones), ['Floor1_0', 'Floor2_1', 'Floor3_2']);
@@ -61,7 +63,7 @@ test('a massing changed keeps the edits made since, where they still apply, and 
   assert.equal(model.zones.Floor1_0.windows.length, 18);
   assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
   // down to one storey: the others go with their own objects
-  m.storeys.length = 1;
+  m.zones.length = 1; m.levels.length = 2;
   const e2 = edit(ep, (tx) => applyMassing(tx, m));
   model = importEpJSON(ep);
   assert.deepEqual(Object.keys(model.zones), ['Floor1_0']);
@@ -89,8 +91,7 @@ test('a window dragged in its wall is broken out of its array where it was put',
 });
 
 test('a storey turned on its own over the one below splits into convex slab, roof and exposed pieces', () => {
-  const m = massing0();
-  Object.assign(m.storeys[1], { rot: 30, ox: 6, w: 16, d: 8 });
+  const m = stack(storey0(), Object.assign(storey0(), { rot: 30, ox: 6, w: 16, d: 8 }));
   const model = importEpJSON(massingEpJSON(m)), v = volumes(model);
   near(v.Floor1_0, 20 * 10 * 3.5, 1e-4); near(v.Floor2_1, 16 * 8 * 3.5, 1e-4); // corners written to the micrometre
   assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
@@ -103,31 +104,62 @@ test('a storey turned on its own over the one below splits into convex slab, roo
 test('windows stay under the floor assembly above; Size keeps the glass as the storey changes', () => {
   const m = massing0(), ep = massingEpJSON(m);
   // the slab over the ground floor is the floor assembly above (screed 60 + concrete 250); the roof has none
-  assert.deepEqual(m.storeys.map((s) => s.slab), [0.31, 0]);
+  assert.deepEqual(m.zones.map((z) => z.slab), [0.31, 0]);
   // a thicker floor above lowers the top of the walls below it
   const floor = Object.values(ep['BuildingSurface:Detailed']).find((o) => o.zone_name === massingGeometry(m)[1].name && o.surface_type === 'Floor').construction_name;
   const e = edit(ep, (tx) => { for (const n of Object.values(tx.epjson.Construction[floor])) tx.get('Material', n).thickness *= 2; applyMassing(tx, m); });
-  assert.ok(e.changed); near(m.storeys[0].slab, 0.62, 1e-9);
+  assert.ok(e.changed); near(m.zones[0].slab, 0.62, 1e-9);
   // Offsets: a taller storey makes taller windows, the gap to the slab the same
-  const g = m.storeys[0].sides.S;
-  setWindowSize(m, 0, 'S', undefined, 'offset');
-  const head = (x) => Math.max(...sideWindows(x.storeys[0].sides.S, x.storeys[0].w, x.storeys[0].h, x.storeys[0].slab).map((w) => w.v1));
+  const g = m.zones[0].faces[0];
+  setWindowSize(m, 0, 0, undefined, 'offset');
+  const head = (x) => Math.max(...sideWindows(x.zones[0].faces[0], 20, zoneHeight(x, 0), x.zones[0].slab).map((w) => w.v1));
   const before = head(m);
-  m.storeys[0].h += 0.5;
+  moveLevel(m, 1, 0.5);
   near(head(m) - before, 0.5, 1e-9);
   // Fixed: the window keeps its height
-  setWindowSize(m, 0, 'S', undefined, 'fixed');
-  const fixed = head(m); m.storeys[0].h += 0.5; near(head(m), fixed, 1e-9);
+  setWindowSize(m, 0, 0, undefined, 'fixed');
+  const fixed = head(m); moveLevel(m, 1, 0.5); near(head(m), fixed, 1e-9);
   // a figure set writes every form; a broken window's edits are its own until applied to the array
-  setWindowFigure(m, 0, 'S', 0, 'winW', 1.2); near(g.winW, 1.2, 1e-9); near(g.jamb, (unitLayout(g, 20).pitch - 1.2) / 2, 1e-9);
-  breakWindow(g, 1); setWindowFigure(m, 0, 'S', 1, 'winW', 0.8);
+  setWindowFigure(m, 0, 0, 0, 'winW', 1.2); near(g.winW, 1.2, 1e-9); near(g.jamb, (unitLayout(g, 20).pitch - 1.2) / 2, 1e-9);
+  breakWindow(g, 1); setWindowFigure(m, 0, 0, 1, 'winW', 0.8);
   near(g.winW, 1.2, 1e-9); near(g.broken[1].winW, 0.8, 1e-9);
   applyToArray(g, 1); near(g.winW, 0.8, 1e-9); assert.deepEqual(g.broken, {});
   // a window dragged along its side sets the pitch
-  setWindowSize(m, 0, 'S', undefined, 'fixed'); Object.assign(g, { winBy: 'spacing', winSp: 4 });
-  const { first } = unitLayout(g, 20); dragPitch(m, 0, 'S', 2, first + 2 * 3); near(g.winSp, 3, 1e-9);
+  setWindowSize(m, 0, 0, undefined, 'fixed'); Object.assign(g, { winBy: 'spacing', winSp: 4 });
+  const { first } = unitLayout(g, 20); dragPitch(m, 0, 0, 2, first + 2 * 3); near(g.winSp, 3, 1e-9);
   // a bare side given a window wall: glass from the floor up to the slab, bay to bay
-  m.storeys[0].sides.E = null; addWindows(m, 0, 'E', 'windowwall');
-  const ws = sideWindows(m.storeys[0].sides.E, m.storeys[0].d, m.storeys[0].h, m.storeys[0].slab);
-  near(ws[0].v1, m.storeys[0].h - m.storeys[0].slab, 1e-9);
+  m.zones[0].faces[1] = null; addWindows(m, 0, 1, 'windowwall');
+  const ws = sideWindows(m.zones[0].faces[1], faceLength(m, 0, 1), zoneHeight(m, 0), m.zones[0].slab);
+  near(ws[0].v1, zoneHeight(m, 0) - m.zones[0].slab, 1e-9);
+});
+
+test('zones side by side on a level share a pair of interior walls; an L-shaped zone reads back closed', () => {
+  const m = massing0();
+  // a 6 x 10 m zone against the ground floor's east face, and the upper zone made an L
+  m.zones.push({ name: 'Annex', base: 0, top: 1, rot: 0, plate: [[10, -5], [16, -5], [16, 5], [10, 5]], faces: [WINDOWS0(), WINDOWS0(), null, null] });
+  m.zones[1].plate = [[-10, -5], [10, -5], [10, 5], [0, 5], [0, 12], [-10, 12]];
+  m.zones[1].faces = [WINDOWS0(), WINDOWS0(), null, WINDOWS0(), null, null];
+  const zones = massingGeometry(m), model = importEpJSON(massingEpJSON(m));
+  assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
+  const v = volumes(model);
+  near(v.Floor1_0, 200 * 3.5, 1e-4); near(v.Annex_2, 60 * 3.5, 1e-4); near(v.Floor2_1, (200 + 70) * 3.5, 1e-4);
+  // the east face of the ground floor and the annex's west face, back to back
+  const inter = zones.flatMap((z) => z.surfaces.filter((s) => s.kind === 'inter'));
+  assert.equal(inter.length, 2);
+  assert.equal(inter[0].partner, inter[1].name);
+  assert.ok(!zones[0].windows.some((w) => w.face === 1), 'no windows on a wall shared with another zone');
+  // the L's wing over nothing has an exposed floor; the annex has a roof
+  assert.ok(zones[1].surfaces.some((s) => s.kind === 'exposed'));
+  assert.ok(zones[2].surfaces.some((s) => s.kind === 'roof'));
+});
+
+test('levels move the zones on them: a roof pushed lifts the levels above, a floor its own alone', () => {
+  const m = stack(storey0(3.5), storey0(3.5), storey0(3.5));
+  near(pushFace(m, 0, 'roof', 0.5), 0.5); assert.deepEqual(m.levels.map((l) => l.z), [0, 4, 7.5, 11]);
+  near(pushFace(m, 1, 'floor', 0.3), 0.3); assert.deepEqual(m.levels.map((l) => l.z), [0, 3.7, 7.5, 11]);
+  // never closer than 2 m: the floor stops
+  near(pushFace(m, 1, 'floor', -5), -(7.5 - 2 - 3.7));
+  // a face pushed out moves its edge; one pushed past folding is held
+  near(pushFace(m, 0, 1, 2), 2); near(faceLength(m, 0, 0), 22, 1e-9);
+  assert.ok(pushFace(m, 0, 1, -30) > -22);
 });

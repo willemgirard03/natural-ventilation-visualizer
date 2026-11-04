@@ -29,7 +29,8 @@ import {
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 import {
-  massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, SIDES, unitLayout, unitOf, isArray, brokenOf,
+  massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
+  faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName,
   setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch,
 } from '../src/model/massing.js';
 import { PRESETS, SIZES } from '../src/model/windows.js';
@@ -154,27 +155,27 @@ const winEdit = new WindowEditor(view, {
   sizeOf: (name) => {
     const at = massing && massingWindow(massing, name);
     if (!at) return null;
-    const s = massing.storeys[at.storey], g = s.sides[at.side], len = at.side === 'N' || at.side === 'S' ? s.w : s.d;
-    const lay = unitLayout(g, len), cc = lay.first + at.index * lay.pitch, mid = wallMiddle(name), u = unitOf(g, at.index);
-    return { free: !!g.broken?.[at.index], size: u.size || (g.fillW || g.fillH ? 'offset' : 'fixed'), bay: [mid + Math.max(cc - lay.pitch / 2, -len / 2), mid + Math.min(cc + lay.pitch / 2, len / 2)], top: at.z0 + s.h - (s.slab || 0), slab: (s.slab || 0) > 0 };
+    const z = massing.zones[at.zone], g = z.faces[at.face], len = faceLength(massing, at.zone, at.face);
+    const lay = unitLayout(g, len), cc = lay.first + at.index * lay.pitch, mid = faceMiddle(name), u = unitOf(g, at.index);
+    return { free: !!g.broken?.[at.index], size: u.size || (g.fillW || g.fillH ? 'offset' : 'fixed'), bay: [mid + Math.max(cc - lay.pitch / 2, -len / 2), mid + Math.min(cc + lay.pitch / 2, len / 2)], top: at.z0 + zoneHeight(massing, at.zone) - (z.slab || 0), slab: (z.slab || 0) > 0 };
   },
   onFigure: (name, key, v) => {
     const at = massingWindow(massing, name);
-    sideEdit({ storey: at.storey, side: at.side }, (x) => setWindowFigure(x, at.storey, at.side, at.index, key, v), `window ${at.index + 1}'s ${key} set`);
+    sideEdit({ zone: at.zone, face: at.face }, (x) => setWindowFigure(x, at.zone, at.face, at.index, key, v), `window ${at.index + 1}'s ${key} set`);
   },
   onCommit: (name, r) => (massing && massingWindow(massing, name)
     ? massingWindowEdit(name, r)
     : applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true })),
 });
 view.onRender = () => followPop();
-// A massing's storey pushed, pulled, moved and turned in the view (app/massedit.js).
+// A massing's zone pushed, pulled, moved and turned in the view (app/massedit.js).
 const massEdit = new MassingEditor(view, {
   massing: () => massing, onChange: massingChange,
   isolated: () => winEdit.active,
   windowAt: (e) => {
     if (winEdit.active || !massing || !model) return null;
     const h = view.hitAt(e), at = h?.kind === 'window' && massingWindow(massing, h.item.name);
-    return at ? { storey: at.storey, side: at.side, index: at.index, name: h.item.name } : null;
+    return at ? { zone: at.zone, face: at.face, index: at.index, name: h.item.name } : null;
   },
   onPick: (name) => { if (selected !== name) view.select(name); },
   brokenWindows: () => (massing && model ? brokenNames().filter((n) => n !== selected).map((n) => model.windows[n]?.vertices).filter(Boolean) : []),
@@ -185,7 +186,7 @@ function brokenNames() {
   const key = JSON.stringify(massing);
   if (key !== brokenKey) {
     brokenKey = key;
-    brokenList = massingGeometry(massing).flatMap((z) => z.windows.filter((w) => massing.storeys[z.storey].sides[w.side]?.broken?.[w.index]).map((w) => w.name));
+    brokenList = massingGeometry(massing).flatMap((z) => z.windows.filter((w) => massing.zones[z.zone].faces[w.face]?.broken?.[w.index]).map((w) => w.name));
   }
   return brokenList;
 }
@@ -922,9 +923,9 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
 let popKey = null, popMin = false, layersOpen = false, popPinned = false, popShut = null; // popShut: the selection whose pop-up was closed
 function showInfo(found) {
   const box = $('info');
-  // a window of a massing: the Massing window turns to its storey and side
+  // a window of a massing: the Massing window turns to its zone and face
   const at = massing && found?.kind === 'window' && massingWindow(massing, found.item.name);
-  if (at && !$('massing').hidden) massingUI.show(at.storey, at.side);
+  if (at && !$('massing').hidden) massingUI.show(at.zone, at.face);
   // a massing's zone or surface: its handles
   const mt = massing && massingTarget(found);
   if (mt) massEdit.start(mt); else massEdit.stop();
@@ -1041,6 +1042,7 @@ function popContent(kind, item) {
   } else if (kind === 'zone') {
     title = `Zone · ${esc(item.name)}`;
     rows.push(`${fmt(item.floorArea.value, 1)} m² floor · ${fmt(item.volume.value, 0)} m³ · ${fmt(item.height, 2)} m high`);
+    rows.push(...zoneLevelRows(item));
     rows.push(...zoneRows(item));
   } else {
     title = 'Shading surface';
@@ -1311,34 +1313,51 @@ function amountText(l) {
 }
 
 // ---------- a massing's windows in its pop-ups (the facade-windows skill) ----------
-// The side a selected wall or window of a massing is on: its storey, side, the window's place and how
+// The face a selected wall or window of a massing is on: its zone, face, the window's place and how
 // many the array makes. null for anything else.
 function massingSide(kind, item) {
   if (!massing) return null;
   let at;
-  if (kind === 'window') { const w = massingWindow(massing, item.name); at = w && { storey: w.storey, side: w.side, index: w.index }; }
-  else if (kind === 'surface') { const t = massingTarget({ kind, item }); at = t && SIDES.includes(t.face) ? { storey: t.storey, side: t.face } : null; }
+  if (kind === 'window') { const w = massingWindow(massing, item.name); at = w && { zone: w.zone, face: w.face, index: w.index }; }
+  else if (kind === 'surface') { const t = massingTarget({ kind, item }); at = t && Number.isInteger(t.face) ? { zone: t.zone, face: t.face } : null; }
   if (!at) return null;
-  const s = massing.storeys[at.storey], g = s.sides[at.side];
-  return { ...at, n: g ? unitLayout(g, at.side === 'N' || at.side === 'S' ? s.w : s.d).n : 0 };
+  const g = massing.zones[at.zone].faces[at.face];
+  return { ...at, n: g ? unitLayout(g, faceLength(massing, at.zone, at.face)).n : 0 };
 }
-const SIDE_WORD = { S: 'South', E: 'East', N: 'North', W: 'West' };
+// A massing's zone stands on a base level and reaches a top level: pushing its roof or floor moves
+// those levels, and so every zone on them.
+function zoneLevelRows(item) {
+  const i = massing ? massingGeometry(massing).findIndex((z) => z.name === item.name) : -1;
+  if (i < 0) return [];
+  const z = massing.zones[i], opts = (now, from, to) => massing.levels.map((lv, L) => (L >= from && L <= to ? `<option value="${L}"${L === now ? ' selected' : ''}>${esc(lv.name || levelName(L))}</option>` : '')).join('');
+  return [`<div class="poprow"><span class="tipped" title="The level this zone stands on and the level its roof reaches. Its roof and floor handles move these levels, and with them every zone on them.">Levels</span>`
+    + `<select class="popsel" data-zlevel="base" data-zone="${i}" title="Base level">${opts(z.base, 0, z.top - 1)}</select> to <select class="popsel" data-zlevel="top" data-zone="${i}" title="Top level">${opts(z.top, z.base + 1, massing.levels.length - 1)}</select></div>`];
+}
+$('info').addEventListener('change', (e) => {
+  const el = e.target.closest('[data-zlevel]');
+  if (!el || !massing) return;
+  const i = Number(el.dataset.zone), key = el.dataset.zlevel, L = Number(el.value);
+  massingChange((x) => { x.zones[i][key] = L; }, `zone ${i + 1} ${key} level set to ${massing.levels[L].name}`);
+});
+// A face named for the way it looks: 'South face', 'North-east face'.
+const COMPASS_WORD = { N: 'North', NE: 'North-east', E: 'East', SE: 'South-east', S: 'South', SW: 'South-west', W: 'West', NW: 'North-west' };
+const faceWord = (at) => `${COMPASS_WORD[compassWord(faceBearing(massing, at.zone, at.face))]} face`;
 let sideMore = false, applyAsk = false; // More ▸ open; Apply to array asking about the others broken out
 function sideRows(at, isolated = false) {
-  const s = massing.storeys[at.storey], g = s.sides[at.side], rows = [], k = at.index;
+  const z = massing.zones[at.zone], g = z.faces[at.face], rows = [], k = at.index;
   const seg = (act, opts, now, tip) => `<span class="seg mini" title="${esc(tip)}">${opts.map(([v, l]) => `<button type="button" data-act="${act}" data-v="${v}" aria-pressed="${v === now}">${l}</button>`).join('')}</span>`;
   const chk = (act, on, text, tip) => `<label class="chk" title="${esc(tip)}"><input type="checkbox" data-act="${act}"${on ? ' checked' : ''}> ${text}</label>`;
-  rows.push(popSec(`${SIDE_WORD[at.side]} side · windows`, 'The window array on this side of the storey: set out along it by number or spacing, every window of it the same type unless broken out'));
+  rows.push(popSec(`${faceWord(at)} · windows`, 'The window array on this face of the zone: set out along it by number or spacing, every window of it the same type unless broken out'));
   if (!g) {
     rows.push(`<div class="poprow"><button type="button" class="pbtn" data-act="sw-one" title="A 1.5 × 1.8 m window, sill 900 mm, in the middle of the side (lower if the wall is short). Make it an array from its pop-up.">One window</button>`
       + `<select class="popsel" data-act="sw-preset" title="Punched windows: 1.5 × 1.8 m at 3 m spacing. Window wall: glass from the floor to the slab, bay to bay, at 1.5 m spacing. Curtain wall: the same, flush."><option value="" selected hidden>From preset…</option>${Object.entries(PRESETS).map(([key, p]) => `<option value="${key}">${p.label}</option>`).join('')}</select></div>`);
     return rows;
   }
-  if (isolated && k !== undefined) rows.push(`<div class="poprow"><span class="tipped" title="How this window type's edges hold as the storey's height or the window's bay changes. Fixed: its own width and height, the sill above the floor. Offsets: the sill above the floor, the head a set distance under the slab, each jamb a set distance in from its bay - a window wall is Offsets of 0. Proportional: each edge a share of the wall's height and of the bay. Switching never moves the glass.">Size</span> ${seg('sw-size', SIZES, unitOf(g, k).size || 'fixed', 'How the edges hold')}</div>`);
+  if (isolated && k !== undefined) rows.push(`<div class="poprow"><span class="tipped" title="How this window type's edges hold as the zone's height or the window's bay changes. Fixed: its own width and height, the sill above the floor. Offsets: the sill above the floor, the head a set distance under the slab, each jamb a set distance in from its bay - a window wall is Offsets of 0. Proportional: each edge a share of the wall's height and of the bay. Switching never moves the glass.">Size</span> ${seg('sw-size', SIZES, unitOf(g, k).size || 'fixed', 'How the edges hold')}</div>`);
   rows.push(`<div class="poprow">${chk('sw-array', isArray(g), 'Array', 'On: the window repeats along the side at a spacing that leaves wall between. Off: one window, in the middle.')}`
     + (isArray(g) ? seg('sw-by', [['spacing', 'Spacing'], ['number', 'Number']], g.winBy === 'spacing' ? 'spacing' : 'number', 'Spacing keeps the pitch as the side changes length; Number keeps the count. Switching keeps the layout as it is.') : '') + '</div>');
-  rows.push(`<div class="poprow">${chk('sw-sides', s.linkSides, 'Apply to all sides', 'On: the storey\'s other sides take these windows and follow every later change to them. Off: each side keeps its own.')}`
-    + chk('sw-above', s.linkAbove, 'Apply to storeys above', 'On: the storeys above take these windows and follow every later change to them.') + '</div>');
+  rows.push(`<div class="poprow">${chk('sw-sides', z.linkFaces, 'Apply to all faces', 'On: the zone\'s other faces take these windows and follow every later change to them. Off: each face keeps its own.')}`
+    + chk('sw-above', z.linkAbove, 'Apply to zones above', 'On: the zones stacked above take these windows on their face looking the same way, and follow every later change to them.') + '</div>');
   rows.push(`<button type="button" class="pbtn more" data-act="sw-more" aria-expanded="${sideMore}">${sideMore ? 'More ▴' : 'More ▸'}</button>`);
   if (sideMore) {
     const broken = brokenOf(g), others = broken.filter((j) => j !== k);
@@ -1356,37 +1375,38 @@ function sideRows(at, isolated = false) {
   }
   return rows;
 }
-// An edit to a selected side's windows, carried to the sides and storeys linked to it.
+// An edit to a selected face's windows, carried to the faces and zones linked to it.
 function sideEdit(at, fn, what) {
-  return massingChange((x) => { fn(x, x.storeys[at.storey].sides[at.side]); spreadSide(x, at.storey, at.side); }, `${SIDE_WORD[at.side]} side: ${what}`);
+  const word = faceWord(at);
+  return massingChange((x) => { fn(x, x.zones[at.zone].faces[at.face]); spreadSide(x, at.zone, at.face); }, `${word}: ${what}`);
 }
 function sideAction(el) {
   const found = current(), at = found && massingSide(found.kind, found.item);
   if (!at) return;
-  const act = el.dataset.act, i = at.storey, f = at.side, k = at.index;
+  const act = el.dataset.act, i = at.zone, f = at.face, k = at.index;
   if (act !== 'sw-apply' && act !== 'sw-cancel') applyAsk = false;
   if (act === 'sw-more') { sideMore = !sideMore; showInfo(found); }
   else if (act === 'sw-one' || (act === 'sw-preset' && el.value)) {
     if (!sideEdit(at, (x) => addWindows(x, i, f, act === 'sw-one' ? null : el.value), act === 'sw-one' ? 'a window added' : `${PRESETS[el.value].label.toLowerCase()} added`)) return;
     // the window added (the first of a preset's) is selected
-    const w = massingGeometry(massing)[i]?.windows.find((x) => x.side === f);
+    const w = massingGeometry(massing)[i]?.windows.find((x) => x.face === f);
     if (w && model.windows[w.name]) view.select(w.name);
   }
   else if (act === 'sw-size') sideEdit(at, (x) => setWindowSize(x, i, f, k, el.dataset.v), `windows sized ${el.dataset.v}`);
   else if (act === 'sw-array') sideEdit(at, (x, g) => setArray(g, el.checked), el.checked ? 'an array' : 'one window');
   else if (act === 'sw-by') sideEdit(at, (x) => setBy(x, i, f, el.dataset.v), `set out by ${el.dataset.v}`);
-  else if (act === 'sw-sides') sideEdit(at, (x) => { x.storeys[i].linkSides = el.checked; }, el.checked ? 'applied to all sides' : 'sides kept apart');
-  else if (act === 'sw-above') sideEdit(at, (x) => { x.storeys[i].linkAbove = el.checked; }, el.checked ? 'applied to the storeys above' : 'storeys above kept apart');
+  else if (act === 'sw-sides') sideEdit(at, (x) => { x.zones[i].linkFaces = el.checked; }, el.checked ? 'applied to all faces' : 'faces kept apart');
+  else if (act === 'sw-above') sideEdit(at, (x) => { x.zones[i].linkAbove = el.checked; }, el.checked ? 'applied to the zones above' : 'zones above kept apart');
   else if (act === 'sw-break') sideEdit(at, (x, g) => breakWindow(g, k), `window ${k + 1} broken from its array`);
   else if (act === 'sw-revert') sideEdit(at, (x, g) => revertWindow(g, k), `window ${k + 1} back in its array`);
   else if (act === 'sw-apply') {
-    const others = brokenOf(massing.storeys[i].sides[f]).filter((j) => j !== k);
+    const others = brokenOf(massing.zones[i].faces[f]).filter((j) => j !== k);
     if (others.length && !el.dataset.o) { applyAsk = true; showInfo(found); return; }
     applyAsk = false;
     sideEdit(at, (x, g) => applyToArray(g, k, el.dataset.o || 'keep'), `window ${k + 1}'s type given to the array`);
   } else if (act === 'sw-cancel') { applyAsk = false; showInfo(found); }
   else if (act === 'sw-rebind-all') sideEdit(at, (x, g) => { g.broken = {}; }, 'broken windows back in the array');
-  else if (act === 'sw-remove') sideEdit(at, (x) => { x.storeys[i].sides[f] = null; }, 'windows removed');
+  else if (act === 'sw-remove') sideEdit(at, (x) => { x.zones[i].faces[f] = null; }, 'windows removed');
 }
 $('info').addEventListener('click', (e) => { const b = e.target.closest('button[data-act^="sw-"]'); if (b && massing) sideAction(b); });
 $('info').addEventListener('change', (e) => { const el = e.target.closest('[data-act^="sw-"]'); if (el && massing) sideAction(el); });
@@ -2072,7 +2092,7 @@ document.addEventListener('keydown', (e) => {
     if (winEdit.active) { winEdit.stop(); showInfo(current()); } else if (selected) view.select(null);
   } else if (e.key === 'Delete' && massing && selected) {
     const found = current(), at = found && massingSide(found.kind, found.item);
-    if (at && massing.storeys[at.storey].sides[at.side]) { sideEdit(at, (x) => { x.storeys[at.storey].sides[at.side] = null; }, 'windows removed'); e.preventDefault(); }
+    if (at && massing.zones[at.zone].faces[at.face]) { sideEdit(at, (x) => { x.zones[at.zone].faces[at.face] = null; }, 'windows removed'); e.preventDefault(); }
   }
 });
 $('edited').addEventListener('click', undo);
@@ -2149,7 +2169,7 @@ for (const id of ['info', 'library']) {
 function refreshPanels() { showInfo(current()); renderLibrary(); }
 
 // ---------- massing ----------
-// A building modelled from scratch: storeys of floor plates, one zone each, with window arrays
+// A building modelled from scratch: zones standing on levels, each face with a window array
 // (src/model/massing.js). The massing is kept beside the model; each change to it rewrites the model's
 // geometry as one undoable edit, keeping the assemblies, loads and settings changed since.
 let massing = null;
@@ -2167,29 +2187,29 @@ function massingChange(mutate, what) {
   reselect(target);
   return true;
 }
-// The massing rewritten renumbers its surfaces: the face that was selected, found again by its storey
-// and side (its largest piece), stays selected.
+// The massing rewritten renumbers its surfaces: the face that was selected, found again by its zone
+// and face (its largest piece), stays selected.
 function reselect(target) {
-  if (!target?.face || target.window !== undefined || !massing) return;
-  const zone = massingGeometry(massing)[target.storey];
+  if (target?.face === null || target?.face === undefined || target.window !== undefined || !massing) return;
+  const zone = massingGeometry(massing)[target.zone];
   if (!zone) return;
   const kinds = target.face === 'roof' ? ['Roof', 'Ceiling'] : target.face === 'floor' ? ['Floor'] : ['Wall'];
-  const pick = zone.surfaces.filter((x) => kinds.includes(x.type) && (x.type !== 'Wall' || x.side === target.face) && model.surfaces[x.name])
+  const pick = zone.surfaces.filter((x) => kinds.includes(x.type) && (x.type !== 'Wall' || x.face === target.face) && model.surfaces[x.name])
     .sort((a, b) => model.surfaces[b.name].area - model.surfaces[a.name].area)[0];
   if (pick && pick.name !== selected) view.select(pick.name);
 }
-// Which storey a selected zone or surface of a massing is, and which face of it (null: the whole
-// zone). The ground floor has no handle of its own.
+// Which zone a selected zone or surface of a massing is, and which face of it (an index along its
+// footprint, 'roof' or 'floor'; null: the whole zone). A floor on the ground has no handle of its own.
 function massingTarget(found) {
-  if (found?.kind === 'window') { const at = massingWindow(massing, found.item.name); return at ? { storey: at.storey, face: at.side, window: at.index } : null; }
+  if (found?.kind === 'window') { const at = massingWindow(massing, found.item.name); return at ? { zone: at.zone, face: at.face, window: at.index } : null; }
   if (found?.kind !== 'zone' && found?.kind !== 'surface') return null;
   const zones = massingGeometry(massing);
-  if (found.kind === 'zone') { const i = zones.findIndex((z) => z.name === found.item.name); return i < 0 ? null : { storey: i, face: null }; }
+  if (found.kind === 'zone') { const i = zones.findIndex((z) => z.name === found.item.name); return i < 0 ? null : { zone: i, face: null }; }
   for (const z of zones) {
     const s = z.surfaces.find((x) => x.name === found.item.name);
     if (!s) continue;
-    const face = s.type === 'Wall' ? s.side : s.type === 'Floor' ? (z.storey > 0 ? 'floor' : null) : 'roof';
-    return face ? { storey: z.storey, face } : null;
+    const face = s.type === 'Wall' ? s.face : s.type === 'Floor' ? (massing.zones[z.zone].base > 0 ? 'floor' : null) : 'roof';
+    return face !== null ? { zone: z.zone, face } : null;
   }
   return null;
 }
@@ -2197,9 +2217,9 @@ function massingTarget(found) {
 // every window of the array changes, unless it is broken out - each kept as its Size says; the glass
 // moved along its wall sets the array's pitch. A broken window keeps its own size and place.
 function massingWindowEdit(name, r) {
-  const at = massingWindow(massing, name), was = windowRect(model, name), g = massing.storeys[at.storey].sides[at.side];
-  const i = at.storey, f = at.side, k = at.index, mid = wallMiddle(name);
-  if (g.broken?.[k]) return massingChange((x) => { breakOutWindow(x, name, r, mid); spreadSide(x, i, f); }, `window ${k + 1} of the ${f} side moved or resized`);
+  const at = massingWindow(massing, name), was = windowRect(model, name), g = massing.zones[at.zone].faces[at.face];
+  const i = at.zone, f = at.face, k = at.index, mid = faceMiddle(name), word = faceWord(at);
+  if (g.broken?.[k]) return massingChange((x) => { breakOutWindow(x, name, r, mid); spreadSide(x, i, f); }, `window ${k + 1} of the ${word} moved or resized`);
   const eq = (a, b) => Math.abs(a - b) < 1e-3, w0 = was.s1 - was.s0, w = r.s1 - r.s0;
   return massingChange((x) => {
     if (!eq(w, w0)) setWindowFigure(x, i, f, k, 'winW', w);
@@ -2209,12 +2229,14 @@ function massingWindowEdit(name, r) {
     }
     if (eq(w, w0) && !eq(r.s0 + r.s1, was.s0 + was.s1)) dragPitch(x, i, f, k, (r.s0 + r.s1) / 2 - mid);
     spreadSide(x, i, f);
-  }, `windows of the ${f} side changed`);
+  }, `windows of the ${word} changed`);
 }
-// Where a window's wall has its middle, along the wall (as windowRect measures it).
-function wallMiddle(name) {
-  const w = model.windows[name], wall = model.surfaces[w.parent], f = windowRect(model, name).frame;
-  return wall.vertices.reduce((s, p) => s + p[0] * f.right[0] + p[1] * f.right[1], 0) / wall.vertices.length;
+// Where a massing's window's face has its middle, along it (as windowRect measures it): the face's, not
+// its wall piece's, which can be shorter where the face meets another zone.
+function faceMiddle(name) {
+  const at = massingWindow(massing, name), { A, B } = faceAxes(massing, at.zone, at.face), f = windowRect(model, name).frame;
+  const M = turnPlan([(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], massing.rot || 0);
+  return M[0] * f.right[0] + M[1] * f.right[1];
 }
 $('new-massing').addEventListener('click', () => {
   if (model && !confirm('Start a new massing in place of the model open now? Export it first to keep it.')) return;

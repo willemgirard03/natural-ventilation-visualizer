@@ -1,44 +1,48 @@
-// A massing's storey edited in the 3D view, with the Solar Shading Explorer's handles (handles.js, from
-// the edit-handles skill), drawn as an SVG over the view.
+// A massing's zone edited in the 3D view, with the Solar Shading Explorer's handles (handles.js, from
+// the edit-handles skill), drawn as an SVG over the view. Zones stand on levels (src/model/massing.js):
+// moving a zone's roof or floor moves its level, and so every zone on it.
 //
 // With its whole zone selected:
-//  - a square grip on each face turned toward the eye pushes or pulls it: a wall takes its side of the
-//    plate (the opposite side stays), the roof raises the storey and everything above. The floor's grip
-//    always shows (it faces away from a view from above): it lowers the floor into the storey below;
+//  - a square grip on each face turned toward the eye pushes or pulls it: a face takes its edge of the
+//    footprint (its neighbours keep their lines), the roof raises the zone's top level and every level
+//    above. The floor's grip always shows (it faces away from a view from above): it moves the zone's
+//    base level alone, into the zones below;
 //  - a gumball on its floor, drawn at model size: red and green arrows along its own axes, the square
-//    between them to move it freely on its floor, the arc between them to turn it; on upper storeys a
-//    blue arrow raises it (the storey below grows to meet it, the storeys above follow). The ground
-//    floor has the arc only;
-//  - its width, depth and height dimensioned on the drawing, and its turn beside the arc, each typed over.
+//    between them to move it freely on its floor, the arc between them to turn it; off the ground a blue
+//    arrow raises it (its base level and every level above rise, the zones below growing to meet it).
+//    On the ground it has the arc only;
+//  - the length of each face turned toward the eye and its height dimensioned on the drawing, and its
+//    turn beside the arc, each typed over (a face's length moves the face after it).
 // With one surface selected: its own grip, and a grip on each of its edges that moves the face beyond
-// that edge, so the storey stays square: a wall's top edge is the roof, its sides the walls either side.
+// that edge: a wall's top edge is the roof, its bottom the floor, its sides the faces either side.
 //
-// A side selected (a wall, or a window of it) shows its windows' array as a dotted bracket over their
+// A face selected (a wall, or a window of it) shows its windows' array as a dotted bracket over their
 // heads, its number and spacing typed over (the facade-windows skill); not while a window is isolated.
-// A window of an array pressed and moved 4 px is selected and dragged along its side: where the pointer
-// is sets the array's pitch (by spacing) or its count (by number), the windows drawn as they will be. Windows broken out of their
-// array are outlined dashed in the sun's colour whenever they are not selected.
+// A window of an array pressed and moved 4 px is selected and dragged along its face: where the pointer
+// is sets the array's pitch (by spacing) or its count (by number), the windows drawn as they will be.
+// Windows broken out of their array are outlined dashed in the sun's colour whenever not selected.
 //
 // A press under 3 px is a click: an arrow, grip or arc then asks how far. Each drag or typed figure is
 // one edit, made through onChange(mutate, what) when the pointer is let go; while dragging, the
-// storeys as they will be are drawn in outline.
+// zones as they will be are drawn in outline.
 
 import * as THREE from 'three';
 import { askNumber } from './sections.js';
 import { AXIS, CLICK_PX, gripMark, gripAt, cursorFor, dragLength, dragAngle, angleOf, dragOnPlane, screenDir, dim, label, line, head, path, poly, circle, arrayBracket } from './handles.js';
-import { storeyFrame, pushFace, moveStorey, SIDES, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows } from '../src/model/massing.js';
+import { zoneFrame, pushFace, moveStorey, turnZone, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows, faceLength, zoneHeight, faceBearing, compassWord } from '../src/model/massing.js';
 
-const FACE_NAMES = { S: 'south wall', E: 'east wall', N: 'north wall', W: 'west wall', roof: 'roof', floor: 'floor' };
+// A face named for the way it looks ('south face'), or the roof or floor.
+const faceName = (m, i, f) => (f === 'roof' || f === 'floor' ? f : `${{ N: 'north', NE: 'north-east', E: 'east', SE: 'south-east', S: 'south', SW: 'south-west', W: 'west', NW: 'north-west' }[compassWord(faceBearing(m, i, f))]} face`);
 const unit2 = (d) => { const l = Math.hypot(d[0], d[1]); return l < 1e-9 ? [1, 0] : [d[0] / l, d[1] / l]; };
 
 export class MassingEditor {
   // massing() -> the massing; onChange(mutate, what).
   // brokenWindows() -> the outlines (model points) of the windows broken out of their arrays, unselected.
-  // isolated() -> a window is being edited in 3D; windowAt(e) -> { storey, side, index, name } of a
+  // isolated() -> a window is being edited in 3D; windowAt(e) -> { zone, face, index, name } of a
   // massing's window under the pointer, or null; onPick(name) selects it.
   constructor(view, { massing, onChange, brokenWindows = () => [], isolated = () => false, windowAt = () => null, onPick = () => {} }) {
     Object.assign(this, { view, massing, onChange, brokenWindows, isolated, windowAt, onPick });
-    this.target = null; // { storey, face }: face null for the whole zone
+    this.target = null; // { zone, face }: face null for the whole zone, else an index, 'roof' or 'floor'
     this.grips = [];
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     this.svg.setAttribute('class', 'mhandles');
@@ -67,7 +71,7 @@ export class MassingEditor {
   refresh() {
     if (!this.target) return;
     const m = this.massing();
-    if (!m || this.target.storey >= m.storeys.length) { this.stop(); return; }
+    if (!m || this.target.zone >= m.zones.length) { this.stop(); return; }
     this.draft = null;
     this.draw();
   }
@@ -99,12 +103,12 @@ export class MassingEditor {
       if (this.shown !== g) this.svg.innerHTML = this.shown = g;
       return;
     }
-    const { storey: i, face } = this.target, fr = storeyFrame(m, i);
-    if (this.draft) { // the storeys as they will be
-      for (let k = 0; k < m.storeys.length; k++) {
-        const f = storeyFrame(m, k), lo = f.corners.map((c) => P([c[0], c[1], f.z0])), hi = f.corners.map((c) => P([c[0], c[1], f.z1]));
+    const { zone: i, face } = this.target, fr = zoneFrame(m, i);
+    if (this.draft) { // the zones as they will be
+      for (let k = 0; k < m.zones.length; k++) {
+        const f = zoneFrame(m, k), lo = f.corners.map((c) => P([c[0], c[1], f.z0])), hi = f.corners.map((c) => P([c[0], c[1], f.z1]));
         g += poly(lo, { stroke: 'var(--glass)', w: 1.2 }) + poly(hi, { stroke: 'var(--glass)', w: 1.2 });
-        for (let j = 0; j < 4; j++) g += line(lo[j][0], lo[j][1], hi[j][0], hi[j][1], { stroke: 'var(--glass)', w: 1.2 });
+        for (let j = 0; j < lo.length; j++) g += line(lo[j][0], lo[j][1], hi[j][0], hi[j][1], { stroke: 'var(--glass)', w: 1.2 });
       }
     }
     const faceGrip = (f, half = 5, low = false) => {
@@ -113,11 +117,13 @@ export class MassingEditor {
       return gripMark(p[0], p[1], half);
     };
     if (this.target.window !== undefined) g += this.isolated() ? '' : this.bracket(m, i, face); // a window: its array alone
-    else if (!face) {
+    else if (face === null) {
       // the floor: its gumball, and the floor's own grip in the quarter the gumball leaves free
       const C = [fr.centre[0], fr.centre[1], fr.z0], ex = fr.x, ey = fr.y;
-      const s = m.storeys[i], GL = Math.min(10, Math.max(2, Math.min(s.w, s.d) / 4));
-      g += this.gumball(grips, C, ex, ey, GL, i > 0, s.rot || 0);
+      // the arrows a quarter of the footprint's smaller extent along its own axes, 2 to 10 m
+      const ext = (ax) => { const d = fr.corners.map((c) => c[0] * ax[0] + c[1] * ax[1]); return Math.max(...d) - Math.min(...d); };
+      const z = m.zones[i], GL = Math.min(10, Math.max(2, Math.min(ext(ex), ext(ey)) / 4));
+      g += this.gumball(grips, C, ex, ey, GL, z.base > 0, z.rot || 0);
       for (const f of fr.faces) {
         if (f.key === 'floor') {
           const at = [C[0] - 0.45 * GL * (ex[0] + ey[0]), C[1] - 0.45 * GL * (ex[1] + ey[1]), C[2]];
@@ -130,7 +136,7 @@ export class MassingEditor {
       if (f) {
         g += this.edges(grips, fr, face, i);
         g += faceGrip(f);
-        if (SIDES.includes(face)) g += this.bracket(m, i, face);
+        if (Number.isInteger(face)) g += this.bracket(m, i, face);
       }
     }
     if (this.pitchDraft) g += this.sideOutlines(this.pitchDraft);
@@ -139,7 +145,7 @@ export class MassingEditor {
     if (render) this.view.render();
   }
 
-  // The floor gumball (handles.js floorGumball's), with a blue arrow up on upper storeys and the arc
+  // The floor gumball (handles.js floorGumball's), with a blue arrow up on zones off the ground and the arc
   // alone on the ground floor; the turn typed beside the arc.
   gumball(grips, C, ex, ey, GL, arrows, rot) {
     const P = this.P, at = (u, v, w = 0) => P([C[0] + u * ex[0] + v * ey[0], C[1] + u * ex[1] + v * ey[1], C[2] + w]), o = at(0, 0);
@@ -167,29 +173,29 @@ export class MassingEditor {
   }
 
   // A side's array bracketed: a dotted line through its windows' middles 0.6 m out from the facade, at
-  // the storey less 150 mm or 450 mm over the heads, a tick at each window, its number and spacing.
+  // the zone's height less 150 mm or 450 mm over the heads, a tick at each window, its number and spacing.
   bracket(m, i, f) {
-    const s = m.storeys[i], g = s.sides[f];
+    const z = m.zones[i], g = z.faces[f];
     if (!g) return '';
-    const fr = storeyFrame(m, i), k = SIDES.indexOf(f), A = fr.corners[k], B = fr.corners[(k + 1) % 4], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+    const fr = zoneFrame(m, i), A = fr.corners[f], B = fr.corners[(f + 1) % fr.corners.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
     const lay = unitLayout(g, len);
     if (!lay.n) return '';
     const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len], n = fr.faces.find((x) => x.key === f).normal, mid = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
-    const top = s.h - (s.slab || 0), heads = Array.from({ length: lay.n }, (_, j) => windowHeights(unitOf(g, j), top).head);
-    const v = Math.min(s.h - 0.15, Math.max(...heads) + 0.45);
+    const h = zoneHeight(m, i), top = h - (z.slab || 0), heads = Array.from({ length: lay.n }, (_, j) => windowHeights(unitOf(g, j), top).head);
+    const v = Math.min(h - 0.15, Math.max(...heads) + 0.45);
     const pts = Array.from({ length: lay.n }, (_, j) => { const u = lay.first + j * lay.pitch; return this.P([mid[0] + U[0] * u + n[0] * 0.6, mid[1] + U[1] * u + n[1] * 0.6, fr.z0 + v]); });
     return arrayBracket(pts, true, lay.n, lay.pitch, 'window');
   }
 
-  // A side's frame: its middle and its run (model axes) and the storey's floor level.
+  // A face's frame: its middle and its run (model axes) and the zone's floor level.
   side(m, i, f) {
-    const fr = storeyFrame(m, i), k = SIDES.indexOf(f), A = fr.corners[k], B = fr.corners[(k + 1) % 4], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+    const fr = zoneFrame(m, i), A = fr.corners[f], B = fr.corners[(f + 1) % fr.corners.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
     return { fr, len, U: [(B[0] - A[0]) / len, (B[1] - A[1]) / len], mid: [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], n: fr.faces.find((x) => x.key === f).normal };
   }
   // The windows of a side as a dragged pitch would make them, outlined.
-  sideOutlines({ m, storey: i, side: f }) {
-    const s = m.storeys[i], { fr, len, U, mid, n } = this.side(m, i, f), at = (u, v) => this.P([mid[0] + U[0] * u + n[0] * 0.05, mid[1] + U[1] * u + n[1] * 0.05, fr.z0 + v]);
-    return sideWindows(s.sides[f], len, s.h, s.slab).map((w) => poly([at(w.u0, w.v0), at(w.u1, w.v0), at(w.u1, w.v1), at(w.u0, w.v1)], { stroke: 'var(--glass)', w: 1.4, dash: '4 3' })).join('');
+  sideOutlines({ m, zone: i, face: f }) {
+    const z = m.zones[i], { fr, len, U, mid, n } = this.side(m, i, f), at = (u, v) => this.P([mid[0] + U[0] * u + n[0] * 0.05, mid[1] + U[1] * u + n[1] * 0.05, fr.z0 + v]);
+    return sideWindows(z.faces[f], len, zoneHeight(m, i), z.slab).map((w) => poly([at(w.u0, w.v0), at(w.u1, w.v0), at(w.u1, w.v1), at(w.u0, w.v1)], { stroke: 'var(--glass)', w: 1.4, dash: '4 3' })).join('');
   }
   // Where the pointer is along a side, from its middle (m), on the side's plane.
   alongSide(e, i, f) {
@@ -207,8 +213,8 @@ export class MassingEditor {
       if (e.button !== 0) return;
       const w = this.windowAt(e), m = this.massing();
       if (!w || !m) return;
-      const s = m.storeys[w.storey], g = s.sides[w.side];
-      if (!g || unitLayout(g, w.side === 'N' || w.side === 'S' ? s.w : s.d).n < 2) return;
+      const g = m.zones[w.zone].faces[w.face];
+      if (!g || unitLayout(g, faceLength(m, w.zone, w.face)).n < 2) return;
       d = { ...w, x: e.clientX, y: e.clientY, moved: false, id: e.pointerId }; // a click still selects
     }, true);
     el.addEventListener('pointermove', (e) => {
@@ -220,11 +226,11 @@ export class MassingEditor {
         this.onPick(d.name);
       }
       e.stopImmediatePropagation();
-      const u = this.alongSide(e, d.storey, d.side);
+      const u = this.alongSide(e, d.zone, d.face);
       if (u === null) return;
       const m = structuredClone(this.massing());
-      dragPitch(m, d.storey, d.side, d.index, u);
-      this.pitchDraft = { m, storey: d.storey, side: d.side, u };
+      dragPitch(m, d.zone, d.face, d.index, u);
+      this.pitchDraft = { m, zone: d.zone, face: d.face, u };
       this.draw();
     }, true);
     const end = (e) => {
@@ -234,30 +240,30 @@ export class MassingEditor {
       if (!w.moved) return;
       e.stopImmediatePropagation();
       el.releasePointerCapture?.(e.pointerId);
-      if (p) this.onChange((m) => { dragPitch(m, w.storey, w.side, w.index, p.u); spreadSide(m, w.storey, w.side); }, `${w.side} side: windows set out by dragging`);
+      if (p) this.onChange((m) => { dragPitch(m, w.zone, w.face, w.index, p.u); spreadSide(m, w.zone, w.face); }, `${faceName(this.massing(), w.zone, w.face)}: windows set out by dragging`);
       else this.draw();
     };
     el.addEventListener('pointerup', end, true);
     el.addEventListener('pointercancel', end, true);
   }
 
-  // The storey's width, depth and height dimensioned along the edges nearest the eye, about 1 m out.
+  // The length of each face turned toward the eye, along it about 1 m out, and the zone's height up the
+  // corner nearest the eye; each typed over (a face's length moves the face after it).
   dims(m, fr, i) {
-    const P = this.P, c = fr.corners, s = m.storeys[i], mm = (x) => `${Math.round(x * 1000)} mm`;
-    const edge = (k) => ({ a: c[k], b: c[(k + 1) % 4], n: fr.faces[k].normal, at: fr.faces[k].at });
-    const pick = (k1, k2) => (this.facing(edge(k1).at, edge(k1).n) ? edge(k1) : edge(k2));
-    const along = (e, z, text, key) => {
-      const out = (p) => [p[0] + e.n[0], p[1] + e.n[1], z];
-      const a = P(out(e.a)), b = P(out(e.b));
-      return dim(a[0], a[1], b[0], b[1], text, 0, key);
-    };
-    let g = along(pick(0, 2), fr.z0, mm(s.w), 'w') + along(pick(1, 3), fr.z0, mm(s.d), 'd');
+    const P = this.P, c = fr.corners, n = c.length, mm = (x) => `${Math.round(x * 1000)} mm`;
+    let g = '';
+    for (let k = 0; k < n; k++) {
+      const f = fr.faces[k];
+      if (!this.facing(f.at, f.normal)) continue;
+      const out = (p) => [p[0] + f.normal[0], p[1] + f.normal[1], fr.z0], a = P(out(c[k])), b = P(out(c[(k + 1) % n]));
+      g += dim(a[0], a[1], b[0], b[1], mm(Math.hypot(c[(k + 1) % n][0] - c[k][0], c[(k + 1) % n][1] - c[k][1])), 0, `len:${k}`);
+    }
     // height: up the corner nearest the eye
     const cam = this.view.camera.position, o = this.view.origin;
     const near = c.map((p, k) => [k, Math.hypot(p[0] - o[0] - cam.x, p[1] - o[1] - cam.y)]).sort((x, y) => x[1] - y[1])[0][0];
     const p = c[near], out = unit2([p[0] - fr.centre[0], p[1] - fr.centre[1]]), q = [p[0] + out[0], p[1] + out[1]];
     const a = P([q[0], q[1], fr.z0]), b = P([q[0], q[1], fr.z1]);
-    g += dim(a[0], a[1], b[0], b[1], mm(s.h), 0, 'h');
+    g += dim(a[0], a[1], b[0], b[1], mm(fr.z1 - fr.z0), 0, 'h');
     return g;
   }
 
@@ -266,15 +272,16 @@ export class MassingEditor {
     const P = this.P, c = fr.corners, z0 = fr.z0, z1 = fr.z1;
     const byKey = Object.fromEntries(fr.faces.map((f) => [f.key, f]));
     const list = [];
-    if (SIDES.includes(face)) {
-      const k = SIDES.indexOf(face), A = c[k], B = c[(k + 1) % 4];
+    const n = c.length;
+    if (Number.isInteger(face)) {
+      const k = face, A = c[k], B = c[(k + 1) % n];
       list.push([[A[0], A[1], z1], [B[0], B[1], z1], 'roof']);
-      if (i > 0) list.push([[A[0], A[1], z0], [B[0], B[1], z0], 'floor']);
-      list.push([[A[0], A[1], z0], [A[0], A[1], z1], SIDES[(k + 3) % 4]]);
-      list.push([[B[0], B[1], z0], [B[0], B[1], z1], SIDES[(k + 1) % 4]]);
+      list.push([[A[0], A[1], z0], [B[0], B[1], z0], 'floor']);
+      list.push([[A[0], A[1], z0], [A[0], A[1], z1], (k + n - 1) % n]);
+      list.push([[B[0], B[1], z0], [B[0], B[1], z1], (k + 1) % n]);
     } else {
       const z = face === 'roof' ? z1 : z0;
-      SIDES.forEach((f, k) => list.push([[c[k][0], c[k][1], z], [c[(k + 1) % 4][0], c[(k + 1) % 4][1], z], f]));
+      c.forEach((_, k) => list.push([[c[k][0], c[k][1], z], [c[(k + 1) % n][0], c[(k + 1) % n][1], z], k]));
     }
     let g = '';
     for (const [a, b, beyond] of list) {
@@ -293,16 +300,16 @@ export class MassingEditor {
 
   // The massing as it would be with a handle moved by x (m; [a, b] m for a free move; degrees for a turn).
   apply(m, key, x) {
-    const i = this.target.storey;
+    const i = this.target.zone;
     if (key.kind === 'face') pushFace(m, i, key.face, x);
     else if (key.kind === 'move') moveStorey(m, i, key.axis, x);
     else if (key.kind === 'free') { moveStorey(m, i, 'x', x[0]); moveStorey(m, i, 'y', x[1]); }
-    else if (key.kind === 'rot') m.storeys[i].rot = +((((m.storeys[i].rot || 0) - x + 540) % 360) - 180).toFixed(3); // the arc runs from x toward y: anticlockwise
+    else if (key.kind === 'rot') turnZone(m, i, +((((m.zones[i].rot || 0) - x + 540) % 360) - 180).toFixed(3)); // the arc runs from x toward y: anticlockwise
     return m;
   }
   what(key) {
-    const s = `storey ${this.target.storey + 1}`;
-    return key.kind === 'face' ? `${s} ${FACE_NAMES[key.face]} pushed or pulled` : key.kind === 'rot' ? `${s} turned` : `${s} moved`;
+    const s = `zone ${this.target.zone + 1}`;
+    return key.kind === 'face' ? `${s} ${faceName(this.massing(), this.target.zone, key.face)} pushed or pulled` : key.kind === 'rot' ? `${s} turned` : `${s} moved`;
   }
 
   wire() {
@@ -358,24 +365,30 @@ export class MassingEditor {
   // A handle clicked rather than dragged: how far to push, move or turn.
   typeHandle(e, key) {
     if (key.kind === 'free') return;
-    const label = key.kind === 'rot' ? 'turn °, anticlockwise' : key.kind === 'move' ? `move mm along ${key.axis}` : `push or pull the ${FACE_NAMES[key.face]}, mm`;
+    const label = key.kind === 'rot' ? 'turn °, anticlockwise' : key.kind === 'move' ? `move mm along ${key.axis}` : `push or pull the ${faceName(this.massing(), this.target.zone, key.face)}, mm`;
     askNumber(this.view.container, e, label, (x) => this.onChange((m) => this.apply(m, key, key.kind === 'rot' ? x : x / 1000), this.what(key)));
   }
 
-  // A figure on the drawing typed over: width, depth or height (mm), or the turn (degrees clockwise).
+  // A figure on the drawing typed over: a face's length or the height (mm), the turn (degrees
+  // clockwise), or a face's array's number or spacing.
   typeFigure(e, k) {
-    const i = this.target.storey, s = this.massing().storeys[i], f = this.target.face;
+    const i = this.target.zone, m0 = this.massing(), z = m0.zones[i], f = this.target.face;
     if (k === 'a.count' || k === 'a.spacing') {
-      const g = s.sides[f], lay = unitLayout(g, f === 'N' || f === 'S' ? s.w : s.d);
-      if (k === 'a.count') askNumber(this.view.container, e, `windows, now ${lay.n}`, (x) => this.onChange((m) => { setCount(m.storeys[i].sides[f], x); spreadSide(m, i, f); }, `${f} side: ${Math.round(x)} windows`));
-      else askNumber(this.view.container, e, `spacing mm, now ${Math.round(lay.pitch * 1000)}`, (x) => this.onChange((m) => { setSpacing(m.storeys[i].sides[f], x / 1000); spreadSide(m, i, f); }, `${f} side: windows at ${Math.round(x)} mm`));
+      const g = z.faces[f], lay = unitLayout(g, faceLength(m0, i, f)), word = faceName(m0, i, f);
+      if (k === 'a.count') askNumber(this.view.container, e, `windows, now ${lay.n}`, (x) => this.onChange((m) => { setCount(m.zones[i].faces[f], x); spreadSide(m, i, f); }, `${word}: ${Math.round(x)} windows`));
+      else askNumber(this.view.container, e, `spacing mm, now ${Math.round(lay.pitch * 1000)}`, (x) => this.onChange((m) => { setSpacing(m.zones[i].faces[f], x / 1000); spreadSide(m, i, f); }, `${word}: windows at ${Math.round(x)} mm`));
       return;
     }
     if (k === 'rot') {
-      askNumber(this.view.container, e, `turn °, now ${+(s.rot || 0).toFixed(1)}`, (x) => this.onChange((m) => { m.storeys[i].rot = x; }, `storey ${i + 1} turned`), true);
+      askNumber(this.view.container, e, `turn °, now ${+(z.rot || 0).toFixed(1)}`, (x) => this.onChange((m) => turnZone(m, i, x), `zone ${i + 1} turned`), true);
       return;
     }
-    const name = { w: 'width', d: 'depth', h: 'height' }[k], face = { w: 'E', d: 'N', h: 'roof' }[k];
-    askNumber(this.view.container, e, `${name} mm, now ${Math.round(s[k] * 1000)}`, (x) => this.onChange((m) => pushFace(m, i, face, x / 1000 - m.storeys[i][k]), `storey ${i + 1} ${name} set`));
+    if (k === 'h') {
+      askNumber(this.view.container, e, `height mm, now ${Math.round(zoneHeight(m0, i) * 1000)}`, (x) => this.onChange((m) => pushFace(m, i, 'roof', x / 1000 - zoneHeight(m, i)), `zone ${i + 1} height set`));
+      return;
+    }
+    // a face's length: the face after it moves
+    const q = Number(k.split(':')[1]), next = (q + 1) % z.plate.length;
+    askNumber(this.view.container, e, `length mm, now ${Math.round(faceLength(m0, i, q) * 1000)}`, (x) => this.onChange((m) => pushFace(m, i, next, x / 1000 - faceLength(m, i, q)), `zone ${i + 1} ${faceName(m0, i, q)} length set`));
   }
 }

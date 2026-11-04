@@ -1,17 +1,28 @@
-// A building modelled from scratch as storeys of rectangular floor plates, each storey one zone
-// ("pancake" massing), written out as a complete EnergyPlus .epJSON in ClimateStudio's manner, so the
-// tool reads it as it reads a ClimateStudio model and EnergyPlus runs it as it is.
+// A building modelled from scratch as zones standing on levels, written out as a complete EnergyPlus
+// .epJSON in ClimateStudio's manner, so the tool reads it as it reads a ClimateStudio model and
+// EnergyPlus runs it as it is.
 //
-// The storeys and their windows follow the shading tool's massing: a storey is a plate (width along x,
-// depth along y, centred on its offset) of a height; each side (N, E, S, W) carries a window array, set
-// out by number (the side divided into equal bays) or by spacing (bays of a pitch, centred on the side);
-// any window of an array can be broken out and given its own size, sill and place in its bay.
+// The model (version 2):
+//  - levels: elevations, lowest first, the first the ground (z 0). Moving a level moves every zone that
+//    stands on it or reaches up to it.
+//  - zones: each a prism between a base and a top level over a footprint (`plate`: a polygon,
+//    counterclockwise seen from above, in the building's coordinates before the building is turned by
+//    `rot`). Each edge of the footprint is a face, carrying its own window array (faces[k], or null);
+//    a corner on a straight run of the footprint is a seam between two faces. `cells`, when there are
+//    any, divide the footprint into the pieces its floor and roof are made of (the seams left where
+//    zones were merged); else the footprint is one piece. `rot` is the turn of the zone's own axes.
+//  - an older massing (storeys of rectangular plates, one zone each) is read as levels and one zone a
+//    storey (upgradeMassing), its zones and surfaces keeping their names.
+// The windows follow the shading tool's massing: each face carries a window array, set out by number
+// (the face divided into equal bays) or by spacing (bays of a pitch, centred on the face); any window
+// of an array can be broken out and given its own size, sill and place in its bay.
 //
 // What is written, as ClimateStudio writes it (CLIMATESTUDIO.md):
 //  - zones `<name>_<index>`; surfaces `<zone>:f<n>`; windows `<zone>:f<n>:w<k>`;
 //  - facades gross, windows as their subsurfaces; corners counterclockwise seen from outside;
-//  - a plate over another: the overlap a floor and ceiling pair (the floor with the _FLIPPED assembly),
-//    the rest of the upper floor exposed (External Floor), the rest of the lower ceiling a roof;
+//  - zones stacked: where one stands over another, a floor and ceiling pair (the floor with the
+//    _FLIPPED assembly), the rest of the upper floor exposed (External Floor), the rest of the lower
+//    ceiling a roof; where two zones' faces meet on the same levels, a pair of interior walls;
 //  - the ground floor on the ground; every assembly with its _FLIPPED twin;
 //  - natural ventilation by ZoneVentilation:WindandStackOpenArea: a wind object per window (its operable
 //    area, facing its azimuth) and a stack object per zone (all its operable area, a quarter of the
@@ -21,14 +32,17 @@
 //    ventilation on the occupancy schedule; people, lights and equipment by floor area.
 // The default loads and schedules are those of an office (public ASHRAE 90.1 / DOE prototype values).
 
+import pc from 'polygon-clipping';
 import { LAYER_FIELDS } from './constructions.js';
 import { glassWidth as unitWidth, glassHeights, setSize, setFigure, PRESETS, UNIT_KEYS } from './windows.js';
 
-export const SIDES = ['S', 'E', 'N', 'W']; // in the order the faces are numbered
-export const SIDE_AZIMUTH = { N: 0, E: 90, S: 180, W: 270 };
+export const SIDES = ['S', 'E', 'N', 'W']; // a storey plate's sides, in the order its faces are numbered
 export const WINDOW_EDGE = 0.02; // m, kept between a window and its wall's edges or the next window
+export const LEVEL_MIN = 2; // m, the least height between two levels
+export const EDGE_MIN = 0.3; // m, the shortest face a footprint may have
 
 export const WINDOWS0 = () => ({ winBy: 'number', winN: 4, winSp: 4.5, winW: 2.0, winH: 1.6, sill: 0.9, size: 'fixed', broken: {} });
+// An older massing's storey: a rectangular plate (width along x, depth along y, centred on its offset).
 export const storey0 = (h = 3.5, w = 20, d = 10) => ({ name: null, h, w, d, ox: 0, oy: 0, rot: 0, slab: 0.3, sides: { N: WINDOWS0(), E: WINDOWS0(), S: WINDOWS0(), W: WINDOWS0() } });
 
 export const MASSING_SETTINGS0 = () => ({
@@ -37,9 +51,31 @@ export const MASSING_SETTINGS0 = () => ({
   operableFraction: 0.8, ventSetpoint: 25, ventMinOutdoor: 10, ventMaxOutdoor: 27, ventMaxHumidity: 90,
 });
 
+export const levelName = (i) => `Level ${i + 1}`;
 export function massing0() {
-  return { name: 'Floor', rot: 0, storeys: [storey0(), storey0()], settings: MASSING_SETTINGS0() };
+  return upgradeMassing({ name: 'Floor', rot: 0, storeys: [storey0(), storey0()], settings: MASSING_SETTINGS0() });
 }
+
+// An older massing's storeys as levels and zones: a level at each storey's floor and one over the top,
+// a zone a storey over its plate, its four sides its faces (S, E, N, W). A version 2 massing as it is.
+export function upgradeMassing(m) {
+  if (!m?.storeys) return m;
+  const levels = [{ name: levelName(0), z: 0 }];
+  let z = 0;
+  m.storeys.forEach((s, i) => { z += s.h; levels.push({ name: levelName(i + 1), z: +z.toFixed(6) }); });
+  const zones = m.storeys.map((s, i) => ({
+    name: s.name || null, base: i, top: i + 1, rot: s.rot || 0, plate: platePolygon(s), faces: SIDES.map((f) => s.sides?.[f] ?? null),
+    slab: s.slab ?? 0, linkFaces: !!s.linkSides, linkAbove: !!s.linkAbove,
+  }));
+  const { storeys, ...rest } = m;
+  return { ...rest, version: 2, levels, zones };
+}
+
+// A zone's floor and top elevations, and its height.
+export const zoneLevels = (m, i) => [m.levels[m.zones[i].base].z, m.levels[m.zones[i].top].z];
+export const zoneHeight = (m, i) => { const [a, b] = zoneLevels(m, i); return b - a; };
+// A zone's name as written: its own or the massing's with its base level's number, and its index.
+export const zoneName = (m, i) => { const z = m.zones[i]; return `${String(z.name || `${m.name || 'Floor'}${z.base + 1}`).replace(/[,;!]/g, ' ').trim()}_${i}`; };
 
 // ---------- the window arrays (as the shading tool's cells) ----------
 
@@ -59,9 +95,9 @@ export function windowHeights(g, top) {
   return glassHeights(u, top);
 }
 
-// How the windows are set out along a side of length `len`: by number, they divide it evenly; by
-// spacing, they stand at that pitch, centred on the side, each wholly on it. The count, the pitch and
-// the centre of the first, from the middle of the side.
+// How the windows are set out along a face of length `len`: by number, they divide it evenly; by
+// spacing, they stand at that pitch, centred on the face, each wholly on it. The count, the pitch and
+// the centre of the first, from the middle of the face.
 export function unitLayout(g, len) {
   if (g.winBy !== 'spacing') {
     const n = Math.max(1, Math.round(g.winN));
@@ -75,9 +111,9 @@ export function unitLayout(g, len) {
 // A window of the array: the array's own, or as it was broken out.
 export const unitGlazing = (g, i) => (g.broken && g.broken[i] ? { ...g, ...g.broken[i] } : g);
 
-// The windows of one side of a storey, in the side's own coordinates: u across from its middle (left
-// to right seen from outside), v up from the storey's floor. Each stays inside its bay, under the slab
-// and clear of the wall's edges and of its neighbours.
+// The windows of one face, in the face's own coordinates: u across from its middle (left to right seen
+// from outside), v up from the zone's floor. Each stays inside its bay, under the slab and clear of the
+// wall's edges and of its neighbours.
 export function sideWindows(g, len, h, slab = 0.3) {
   if (!g || len <= 0) return [];
   const { n, pitch, first } = unitLayout(g, len), top = Math.max(0.1, h - clamp(slab, 0, h - 0.1)), out = [];
@@ -94,6 +130,55 @@ export function sideWindows(g, len, h, slab = 0.3) {
   return out;
 }
 
+// ---------- plans ----------
+
+// Turned clockwise in plan by a degrees, as a compass bearing turns.
+export const turnPlan = ([x, y], a) => { const r = (a * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r); return [x * c + y * s, -x * s + y * c]; };
+// An older storey's plate: its corners counterclockwise seen from above, from the south-west (before
+// it is turned), so edge k is its side SIDES[k], left to right seen from outside.
+export function platePolygon(s) {
+  const hw = s.w / 2, hd = s.d / 2;
+  return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map((p) => { const [x, y] = turnPlan(p, s.rot || 0); return [x + s.ox, y + s.oy]; });
+}
+export const polyArea = (P) => P.reduce((a, p, i) => { const q = P[(i + 1) % P.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0) / 2;
+export const centroid = (P) => {
+  let a = 0, x = 0, y = 0;
+  P.forEach((p, i) => { const q = P[(i + 1) % P.length], c = p[0] * q[1] - q[0] * p[1]; a += c; x += (p[0] + q[0]) * c; y += (p[1] + q[1]) * c; });
+  return Math.abs(a) < 1e-12 ? [P.reduce((s, p) => s + p[0], 0) / P.length, P.reduce((s, p) => s + p[1], 0) / P.length] : [x / (3 * a), y / (3 * a)];
+};
+// Repeated and collinear corners dropped; nothing left of a sliver.
+function clean(P) {
+  let out = P.filter((p, i) => Math.hypot(p[0] - P[(i + 1) % P.length][0], p[1] - P[(i + 1) % P.length][1]) > 1e-6);
+  out = out.filter((p, i) => { const a = out[(i + out.length - 1) % out.length], b = out[(i + 1) % out.length]; return Math.abs((p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0])) > 1e-9; });
+  return out.length >= 3 && Math.abs(polyArea(out)) > 1e-4 ? out : [];
+}
+// Polygons for polygon-clipping, and its results back as simple polygons, counterclockwise and
+// without holes (a piece with a hole is cut in two through the hole, as a surface can have none).
+const R6 = (x) => Math.round(x * 1e6) / 1e6;
+const geom = (P) => [P.map(([x, y]) => [R6(x), R6(y)])];
+function pieces(multi) {
+  const out = [];
+  const take = (poly) => {
+    if (poly.length > 1) {
+      const h = poly[1], cx = h.reduce((s, p) => s + p[0], 0) / h.length, xs = poly[0].map((p) => p[0]), ys = poly[0].map((p) => p[1]);
+      const lo = Math.min(...ys) - 1, hi = Math.max(...ys) + 1, x0 = Math.min(...xs) - 1, x1 = Math.max(...xs) + 1;
+      for (const half of [[[x0, lo], [cx, lo], [cx, hi], [x0, hi]], [[cx, lo], [x1, lo], [x1, hi], [cx, hi]]]) for (const p of pc.intersection(poly, [half])) take(p);
+      return;
+    }
+    const r = poly[0], last = r[r.length - 1], P = clean(last[0] === r[0][0] && last[1] === r[0][1] ? r.slice(0, -1) : r);
+    if (P.length >= 3) out.push(polyArea(P) < 0 ? P.reverse() : P);
+  };
+  for (const poly of multi) take(poly);
+  return out;
+}
+export const intersect = (A, B) => pieces(pc.intersection(geom(A), geom(B)));
+export const subtract = (A, Bs) => (Bs.length ? pieces(pc.difference(geom(A), ...Bs.map(geom))) : pieces([geom(A)]));
+export const unite = (Ps) => pieces(pc.union(...Ps.map(geom)));
+// A plate at a height, its corners counterclockwise seen from above (up) or from below (down).
+const flat = (P, z, up) => (up ? P : [...P].reverse()).map(([x, y]) => [x, y, z]);
+// The cells a zone's floor and roof are made of: its own, or its footprint whole.
+const cellsOf = (z) => (z.cells?.length ? z.cells : [z.plate]);
+
 // ---------- the top of the wall ----------
 
 // How thick an assembly is, from its layers' materials (a layer without a thickness counts 0).
@@ -102,124 +187,123 @@ function assemblyThickness(ep, name) {
   if (!c) return null;
   return LAYER_FIELDS.reduce((t, f) => t + (c[f] ? ep.Material?.[c[f]]?.thickness || 0 : 0), 0);
 }
-// Each storey's slab: the band at the top of its walls the windows stay under. Floors hang below their
-// level, so it is the thickness of the floor assembly of the storey above (from the model `ep` where it
-// has one, else the massing's own slab). The top storey's roof stands on its walls: no band.
+// Each zone's slab: the band at the top of its walls the windows stay under. Floors hang below their
+// level, so it is the thickness of the floor assembly of a zone standing on it (from the model `ep`
+// where it has one, else the massing's own slab). A zone with nothing on it: its roof stands on its
+// walls, no band.
 export function setSlabs(m, ep = null) {
-  m.storeys.forEach((s, i) => {
-    const above = m.storeys[i + 1];
-    if (!above) { s.slab = 0; return; }
-    const Z = zoneName(m, above, i + 1), floors = Object.values(ep?.['BuildingSurface:Detailed'] || {}).filter((o) => o.zone_name === Z && o.surface_type === 'Floor');
-    const f = floors.find((o) => o.outside_boundary_condition === 'Surface') || floors[0];
-    const t = f && assemblyThickness(ep, f.construction_name);
-    s.slab = +(t ?? MASSING_ASSEMBLIES_SLAB_T).toFixed(4);
+  m.zones.forEach((z, i) => {
+    const above = m.zones.map((y, j) => [y, j]).filter(([y]) => y.base === z.top && intersect(y.plate, z.plate).length);
+    if (!above.length) { z.slab = 0; return; }
+    let t = null;
+    for (const [, j] of above) {
+      const Z = zoneName(m, j), floors = Object.values(ep?.['BuildingSurface:Detailed'] || {}).filter((o) => o.zone_name === Z && o.surface_type === 'Floor');
+      const f = floors.find((o) => o.outside_boundary_condition === 'Surface') || floors[0];
+      t = f ? assemblyThickness(ep, f.construction_name) : null;
+      if (t != null) break;
+    }
+    z.slab = +(t ?? MASSING_ASSEMBLIES_SLAB_T).toFixed(4);
   });
   return m;
 }
 
 // ---------- geometry ----------
 
-// The storeys' floor levels.
-export function storeyBases(m) {
-  const z = [0];
-  for (const s of m.storeys) z.push(z[z.length - 1] + s.h);
-  return z;
-}
-// Turned clockwise in plan by a degrees, as a compass bearing turns.
-export const turnPlan = ([x, y], a) => { const r = (a * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r); return [x * c + y * s, -x * s + y * c]; };
-// A storey's plate in building coordinates: its corners counterclockwise seen from above, from the
-// south-west (before it is turned), so edge k is its side SIDES[k], left to right seen from outside.
-export function platePolygon(s) {
-  const hw = s.w / 2, hd = s.d / 2;
-  return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map((p) => { const [x, y] = turnPlan(p, s.rot || 0); return [x + s.ox, y + s.oy]; });
-}
-const polyArea = (P) => P.reduce((a, p, i) => { const q = P[(i + 1) % P.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0) / 2;
-// A convex polygon clipped to the inside (left) of the line a -> b, or to its outside.
-function clipLine(P, a, b, inside = true) {
-  const side = (p) => (inside ? 1 : -1) * ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]));
-  const out = [];
-  P.forEach((p, i) => {
-    const q = P[(i + 1) % P.length], sp = side(p), sq = side(q);
-    if (sp >= -1e-9) out.push(p);
-    if ((sp > 1e-9 && sq < -1e-9) || (sp < -1e-9 && sq > 1e-9)) { const t = sp / (sp - sq); out.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]); }
+// The walls along face k of zone i: the face split where other zones' faces meet it on the same levels
+// (each such stretch an interior wall shared with that zone), the rest exterior. Pieces as spans along
+// the face from its first corner (u0, u1) and heights (z0, z1), with the zone across (`other`) or null.
+function wallPieces(info, i, k) {
+  const Z = info[i], P = Z.plate, A = P[k], B = P[(k + 1) % P.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+  const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len], near = [];
+  info.forEach((Y, j) => {
+    if (j === i || Y.z1 <= Z.z0 + 1e-6 || Y.z0 >= Z.z1 - 1e-6) return;
+    Y.plate.forEach((C, q) => {
+      const D = Y.plate[(q + 1) % Y.plate.length], off = (p) => (p[0] - A[0]) * U[1] - (p[1] - A[1]) * U[0];
+      if (Math.abs(off(C)) > 1e-4 || Math.abs(off(D)) > 1e-4) return;
+      const uc = (C[0] - A[0]) * U[0] + (C[1] - A[1]) * U[1], ud = (D[0] - A[0]) * U[0] + (D[1] - A[1]) * U[1];
+      if (ud >= uc) return; // a face meeting this one runs the other way
+      const a = Math.max(0, ud), b = Math.min(len, uc);
+      if (b - a > 1e-4) near.push([j, a, b, Math.max(Z.z0, Y.z0), Math.min(Z.z1, Y.z1)]);
+    });
   });
-  return clean(out);
-}
-// Repeated and collinear corners dropped.
-function clean(P) {
-  let out = P.filter((p, i) => Math.hypot(p[0] - P[(i + 1) % P.length][0], p[1] - P[(i + 1) % P.length][1]) > 1e-6);
-  out = out.filter((p, i) => { const a = out[(i + out.length - 1) % out.length], b = out[(i + 1) % out.length]; return Math.abs((p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0])) > 1e-9; });
-  return out.length >= 3 && polyArea(out) > 1e-4 ? out : [];
-}
-// Where two convex plates overlap, or null.
-const overlap = (A, B) => { let P = A; for (let i = 0; i < B.length && P.length; i++) P = clipLine(P, B[i], B[(i + 1) % B.length]); return P.length ? P : null; };
-// A convex plate less another, as convex pieces: the part outside each of the other's sides in turn.
-function minus(A, B) {
-  if (!overlap(A, B)) return [A];
+  const uniq = (xs) => [...new Set(xs.map(R6))].sort((a, b) => a - b);
+  const us = uniq([0, len, ...near.flatMap((n) => [n[1], n[2]])]).filter((u) => u >= -1e-9 && u <= len + 1e-9);
+  const zs = uniq([Z.z0, Z.z1, ...near.flatMap((n) => [n[3], n[4]])]).filter((z) => z >= Z.z0 - 1e-9 && z <= Z.z1 + 1e-9);
   const out = [];
-  let rest = A;
-  for (let i = 0; i < B.length && rest.length; i++) {
-    const a = B[i], b = B[(i + 1) % B.length], piece = clipLine(rest, a, b, false);
-    if (piece.length) out.push(piece);
-    rest = clipLine(rest, a, b, true);
+  for (let b = 0; b + 1 < zs.length; b++) {
+    const row = [];
+    for (let a = 0; a + 1 < us.length; a++) {
+      const um = (us[a] + us[a + 1]) / 2, zm = (zs[b] + zs[b + 1]) / 2;
+      const other = near.find((x) => um > x[1] && um < x[2] && zm > x[3] && zm < x[4])?.[0] ?? null, last = row[row.length - 1];
+      if (last && last.other === other) last.u1 = us[a + 1]; else row.push({ u0: us[a], u1: us[a + 1], z0: zs[b], z1: zs[b + 1], other });
+    }
+    // a piece the same as one in the band below, with the same zone across, joins it
+    for (const r of row) {
+      const below = out.find((o) => Math.abs(o.z1 - r.z0) < 1e-9 && Math.abs(o.u0 - r.u0) < 1e-9 && Math.abs(o.u1 - r.u1) < 1e-9 && o.other === r.other);
+      if (below) below.z1 = r.z1; else out.push(r);
+    }
   }
-  return out;
+  return { A, U, len, pieces: out };
 }
-// A plate at a height, its corners counterclockwise seen from above (up) or from below (down).
-const flat = (P, z, up) => (up ? P : [...P].reverse()).map(([x, y]) => [x, y, z]);
-
-const zoneName = (m, s, i) => `${String(s.name || `${m.name || 'Floor'}${i + 1}`).replace(/[,;!]/g, ' ').trim()}_${i}`;
 
 // Every zone's surfaces and windows, in building coordinates (the plan turned by `rot`, degrees
-// clockwise), before they are written: the geometry the tests and the drawings read.
+// clockwise), before they are written: the geometry the tests and the drawings read. Surfaces that
+// meet another zone's (a floor on a ceiling, two walls back to back) are paired by `partner`.
 export function massingGeometry(m) {
-  const z = storeyBases(m), a = ((m.rot || 0) * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
+  m = upgradeMassing(m);
+  const a = ((m.rot || 0) * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
   const turn = ([x, y, h]) => [x * c + y * sn, -x * sn + y * c, h];
-  const zones = m.storeys.map((s, i) => ({ name: zoneName(m, s, i), storey: i, z0: z[i], z1: z[i + 1], plate: platePolygon(s), surfaces: [], windows: [] }));
+  const info = m.zones.map((z, i) => {
+    const [z0, z1] = zoneLevels(m, i);
+    return { name: zoneName(m, i), zone: i, z0, z1, plate: z.plate, area: Math.abs(polyArea(z.plate)), surfaces: [], windows: [] };
+  });
+  const pairs = new Map(); // where two surfaces meet: a key from their corners -> the surfaces there
+  const keyOf = (pts) => pts.map((p) => p.map((x) => x.toFixed(3)).join(',')).sort().join('|');
   const add = (zone, type, kind, pts, extra = {}) => {
-    const name = `${zone.name}:f${zone.surfaces.length}`;
-    zone.surfaces.push({ name, type, kind, vertices: pts.map(turn), ...extra });
+    const name = `${zone.name}:f${zone.surfaces.length}`, s = { name, type, kind, vertices: pts.map(turn), ...extra };
+    zone.surfaces.push(s);
+    if (kind === 'slab' || kind === 'inter') { const key = keyOf(pts); if (!pairs.has(key)) pairs.set(key, []); pairs.get(key).push(s); }
     return name;
   };
-  zones.forEach((zone, i) => {
-    const s = m.storeys[i], below = zones[i - 1];
-    // the floor: on the ground, or over the storey below where the plates overlap, exposed elsewhere
-    if (!below) add(zone, 'Floor', 'ground', flat(zone.plate, zone.z0, false));
-    else {
-      const o = overlap(zone.plate, below.plate);
-      if (o) zone.pairFloor = add(zone, 'Floor', 'slab', flat(o, zone.z0, false), { over: o });
-      for (const r of minus(zone.plate, below.plate)) add(zone, 'Floor', 'exposed', flat(r, zone.z0, false));
+  info.forEach((zone, i) => {
+    const z = m.zones[i], below = m.zones.filter((y) => y.top === z.base).flatMap(cellsOf), above = m.zones.filter((y) => y.base === z.top).flatMap(cellsOf);
+    // the floor: on the ground, or over the zones below where they overlap, exposed elsewhere
+    for (const cell of cellsOf(z)) {
+      if (z.base === 0) { add(zone, 'Floor', 'ground', flat(cell, zone.z0, false)); continue; }
+      for (const b of below) for (const o of intersect(cell, b)) add(zone, 'Floor', 'slab', flat(o, zone.z0, false));
+      for (const r of subtract(cell, below)) add(zone, 'Floor', 'exposed', flat(r, zone.z0, false));
     }
-    // the walls, each with its windows
-    for (const [k, f] of SIDES.entries()) {
-      const A = zone.plate[k], B = zone.plate[(k + 1) % 4], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
-      const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len], mid = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
-      const wall = add(zone, 'Wall', 'facade', [[A[0], A[1], zone.z0], [B[0], B[1], zone.z0], [B[0], B[1], zone.z1], [A[0], A[1], zone.z1]], { side: f });
-      const at = (u, v) => [mid[0] + U[0] * u, mid[1] + U[1] * u, zone.z0 + v];
-      sideWindows(s.sides?.[f], len, s.h, s.slab).forEach((w, k) => zone.windows.push({
-        name: `${wall}:w${k}`, wall, side: f, index: w.index, width: w.u1 - w.u0, height: w.v1 - w.v0,
-        azimuth: (SIDE_AZIMUTH[f] + (s.rot || 0) + (m.rot || 0) + 720) % 360,
-        vertices: [at(w.u0, w.v0), at(w.u1, w.v0), at(w.u1, w.v1), at(w.u0, w.v1)].map(turn),
-      }));
+    // the walls, face by face: exterior pieces with the face's windows, interior ones shared
+    z.plate.forEach((_, k) => {
+      const { A, U, len, pieces: ps } = wallPieces(info, i, k), at = (u, h) => [A[0] + U[0] * u, A[1] + U[1] * u, h];
+      const walls = ps.map((p) => ({ ...p, name: add(zone, 'Wall', p.other === null ? 'facade' : 'inter', [at(p.u0, p.z0), at(p.u1, p.z0), at(p.u1, p.z1), at(p.u0, p.z1)], { face: k }) }));
+      const az = ((Math.atan2(U[1], -U[0]) * 180) / Math.PI + (m.rot || 0) + 720) % 360;
+      sideWindows(z.faces?.[k], len, zone.z1 - zone.z0, z.slab).forEach((w, n) => {
+        // on the exterior piece that holds it whole; a window across a piece's edge is not made
+        const u0 = w.u0 + len / 2, u1 = w.u1 + len / 2, v0 = zone.z0 + w.v0, v1 = zone.z0 + w.v1;
+        const host = walls.find((p) => p.other === null && u0 >= p.u0 - 1e-9 && u1 <= p.u1 + 1e-9 && v0 >= p.z0 - 1e-9 && v1 <= p.z1 + 1e-9);
+        if (!host) return;
+        zone.windows.push({ name: `${host.name}:w${n}`, wall: host.name, face: k, index: w.index, width: w.u1 - w.u0, height: w.v1 - w.v0, azimuth: az, vertices: [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)].map(turn) });
+      });
+    });
+    // the ceiling: under the zones above where they overlap, a roof elsewhere
+    for (const cell of cellsOf(z)) {
+      for (const b of above) for (const o of intersect(cell, b)) add(zone, 'Ceiling', 'slab', flat(o, zone.z1, true));
+      for (const r of subtract(cell, above)) add(zone, 'Roof', 'roof', flat(r, zone.z1, true));
     }
   });
-  // the ceilings: under the storey above where they overlap (paired with its floor), a roof elsewhere
-  zones.forEach((zone, i) => {
-    const above = zones[i + 1];
-    if (above?.pairFloor) {
-      const o = overlap(zone.plate, above.plate);
-      const name = add(zone, 'Ceiling', 'slab', flat(o, zone.z1, true), { partner: above.pairFloor });
-      above.surfaces.find((x) => x.name === above.pairFloor).partner = name;
-    }
-    for (const r of above ? minus(zone.plate, above.plate) : [zone.plate]) add(zone, 'Roof', 'roof', flat(r, zone.z1, true));
-  });
-  return zones;
+  // each surface meeting another zone's paired with it; one left without (a near miss) stands alone, outside
+  for (const list of pairs.values()) {
+    if (list.length === 2 && list[0].name.split(':')[0] !== list[1].name.split(':')[0]) { list[0].partner = list[1].name; list[1].partner = list[0].name; continue; }
+    for (const s of list) s.kind = s.type === 'Floor' ? 'exposed' : s.type === 'Wall' ? 'facade' : 'roof', s.type = s.type === 'Ceiling' ? 'Roof' : s.type;
+  }
+  return info;
 }
 
 // ---------- materials, assemblies and schedules ----------
 
 // Assemblies listed outside (or top) first, as ClimateStudio draws them; a floor over a zone takes the
-// slab's _FLIPPED twin, its ceiling the slab itself. Generic materials (conductivity W/m·K, density
+// slab's _FLIPPED twin, its ceiling the slab itself; a wall between zones the (symmetric) partition. Generic materials (conductivity W/m·K, density
 // kg/m³, specific heat J/kg·K).
 const MATERIALS = {
   'Brick 100mm': [0.1, 0.89, 1920, 790], 'Mineral wool 120mm': [0.12, 0.035, 30, 840], 'Concrete 200mm': [0.2, 1.95, 2240, 900],
@@ -232,6 +316,7 @@ export const MASSING_ASSEMBLIES = {
   slab: ['Massing Interior Slab', ['Screed 60mm', 'Concrete 250mm']],
   ground: ['Massing Ground Slab', ['XPS 100mm', 'Concrete 250mm', 'Screed 60mm']],
   exposed: ['Massing Exposed Floor', ['Insulation board 150mm', 'Concrete 250mm', 'Screed 60mm']],
+  partition: ['Massing Interior Wall', ['Gypsum board 13mm', 'Mineral wool 120mm', 'Gypsum board 13mm']],
 };
 const MASSING_ASSEMBLIES_SLAB_T = MASSING_ASSEMBLIES.slab[1].reduce((t, n) => t + MATERIALS[n][0], 0);
 export const MASSING_GLAZING = ['Massing Double Glazing', { u_factor: 1.4, solar_heat_gain_coefficient: 0.4, visible_transmittance: 0.6 }];
@@ -305,6 +390,7 @@ const polygonArea = (pts) => {
 // The model as EnergyPlus .epJSON. `weather` (parseEPW) makes the natural-ventilation schedules from
 // its hours, as ClimateStudio does; without it they are always on (the outdoor limits still apply).
 export function massingEpJSON(m, { weather = null, runPeriod = null, ep: from = null } = {}) {
+  m = upgradeMassing(m);
   setSlabs(m, from);
   const set = { ...MASSING_SETTINGS0(), ...(m.settings || {}) }, zones = massingGeometry(m);
   const ep = {
@@ -358,11 +444,12 @@ export function massingEpJSON(m, { weather = null, runPeriod = null, ep: from = 
 
   const asm = (kind) => MASSING_ASSEMBLIES[kind][0];
   for (const zone of zones) {
-    const Z = zone.name, floorArea = polyArea(zone.plate);
+    const Z = zone.name, floorArea = zone.area;
     ep.Zone[Z] = { direction_of_relative_north: 0, x_origin: 0, y_origin: 0, z_origin: 0, type: 1, multiplier: 1, floor_area: floorArea, volume: floorArea * (zone.z1 - zone.z0), zone_inside_convection_algorithm: 'TARP', zone_outside_convection_algorithm: 'DOE-2' };
     for (const s of zone.surfaces) {
       const o = { surface_type: s.type, zone_name: Z, number_of_vertices: s.vertices.length, vertices: vertexList(s.vertices) };
       if (s.kind === 'ground') Object.assign(o, { construction_name: asm('ground'), outside_boundary_condition: 'Ground', sun_exposure: 'NoSun', wind_exposure: 'NoWind', view_factor_to_ground: 0 });
+      else if (s.kind === 'inter') Object.assign(o, { construction_name: asm('partition'), outside_boundary_condition: 'Surface', outside_boundary_condition_object: s.partner, sun_exposure: 'NoSun', wind_exposure: 'NoWind', view_factor_to_ground: 0 });
       else if (s.kind === 'slab') Object.assign(o, { construction_name: s.type === 'Floor' ? `${asm('slab')}_FLIPPED` : asm('slab'), outside_boundary_condition: 'Surface', outside_boundary_condition_object: s.partner, sun_exposure: 'NoSun', wind_exposure: 'NoWind', view_factor_to_ground: 0 });
       else Object.assign(o, { construction_name: asm(s.kind), outside_boundary_condition: 'Outdoors', sun_exposure: 'SunExposed', wind_exposure: 'WindExposed', view_factor_to_ground: 'Autocalculate' });
       ep['BuildingSurface:Detailed'][s.name] = o;
@@ -430,6 +517,7 @@ const KEEP_VENT = ['minimum_indoor_temperature', 'maximum_indoor_temperature', '
 // assembly and schedule. Zones that are gone take their own objects with them; new ones start with
 // the massing's settings. The operable fraction a zone's openings had is kept.
 export function applyMassing(tx, m, opts = {}) {
+  if (m.storeys) Object.assign(m, upgradeMassing(m)), delete m.storeys;
   const fresh = massingEpJSON(m, { ...opts, ep: tx.epjson }), ep = tx.epjson, zones = new Set(Object.keys(fresh.Zone));
   for (const Z of Object.keys(ep.Zone || {})) {
     if (zones.has(Z)) continue;
@@ -471,57 +559,72 @@ function windowArea(w) {
   return p.length ? polygonArea(p) : 0;
 }
 
-// Which window of which array a window of the written model is: its storey, side and place in the
-// array (as massingGeometry numbers them). null for a window the massing did not make.
+// Which window of which array a window of the written model is: its zone, face and place in the array
+// (as massingGeometry numbers them), and the zone's floor level. null for a window the massing did not make.
 export function massingWindow(m, name) {
   for (const zone of massingGeometry(m)) {
     const w = zone.windows.find((x) => x.name === name);
-    if (w) return { storey: zone.storey, side: w.side, index: w.index, z0: zone.z0 };
+    if (w) return { zone: zone.zone, face: w.face, index: w.index, z0: zone.z0 };
   }
   return null;
 }
 
 // A window moved or resized in its wall (s along the wall to the right, z up, as edit.js's
-// windowRect; `wallMid` the s of the wall's middle) broken out of its array with that size and place.
+// windowRect; `wallMid` the s of the face's middle) broken out of its array with that size and place.
 export function breakOutWindow(m, name, r, wallMid) {
   const at = massingWindow(m, name);
   if (!at) return false;
-  const s = m.storeys[at.storey], g = s.sides[at.side];
-  const len = at.side === 'N' || at.side === 'S' ? s.w : s.d, { first, pitch } = unitLayout(g, len);
+  const g = m.zones[at.zone].faces[at.face], { first, pitch } = unitLayout(g, faceLength(m, at.zone, at.face));
   const mid = (r.s0 + r.s1) / 2 - wallMid;
   g.broken = { ...(g.broken || {}) };
   g.broken[at.index] = { ...unitOf(g, at.index), size: 'fixed', winW: +(r.s1 - r.s0).toFixed(3), winH: +(r.z1 - r.z0).toFixed(3), sill: +(r.z0 - at.z0).toFixed(3), offU: +(mid - (first + at.index * pitch)).toFixed(3) };
   return true;
 }
 
-// ---------- a side's windows, as the facade-windows skill edits them ----------
-// A side's array stands in for the skill's system and its unit at once: winBy, winN and winSp set it
+// ---------- a face's windows, as the facade-windows skill edits them ----------
+// A face's array stands in for the skill's system and its unit at once: winBy, winN and winSp set it
 // out; winW, winH, sill, size and the edges' other forms (jamb, headGap, widthR, sillR, headR) are its
 // window type. A broken window keeps a type of its own in broken[i], with offU along its bay.
 
-const sideLength = (s, f) => (f === 'N' || f === 'S' ? s.w : s.d);
-const top = (s) => Math.max(0.1, s.h - clamp(s.slab ?? 0, 0, s.h - 0.1));
+// The length of face k of zone i, and the top of the zone's walls (under its slab).
+export function faceLength(m, i, k) {
+  const P = m.zones[i].plate, A = P[k], B = P[(k + 1) % P.length];
+  return Math.hypot(B[0] - A[0], B[1] - A[1]);
+}
+const wallTop = (m, i) => { const h = zoneHeight(m, i); return Math.max(0.1, h - clamp(m.zones[i].slab ?? 0, 0, h - 0.1)); };
+// A face's direction in plan (unit, building coordinates before the turn) and its outward normal.
+export function faceAxes(m, i, k) {
+  const P = m.zones[i].plate, A = P[k], B = P[(k + 1) % P.length], l = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1;
+  const U = [(B[0] - A[0]) / l, (B[1] - A[1]) / l];
+  return { A, B, U, n: [U[1], -U[0]] };
+}
+// The compass word for the way a face looks: 'S', 'SE' ... from its outward normal, the building turned.
+export function faceBearing(m, i, k) {
+  const { n } = faceAxes(m, i, k);
+  return (((Math.atan2(n[0], n[1]) * 180) / Math.PI + (m.rot || 0)) % 360 + 360) % 360;
+}
+export const compassWord = (az) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(az / 45) % 8];
 // The window type window i lays: its own when broken out, else the array's.
 export function unitOf(g, i) {
   const b = g.broken?.[i], u = Object.fromEntries(UNIT_KEYS.filter((k) => k in g).map((k) => [k, g[k]]));
   return b ? { ...u, ...b } : u;
 }
-// Where window i's figures are measured from: its bay and the top of its wall.
-export function windowContext(m, i, f) {
-  const s = m.storeys[i], g = s.sides[f], { pitch } = unitLayout(g, sideLength(s, f));
-  return { pitch, top: top(s), slab: s.slab ?? 0 };
+// Where window k's figures are measured from: its bay and the top of its wall.
+export function windowContext(m, i, k) {
+  const g = m.zones[i].faces[k], { pitch } = unitLayout(g, faceLength(m, i, k));
+  return { pitch, top: wallTop(m, i), slab: m.zones[i].slab ?? 0 };
 }
-// A bare side given windows: one window in its middle, or a preset (punched, window wall, curtain wall).
-export function addWindows(m, i, f, preset = null) {
-  const s = m.storeys[i];
+// A bare face given windows: one window in its middle, or a preset (punched, window wall, curtain wall).
+export function addWindows(m, i, k, preset = null) {
+  const z = m.zones[i], top = wallTop(m, i);
   if (preset) {
     const p = PRESETS[preset];
-    s.sides[f] = { ...WINDOWS0(), winW: 1.5, winH: 1.8, sill: 0.9, ...p.sys, ...p.unit, broken: {} };
-    delete s.sides[f].name;
-    if (p.unit.size === 'offset') setSize(s.sides[f], 'offset', p.sys.winSp, top(s));
+    z.faces[k] = { ...WINDOWS0(), winW: 1.5, winH: 1.8, sill: 0.9, ...p.sys, ...p.unit, broken: {} };
+    delete z.faces[k].name;
+    if (p.unit.size === 'offset') setSize(z.faces[k], 'offset', p.sys.winSp, top);
   } else {
-    const winH = Math.max(0.6, Math.min(1.8, top(s) - 0.9));
-    s.sides[f] = { ...WINDOWS0(), winBy: 'number', winN: 1, winW: 1.5, winH, sill: 0.9 };
+    const winH = Math.max(0.6, Math.min(1.8, top - 0.9));
+    z.faces[k] = { ...WINDOWS0(), winBy: 'number', winN: 1, winW: 1.5, winH, sill: 0.9 };
   }
 }
 // One window, or an array that repeats it at a spacing leaving wall between.
@@ -531,120 +634,162 @@ export function setArray(g, on) {
   else Object.assign(g, { winBy: 'number', winN: 1, broken: {} });
 }
 // Set out by number or by spacing, keeping the layout it has.
-export function setBy(m, i, f, by) {
-  const s = m.storeys[i], g = s.sides[f];
+export function setBy(m, i, k, by) {
+  const g = m.zones[i].faces[k];
   if (g.winBy === by) return;
-  const lay = unitLayout(g, sideLength(s, f));
+  const lay = unitLayout(g, faceLength(m, i, k));
   g.winBy = by;
   if (by === 'number') g.winN = Math.max(1, lay.n); else g.winSp = +lay.pitch.toFixed(4);
 }
 export const setCount = (g, n) => Object.assign(g, { winBy: 'number', winN: clamp(Math.round(n), 1, 200) });
 export const setSpacing = (g, sp) => Object.assign(g, { winBy: 'spacing', winSp: clamp(sp, 0.3, 60) });
-// A window dragged along its side: the pitch the pointer implies (u from the side's middle), from the
+// A window dragged along its face: the pitch the pointer implies (u from the face's middle), from the
 // first window, or from the last when the first is dragged. By number, the nearest count.
-export function dragPitch(m, i, f, idx, u) {
-  const s = m.storeys[i], g = s.sides[f], len = sideLength(s, f), { n, pitch, first } = unitLayout(g, len);
+export function dragPitch(m, i, k, idx, u) {
+  const g = m.zones[i].faces[k], len = faceLength(m, i, k), { n, pitch, first } = unitLayout(g, len);
   if (n < 2) return;
   const last = first + (n - 1) * pitch, p = Math.max(0.3, idx > 0 ? (u - first) / idx : (last - u) / (n - 1));
   if (g.winBy !== 'spacing') g.winN = clamp(Math.round(len / p), 1, 200); else g.winSp = Math.round(p / 0.05) * 0.05;
 }
 // How the type's edges hold (Fixed, Offsets, Proportional), switched without moving the glass.
-export function setWindowSize(m, i, f, k, mode) {
-  const g = m.storeys[i].sides[f], ctx = windowContext(m, i, f), u = g.broken?.[k] ? g.broken[k] : g;
-  const was = legacy(u === g ? g : unitOf(g, k));
+export function setWindowSize(m, i, k, w, mode) {
+  const g = m.zones[i].faces[k], ctx = windowContext(m, i, k), u = g.broken?.[w] ? g.broken[w] : g;
+  const was = legacy(u === g ? g : unitOf(g, w));
   if (u === g) { delete g.fillW; delete g.fillH; }
-  const w = glassWidth(was, ctx.pitch), { sill, head } = windowHeights(was, ctx.top);
-  Object.assign(u, { size: was.size || 'fixed', winW: w, sill, winH: head - sill });
+  const width = glassWidth(was, ctx.pitch), { sill, head } = windowHeights(was, ctx.top);
+  Object.assign(u, { size: was.size || 'fixed', winW: width, sill, winH: head - sill });
   setSize(u, mode, ctx.pitch, ctx.top);
 }
-// One of window k's figures set ('winW', 'sill', 'head', 'winH', 'jamb', 'headGap', 'widthR', 'sillR',
+// One of window w's figures set ('winW', 'sill', 'head', 'winH', 'jamb', 'headGap', 'widthR', 'sillR',
 // 'headR'): on its own type when broken out, else on the array's, so every window of it changes.
-export function setWindowFigure(m, i, f, k, key, v) {
-  const g = m.storeys[i].sides[f], ctx = windowContext(m, i, f), u = g.broken?.[k] ? g.broken[k] : g;
-  if (u === g && (g.fillW || g.fillH) && !g.size) setWindowSize(m, i, f, k, 'offset');
+export function setWindowFigure(m, i, k, w, key, v) {
+  const g = m.zones[i].faces[k], ctx = windowContext(m, i, k), u = g.broken?.[w] ? g.broken[w] : g;
+  if (u === g && (g.fillW || g.fillH) && !g.size) setWindowSize(m, i, k, w, 'offset');
   setFigure(u, key, v, ctx);
 }
-// Broken out of its array: window k takes a copy of the array's type as its own.
-export function breakWindow(g, k) { g.broken = { ...(g.broken || {}), [k]: { ...unitOf(g, k), offU: 0 } }; }
+// Broken out of its array: window w takes a copy of the array's type as its own.
+export function breakWindow(g, w) { g.broken = { ...(g.broken || {}), [w]: { ...unitOf(g, w), offU: 0 } }; }
 // Back into the array (revert); or its type given to the array (apply), the others broken out kept or
 // bound back too.
-export function revertWindow(g, k) { if (g.broken) delete g.broken[k]; }
-export function applyToArray(g, k, others = 'keep') {
-  const b = g.broken?.[k];
+export function revertWindow(g, w) { if (g.broken) delete g.broken[w]; }
+export function applyToArray(g, w, others = 'keep') {
+  const b = g.broken?.[w];
   if (!b) return;
   const { offU, ...unit } = b;
   for (const key of UNIT_KEYS) delete g[key];
   Object.assign(g, unit);
   delete g.fillW; delete g.fillH;
-  delete g.broken[k];
+  delete g.broken[w];
   if (others === 'rebind') g.broken = {};
 }
 export const brokenOf = (g) => Object.keys(g?.broken || {}).map(Number).sort((a, b) => a - b);
-// The links a storey keeps: its other sides follow side f (linkSides), the storeys above follow it
-// (linkAbove). After every edit to side f, they take a copy of it.
-export function spreadSide(m, i, f) {
-  const s = m.storeys[i], g = s.sides[f];
-  const to = [];
-  if (s.linkSides) for (const x of SIDES) if (x !== f) to.push([i, x]);
-  if (s.linkAbove) for (let j = i + 1; j < m.storeys.length; j++) for (const x of s.linkSides ? SIDES : [f]) to.push([j, x]);
-  for (const [j, x] of to) m.storeys[j].sides[x] = g ? structuredClone(g) : null;
+// The links a zone keeps: its other faces follow face k (linkFaces), the zones stacked above it follow
+// it (linkAbove) on their face looking the same way. After every edit to face k they take a copy of it.
+export function spreadSide(m, i, k) {
+  const z = m.zones[i], g = z.faces[k], to = [];
+  if (z.linkFaces) z.plate.forEach((_, q) => { if (q !== k) to.push([i, q]); });
+  if (z.linkAbove) {
+    let below = [i];
+    while (below.length) {
+      const next = [];
+      for (const b of below) {
+        m.zones.forEach((y, j) => {
+          if (y.base !== m.zones[b].top || !intersect(y.plate, m.zones[b].plate).length) return;
+          next.push(j);
+          if (z.linkFaces) y.plate.forEach((_, q) => to.push([j, q]));
+          else {
+            // its face looking the same way, nearest in line with this one
+            const want = faceAxes(m, i, k), best = y.plate.map((_, q) => [q, faceAxes(m, j, q)]).filter(([, f]) => f.U[0] * want.U[0] + f.U[1] * want.U[1] > 0.999)
+              .map(([q, f]) => [q, Math.abs((f.A[0] - want.A[0]) * want.n[0] + (f.A[1] - want.A[1]) * want.n[1])]).sort((a, b) => a[1] - b[1])[0];
+            if (best) to.push([j, best[0]]);
+          }
+        });
+      }
+      below = next;
+    }
+  }
+  for (const [j, q] of to) m.zones[j].faces[q] = g ? structuredClone(g) : null;
 }
 
-// ---------- a storey's handles ----------
+// ---------- a zone's handles ----------
 
-// A storey as the view draws its handles, in the model's coordinates (the building turned): its
-// corners, floor and roof levels, middle, own axes, and each face's middle and outward normal
-// ('S', 'E', 'N', 'W', 'roof', 'floor').
-export function storeyFrame(m, i) {
-  const s = m.storeys[i], z = storeyBases(m), z0 = z[i], z1 = z[i + 1], B = m.rot || 0;
-  const corners = platePolygon(s).map((p) => turnPlan(p, B));
-  const c = turnPlan([s.ox, s.oy], B), axis = (v) => [...turnPlan(turnPlan(v, s.rot || 0), B), 0];
-  const faces = SIDES.map((f, k) => {
-    const a = corners[k], b = corners[(k + 1) % 4], d = Math.hypot(b[0] - a[0], b[1] - a[1]);
-    return { key: f, at: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (z0 + z1) / 2], normal: [(b[1] - a[1]) / d, -(b[0] - a[0]) / d, 0] };
+// A zone as the view draws its handles, in the model's coordinates (the building turned): its corners,
+// floor and top levels, middle, own axes, and each face's middle and outward normal (faces by index,
+// then 'roof', and 'floor' when it does not stand on the ground).
+export function zoneFrame(m, i) {
+  const z = m.zones[i], [z0, z1] = zoneLevels(m, i), B = m.rot || 0;
+  const corners = z.plate.map((p) => turnPlan(p, B)), c = turnPlan(centroid(z.plate), B), axis = (v) => [...turnPlan(turnPlan(v, z.rot || 0), B), 0];
+  const faces = corners.map((a, k) => {
+    const b = corners[(k + 1) % corners.length], d = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    return { key: k, at: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (z0 + z1) / 2], normal: [(b[1] - a[1]) / d, -(b[0] - a[0]) / d, 0] };
   });
   faces.push({ key: 'roof', at: [c[0], c[1], z1], normal: [0, 0, 1] });
-  if (i > 0) faces.push({ key: 'floor', at: [c[0], c[1], z0], normal: [0, 0, -1] });
+  if (z.base > 0) faces.push({ key: 'floor', at: [c[0], c[1], z0], normal: [0, 0, -1] });
   return { corners, z0, z1, centre: [c[0], c[1], (z0 + z1) / 2], x: axis([1, 0]), y: axis([0, 1]), faces };
 }
 
-const SIDE_NORMAL = { S: [0, -1], E: [1, 0], N: [0, 1], W: [-1, 0] };
-export const STOREY_MIN = { h: 2, w: 1, d: 1 };
-
-// A face of storey i pushed or pulled by `dist` m along its outward normal: a wall takes its side of
-// the plate with it (the opposite side stays), the roof raises the storey and every storey above, the
-// floor lowers this storey's floor and so the ceiling of the one below. Returns the distance taken.
-export function pushFace(m, i, face, dist) {
-  const s = m.storeys[i];
-  if (face === 'roof') { const h = Math.max(STOREY_MIN.h, s.h + dist); dist = h - s.h; s.h = h; return dist; }
-  if (face === 'floor') {
-    const below = m.storeys[i - 1];
-    if (!below) return 0;
-    dist = Math.min(dist, below.h - STOREY_MIN.h);
-    dist = Math.max(dist, STOREY_MIN.h - s.h);
-    below.h -= dist; s.h += dist;
-    return dist;
-  }
-  const k = face === 'E' || face === 'W' ? 'w' : 'd', v = Math.max(STOREY_MIN[k], s[k] + dist);
-  dist = v - s[k];
-  s[k] = v;
-  const [dx, dy] = turnPlan(SIDE_NORMAL[face], s.rot || 0);
-  s.ox += (dx * dist) / 2; s.oy += (dy * dist) / 2;
+// Level L moved by `dist` m, with every level above it (`above`) or alone, kept LEVEL_MIN from its
+// neighbours. Returns the distance taken. The ground does not move.
+export function moveLevel(m, L, dist, above = true) {
+  if (L <= 0 || L >= m.levels.length) return 0;
+  const lv = m.levels;
+  dist = Math.max(dist, lv[L - 1].z + LEVEL_MIN - lv[L].z);
+  if (!above && L + 1 < lv.length) dist = Math.min(dist, lv[L + 1].z - LEVEL_MIN - lv[L].z);
+  for (let j = L; j < (above ? lv.length : L + 1); j++) lv[j].z = +(lv[j].z + dist).toFixed(6);
   return dist;
 }
 
-// Storey i moved along its own x or y axis, or up ('z': its floor and every storey above rise, the
-// storey below growing to meet it).
-export function moveStorey(m, i, axis, dist) {
-  const s = m.storeys[i];
-  if (axis === 'z') {
-    const below = m.storeys[i - 1];
-    if (!below) return 0;
-    const h = Math.max(STOREY_MIN.h, below.h + dist);
-    dist = h - below.h; below.h = h;
-    return dist;
+// A footprint with face k moved out by `dist` m along its normal, its neighbours keeping their lines;
+// null when that would fold it or leave a face under EDGE_MIN.
+function movedPlate(P, k, dist) {
+  const n = P.length, A = P[k], B = P[(k + 1) % n], l = Math.hypot(B[0] - A[0], B[1] - A[1]);
+  const U = [(B[0] - A[0]) / l, (B[1] - A[1]) / l], N = [U[1], -U[0]];
+  const A2 = [A[0] + N[0] * dist, A[1] + N[1] * dist], B2 = [B[0] + N[0] * dist, B[1] + N[1] * dist];
+  // where the moved face's line meets a neighbour's (or, in line with it, just moved out)
+  const meet = (p, q, fallback) => {
+    const d = [q[0] - p[0], q[1] - p[1]], den = U[0] * d[1] - U[1] * d[0];
+    if (Math.abs(den) < 1e-9) return fallback;
+    const t = ((p[0] - A2[0]) * d[1] - (p[1] - A2[1]) * d[0]) / den;
+    return [A2[0] + U[0] * t, A2[1] + U[1] * t];
+  };
+  const out = P.map((p) => [...p]);
+  out[k] = meet(P[(k - 1 + n) % n], A, A2);
+  out[(k + 1) % n] = meet(B, P[(k + 2) % n], B2);
+  const ok = Math.sign(polyArea(out)) === Math.sign(polyArea(P)) && out.every((p, j) => Math.hypot(out[(j + 1) % n][0] - p[0], out[(j + 1) % n][1] - p[1]) >= EDGE_MIN - 1e-9);
+  return ok ? out.map(([x, y]) => [R6(x), R6(y)]) : null;
+}
+
+// A face of zone i pushed or pulled by `dist` m along its outward normal: a face takes its edge of the
+// footprint with it (its neighbours keep their lines), the roof moves the zone's top level and every
+// level above, the floor moves its base level alone (the zones below grow or shrink to meet it).
+// Returns the distance taken.
+export function pushFace(m, i, face, dist) {
+  const z = m.zones[i];
+  if (face === 'roof') return moveLevel(m, z.top, dist, true);
+  if (face === 'floor') return z.base > 0 ? -moveLevel(m, z.base, -dist, false) : 0;
+  for (let t = dist, tries = 0; tries < 12; tries++, t /= 2) {
+    const P = movedPlate(z.plate, face, t);
+    if (P) { z.plate = P; return t; }
   }
-  const [dx, dy] = turnPlan(axis === 'x' ? [1, 0] : [0, 1], s.rot || 0);
-  s.ox += dx * dist; s.oy += dy * dist;
+  return 0;
+}
+
+// Zone i moved along its own x or y axis, or up ('z': its base level and every level above rise, the
+// zones below growing to meet it).
+export function moveStorey(m, i, axis, dist) {
+  const z = m.zones[i];
+  if (axis === 'z') return z.base > 0 ? moveLevel(m, z.base, dist, true) : 0;
+  const [dx, dy] = turnPlan(axis === 'x' ? [1, 0] : [0, 1], z.rot || 0);
+  const move = (P) => P.map(([x, y]) => [R6(x + dx * dist), R6(y + dy * dist)]);
+  z.plate = move(z.plate);
+  if (z.cells) z.cells = z.cells.map(move);
   return dist;
+}
+
+// Zone i turned to `deg` (clockwise, its own axes against the building's) about its middle.
+export function turnZone(m, i, deg) {
+  const z = m.zones[i], d = deg - (z.rot || 0), c = centroid(z.plate);
+  z.plate = z.plate.map(([x, y]) => { const [u, v] = turnPlan([x - c[0], y - c[1]], d); return [R6(u + c[0]), R6(v + c[1])]; });
+  if (z.cells) z.cells = z.cells.map((P) => P.map(([x, y]) => { const [u, v] = turnPlan([x - c[0], y - c[1]], d); return [R6(u + c[0]), R6(v + c[1])]; }));
+  z.rot = deg;
 }
