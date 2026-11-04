@@ -30,12 +30,13 @@ import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 import {
   massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
-  faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName,
+  faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify,
   setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch,
 } from '../src/model/massing.js';
 import { PRESETS, SIZES } from '../src/model/windows.js';
 import { massingPanel } from './massing-panel.js';
 import { MassingEditor } from './massedit.js';
+import { ModelTools } from './modeltools.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -140,7 +141,7 @@ const hover = new HoverPick(view, { candidatesAt, edgesOf });
 }
 view.offered = (e) => hover.pickFor(e);
 // While a plane's or a window's handle is under the pointer, nothing else is offered.
-view.busy = (e) => !!(view.sections.handleAt(e) || winEdit.handleAt(e) || massEdit.handleAt(e) || sky.handleAt(e));
+view.busy = (e) => !!(tools.active || view.sections.handleAt(e) || winEdit.handleAt(e) || massEdit.handleAt(e) || sky.handleAt(e));
 hover.setEnabled($('show-labels').checked);
 $('show-labels').addEventListener('change', (e) => hover.setEnabled(e.target.checked));
 // A window's sill, head and jambs pushed and pulled in the view, and the window dragged across its wall.
@@ -200,7 +201,50 @@ const sky = new SkyDome(view, {
     if (!applyEdit((tx) => { tx.get('Building', name).north_axis = deg; }, `north axis set to ${deg}°`, { geometry: true })) updateSky();
   },
 });
-view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); };
+view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); tools.beforeRender(); };
+// The modelling tools (app/modeltools.js): Add zone and Split zone, in the view's bar for a massing.
+const tools = new ModelTools(view, {
+  massing: () => massing,
+  // the massing's zone and face under the pointer (a window counts as its face), and the point hit in
+  // the plan's own coordinates
+  targetAt: (e) => {
+    if (!massing || !model) return null;
+    const h = view.hitAt(e);
+    if (!h) return null;
+    let t = null;
+    if (h.kind === 'window') { const w = massingWindow(massing, h.item.name); t = w && { zone: w.zone, face: w.face }; }
+    else if (h.kind === 'surface') { const s = massingTarget({ kind: 'surface', item: h.item }); t = s && { zone: s.zone, face: s.face ?? 'floor' }; }
+    if (!t) return null;
+    const o = view.origin, p = turnPlan([h.point.x + o[0], h.point.y + o[1]], -(massing.rot || 0));
+    return { ...t, point: p };
+  },
+  onChange: (mutate, what) => massingChange(mutate, what),
+  onAdded: (j) => { const z = massingGeometry(massing)[j]; if (z && model.zones[z.name]) view.select(z.name); },
+  onTool: (tool) => {
+    for (const b of document.querySelectorAll('#model-tools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
+    if (tool) { winEdit.stop(); view.select(null); hover.clear(); }
+  },
+});
+for (const b of document.querySelectorAll('#model-tools [data-tool]')) {
+  // Add zone is dragged in, or clicked and then placed; Split zone stays on until Esc or a second click
+  b.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !massing || b.dataset.tool !== 'add') return;
+    const x0 = e.clientX, y0 = e.clientY;
+    const move = (m) => {
+      if (Math.hypot(m.clientX - x0, m.clientY - y0) < 6) return;
+      window.removeEventListener('pointermove', move);
+      tools.start('add', true);
+      b.dataset.dragged = '1';
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', () => window.removeEventListener('pointermove', move), { once: true });
+  });
+  b.addEventListener('click', () => {
+    if (b.dataset.dragged) { delete b.dataset.dragged; return; }
+    if (!massing) return;
+    if (tools.tool === b.dataset.tool) tools.stop(); else tools.start(b.dataset.tool);
+  });
+}
 // The model's outdoor limits for opening windows (its natural ventilation's), for the sky's weather
 // dots: the first zone's that has them; EnergyPlus's own defaults where none are set.
 function ventLimits() {
@@ -889,7 +933,7 @@ const load = (file) => loadText(file.name, () => file.text());
 
 async function loadText(name, read) {
   $('status').textContent = `Reading ${name}…`;
-  massing = null; $('massing').hidden = true; $('mass-open').hidden = true; massEdit.stop();
+  massing = null; $('massing').hidden = true; $('mass-open').hidden = true; massEdit.stop(); tools.stop(); $('model-tools').hidden = true;
   try {
     const epjson = JSON.parse(await read());
     model = importEpJSON(epjson, { fileName: name });
@@ -1356,6 +1400,8 @@ function sideRows(at, isolated = false) {
   if (isolated && k !== undefined) rows.push(`<div class="poprow"><span class="tipped" title="How this window type's edges hold as the zone's height or the window's bay changes. Fixed: its own width and height, the sill above the floor. Offsets: the sill above the floor, the head a set distance under the slab, each jamb a set distance in from its bay - a window wall is Offsets of 0. Proportional: each edge a share of the wall's height and of the bay. Switching never moves the glass.">Size</span> ${seg('sw-size', SIZES, unitOf(g, k).size || 'fixed', 'How the edges hold')}</div>`);
   rows.push(`<div class="poprow">${chk('sw-array', isArray(g), 'Array', 'On: the window repeats along the side at a spacing that leaves wall between. Off: one window, in the middle.')}`
     + (isArray(g) ? seg('sw-by', [['spacing', 'Spacing'], ['number', 'Number']], g.winBy === 'spacing' ? 'spacing' : 'number', 'Spacing keeps the pitch as the side changes length; Number keeps the count. Switching keeps the layout as it is.') : '') + '</div>');
+  rows.push(`<div class="poprow"><span class="tipped" title="Where the array stands on the face: its length is set by the grips at the ends of its bracket in the view (or typed there). Justified left, centre or right, it keeps that end, or its middle, where it is as the face changes length.">Justify</span> ${seg('sw-just', JUSTS, g.just || 'centre', 'The edge of the face the array keeps to')}`
+    + (g.len > 0 ? '<button type="button" class="pbtn" data-act="sw-full" title="The array set out along the whole face again">Full face</button>' : '') + '</div>');
   rows.push(`<div class="poprow">${chk('sw-sides', z.linkFaces, 'Apply to all faces', 'On: the zone\'s other faces take these windows and follow every later change to them. Off: each face keeps its own.')}`
     + chk('sw-above', z.linkAbove, 'Apply to zones above', 'On: the zones stacked above take these windows on their face looking the same way, and follow every later change to them.') + '</div>');
   rows.push(`<button type="button" class="pbtn more" data-act="sw-more" aria-expanded="${sideMore}">${sideMore ? 'More ▴' : 'More ▸'}</button>`);
@@ -1395,6 +1441,8 @@ function sideAction(el) {
   else if (act === 'sw-size') sideEdit(at, (x) => setWindowSize(x, i, f, k, el.dataset.v), `windows sized ${el.dataset.v}`);
   else if (act === 'sw-array') sideEdit(at, (x, g) => setArray(g, el.checked), el.checked ? 'an array' : 'one window');
   else if (act === 'sw-by') sideEdit(at, (x) => setBy(x, i, f, el.dataset.v), `set out by ${el.dataset.v}`);
+  else if (act === 'sw-just') sideEdit(at, (x) => setJustify(x, i, f, el.dataset.v), `windows justified ${el.dataset.v}`);
+  else if (act === 'sw-full') sideEdit(at, (x, g) => { delete g.len; delete g.off; }, 'windows along the whole face');
   else if (act === 'sw-sides') sideEdit(at, (x) => { x.zones[i].linkFaces = el.checked; }, el.checked ? 'applied to all faces' : 'faces kept apart');
   else if (act === 'sw-above') sideEdit(at, (x) => { x.zones[i].linkAbove = el.checked; }, el.checked ? 'applied to the zones above' : 'zones above kept apart');
   else if (act === 'sw-break') sideEdit(at, (x, g) => breakWindow(g, k), `window ${k + 1} broken from its array`);
@@ -2246,6 +2294,7 @@ $('new-massing').addEventListener('click', () => {
   $('export').disabled = false;
   render(model);
   $('mass-open').hidden = false;
+  $('model-tools').hidden = false;
   $('massing').hidden = false;
   massingUI.reset(); massingUI.render();
 });

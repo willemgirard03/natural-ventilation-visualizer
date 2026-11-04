@@ -95,17 +95,33 @@ export function windowHeights(g, top) {
   return glassHeights(u, top);
 }
 
-// How the windows are set out along a face of length `len`: by number, they divide it evenly; by
-// spacing, they stand at that pitch, centred on the face, each wholly on it. The count, the pitch and
-// the centre of the first, from the middle of the face.
+// The stretch of a face of length `len` an array is set out on, from the face's start: the whole face,
+// or the array's own length (`len`), justified to the face's left, centre or right (`just`, seen from
+// outside) and moved `off` from there (in from the left or right end; to the right of the middle).
+export const JUSTS = [['left', 'Left'], ['centre', 'Centre'], ['right', 'Right']];
+export function arraySpan(g, len) {
+  const L = Math.min(len, g.len > 0 ? g.len : len), off = g.off || 0;
+  const s0 = g.just === 'left' ? off : g.just === 'right' ? len - off - L : (len - L) / 2 + off;
+  const a = clamp(s0, 0, len - L);
+  return [a, a + L];
+}
+// How the windows are set out along a face of length `len`: within the array's stretch, by number
+// they divide it evenly; by spacing, they stand at that pitch, centred on it, each wholly on it. The
+// count, the pitch and the centre of the first, from the middle of the face.
 export function unitLayout(g, len) {
+  const [s0, s1] = arraySpan(g, len), L = s1 - s0, mid = (s0 + s1) / 2 - len / 2;
   if (g.winBy !== 'spacing') {
     const n = Math.max(1, Math.round(g.winN));
-    return { n, pitch: len / n, first: -len / 2 + len / n / 2 };
+    return { n, pitch: L / n, first: mid - L / 2 + L / n / 2, span: [s0, s1] };
   }
   const sp = Math.max(0.3, g.winSp), w = glassWidth(g, sp);
-  const n = Math.max(0, Math.floor((len - w) / sp + 1e-9) + 1);
-  return { n, pitch: sp, first: -((n - 1) * sp) / 2 };
+  const n = Math.max(0, Math.floor((L - w) / sp + 1e-9) + 1);
+  return { n, pitch: sp, first: mid - ((n - 1) * sp) / 2, span: [s0, s1] };
+}
+// Where an array's bays begin and end along its face, from the face's start: what its bracket spans.
+export function bayExtents(g, len) {
+  const { n, pitch, first } = unitLayout(g, len);
+  return n ? [first - pitch / 2 + len / 2, first + (n - 0.5) * pitch + len / 2] : arraySpan(g, len);
 }
 
 // A window of the array: the array's own, or as it was broken out.
@@ -116,11 +132,13 @@ export const unitGlazing = (g, i) => (g.broken && g.broken[i] ? { ...g, ...g.bro
 // wall's edges and of its neighbours.
 export function sideWindows(g, len, h, slab = 0.3) {
   if (!g || len <= 0) return [];
-  const { n, pitch, first } = unitLayout(g, len), top = Math.max(0.1, h - clamp(slab, 0, h - 0.1)), out = [];
+  const { n, pitch, first, span } = unitLayout(g, len), top = Math.max(0.1, h - clamp(slab, 0, h - 0.1)), out = [];
+  const a = Math.max(span[0] - len / 2, -len / 2 + WINDOW_EDGE), b = Math.min(span[1] - len / 2, len / 2 - WINDOW_EDGE);
   for (let i = 0; i < n; i++) {
     const u = unitGlazing(g, i), c = first + i * pitch;
-    // the room the window has: its bay, less half the gap to the next and the gap to a corner
-    const lo = Math.max(c - pitch / 2 + WINDOW_EDGE / 2, -len / 2 + WINDOW_EDGE), hi = Math.min(c + pitch / 2 - WINDOW_EDGE / 2, len / 2 - WINDOW_EDGE);
+    // the room the window has: its bay, less half the gap to the next, kept inside the array's stretch
+    // and clear of the face's corners
+    const lo = Math.max(c - pitch / 2 + WINDOW_EDGE / 2, a), hi = Math.min(c + pitch / 2 - WINDOW_EDGE / 2, b);
     const w = Math.min(glassWidth(u, pitch), hi - lo), mid = clamp(c + (u.offU || 0), lo + w / 2, hi - w / 2);
     const { sill, head } = windowHeights(u, top);
     const u0 = mid - w / 2, u1 = mid + w / 2;
@@ -646,10 +664,49 @@ export const setSpacing = (g, sp) => Object.assign(g, { winBy: 'spacing', winSp:
 // A window dragged along its face: the pitch the pointer implies (u from the face's middle), from the
 // first window, or from the last when the first is dragged. By number, the nearest count.
 export function dragPitch(m, i, k, idx, u) {
-  const g = m.zones[i].faces[k], len = faceLength(m, i, k), { n, pitch, first } = unitLayout(g, len);
+  const g = m.zones[i].faces[k], len = faceLength(m, i, k), { n, pitch, first, span } = unitLayout(g, len);
   if (n < 2) return;
   const last = first + (n - 1) * pitch, p = Math.max(0.3, idx > 0 ? (u - first) / idx : (last - u) / (n - 1));
-  if (g.winBy !== 'spacing') g.winN = clamp(Math.round(len / p), 1, 200); else g.winSp = Math.round(p / 0.05) * 0.05;
+  if (g.winBy !== 'spacing') g.winN = clamp(Math.round((span[1] - span[0]) / p), 1, 200); else g.winSp = Math.round(p / 0.05) * 0.05;
+}
+// An array's stretch set to run from a to b along its face (from the face's start), keeping its
+// justification: its length, and its offset from the edge it is justified to. By spacing, its length
+// is whole bays. A stretch the whole face long is the face again (no length of its own).
+export function setArraySpan(m, i, k, a, b) {
+  const g = m.zones[i].faces[k], len = faceLength(m, i, k);
+  a = clamp(a, 0, len); b = clamp(b, 0, len);
+  if (b < a) [a, b] = [b, a];
+  let L = Math.max(0.3, b - a);
+  if (g.winBy === 'spacing') { const n = Math.max(1, Math.round(L / g.winSp)); L = Math.min(n * g.winSp, len); }
+  if (L >= len - 1e-6) { delete g.len; delete g.off; return; }
+  a = clamp(a, 0, len - L);
+  g.len = +L.toFixed(4);
+  g.off = +(g.just === 'left' ? a : g.just === 'right' ? len - a - L : a + L / 2 - len / 2).toFixed(4);
+}
+// An array justified anew, its stretch kept where it is.
+export function setJustify(m, i, k, just) {
+  const g = m.zones[i].faces[k], len = faceLength(m, i, k), [a, b] = arraySpan(g, len);
+  g.just = just;
+  if (g.len > 0) g.off = +(just === 'left' ? a : just === 'right' ? len - b : (a + b) / 2 - len / 2).toFixed(4);
+}
+// The part of an array that stands on the stretch u0..u1 of its face (from the face's start), as an
+// array of its own for that stretch as a face: the windows wholly on it keep their places (set out by
+// spacing at the array's pitch, its bays from the first kept to the last, justified left of the new
+// face), their broken-out types with them; none there, null. For a face split in two.
+export function splitArray(g, len, u0, u1) {
+  if (!g) return null;
+  const { n, pitch, first } = unitLayout(g, len), keep = [];
+  for (let j = 0; j < n; j++) {
+    const c = first + j * pitch + len / 2, w = glassWidth(unitGlazing(g, j), pitch);
+    if (c - w / 2 >= u0 - 1e-9 && c + w / 2 <= u1 + 1e-9) keep.push(j);
+  }
+  if (!keep.length) return null;
+  const a = first + keep[0] * pitch + len / 2 - pitch / 2, b = first + keep[keep.length - 1] * pitch + len / 2 + pitch / 2;
+  const s0 = clamp(a - u0, 0, u1 - u0), L = Math.min(b - a, u1 - u0 - s0);
+  const out = { ...structuredClone(g), winBy: 'spacing', winSp: pitch, just: 'left', len: +L.toFixed(4), off: +s0.toFixed(4), broken: {} };
+  keep.forEach((j, q) => { if (g.broken?.[j]) out.broken[q] = structuredClone(g.broken[j]); });
+  if (Math.abs(L - (u1 - u0)) < 1e-6) { delete out.len; delete out.off; }
+  return out;
 }
 // How the type's edges hold (Fixed, Offsets, Proportional), switched without moving the glass.
 export function setWindowSize(m, i, k, w, mode) {
@@ -709,6 +766,85 @@ export function spreadSide(m, i, k) {
     }
   }
   for (const [j, q] of to) m.zones[j].faces[q] = g ? structuredClone(g) : null;
+}
+
+// ---------- zones added and split ----------
+
+// A zone of `w` x `d` m added against face k of zone i, on its levels, the face's middle at `u` along it
+// (from its start) where it fits: its own face against that face, out from it. Or stacked on zone i's
+// roof (k 'roof'), centred at plate point `at`, its axes the zone's, from the zone's top level to the
+// next one up (a new level `h` m higher when there is none). Its faces bare. Returns its index, or -1
+// where it would overlap a zone on the same levels.
+export function addZone(m, i, k, { u = null, at = null, w = 3, d = 3, h = 3 } = {}) {
+  const z = m.zones[i];
+  let plate, base = z.base, top = z.top;
+  if (k === 'roof') {
+    base = z.top;
+    top = m.levels.findIndex((lv, L) => L > base);
+    if (top < 0) { m.levels.push({ name: levelName(m.levels.length), z: +(m.levels[base].z + h).toFixed(6) }); top = m.levels.length - 1; }
+    const c = at || centroid(z.plate);
+    plate = [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]].map((p) => { const [x, y] = turnPlan(p, z.rot || 0); return [R6(x + c[0]), R6(y + c[1])]; });
+  } else {
+    const { A, U, n } = faceAxes(m, i, k), len = faceLength(m, i, k), half = Math.min(w, len) / 2;
+    const c = clamp(u ?? len / 2, half, len - half), a = [A[0] + U[0] * (c - half), A[1] + U[1] * (c - half)], b = [A[0] + U[0] * (c + half), A[1] + U[1] * (c + half)];
+    // counterclockwise: out from the face, along, and back along it the other way
+    plate = [a, [a[0] + n[0] * d, a[1] + n[1] * d], [b[0] + n[0] * d, b[1] + n[1] * d], b].map(([x, y]) => [R6(x), R6(y)]);
+  }
+  const lv = (L) => m.levels[L].z, overlaps = m.zones.some((y) => lv(y.base) < lv(top) - 1e-6 && lv(y.top) > lv(base) + 1e-6 && intersect(y.plate, plate).some((P) => Math.abs(polyArea(P)) > 1e-3));
+  if (overlaps) return -1;
+  m.zones.push({ name: null, base, top, rot: z.rot || 0, plate, faces: plate.map(() => null) });
+  return m.zones.length - 1;
+}
+
+// Zone i cut in two by a vertical plane through plan points a and b (plate coordinates): the part to
+// the left of a -> b stays zone i, the part to the right becomes a new zone on the same levels, with
+// the same turn. Each face cut keeps, on each part, the windows wholly on that part (splitArray); the
+// new faces along the cut are bare (they become the walls between the two). Returns the new zone's
+// index, or -1 where the plane misses the zone or leaves a sliver.
+export function splitZone(m, i, a, b) {
+  const z = m.zones[i], d = [b[0] - a[0], b[1] - a[1]], l = Math.hypot(d[0], d[1]);
+  if (l < 1e-9) return -1;
+  const D = [d[0] / l, d[1] / l], N = [D[1], -D[0]], far = 1e4;
+  const half = (side) => {
+    const o = [a[0] - D[0] * far, a[1] - D[1] * far], e = [a[0] + D[0] * far, a[1] + D[1] * far], s = side * far;
+    return [o, e, [e[0] - N[0] * s, e[1] - N[1] * s], [o[0] - N[0] * s, o[1] - N[1] * s]];
+  };
+  const left = intersect(z.plate, half(1)), right = intersect(z.plate, half(-1));
+  if (left.length !== 1 || right.length !== 1 || Math.abs(polyArea(left[0])) < 0.5 || Math.abs(polyArea(right[0])) < 0.5) return -1;
+  const facesOf = (P) => P.map((p, q) => {
+    // the original face this edge lies on, and where along it: its windows carried over
+    const r = P[(q + 1) % P.length];
+    for (let k = 0; k < z.plate.length; k++) {
+      const { A, U } = faceAxes(m, i, k), len = faceLength(m, i, k), off = (x) => (x[0] - A[0]) * U[1] - (x[1] - A[1]) * U[0], at = (x) => (x[0] - A[0]) * U[0] + (x[1] - A[1]) * U[1];
+      if (Math.abs(off(p)) > 1e-4 || Math.abs(off(r)) > 1e-4) continue;
+      const u0 = at(p), u1 = at(r);
+      if (u1 <= u0 || u0 < -1e-4 || u1 > len + 1e-4) continue;
+      return u0 < 1e-4 && u1 > len - 1e-4 ? structuredClone(z.faces[k]) : splitArray(z.faces[k], len, u0, u1);
+    }
+    return null;
+  });
+  const start = (P) => { // begin the footprint at the corner nearest where the old one began, so its faces keep their order
+    const q = P.reduce((best, p, j) => (Math.hypot(p[0] - z.plate[0][0], p[1] - z.plate[0][1]) < Math.hypot(P[best][0] - z.plate[0][0], P[best][1] - z.plate[0][1]) ? j : best), 0);
+    return [...P.slice(q), ...P.slice(0, q)].map(([x, y]) => [R6(x), R6(y)]);
+  };
+  const L = start(left[0]), R = start(right[0]);
+  const fl = facesOf(L), fr = facesOf(R);
+  m.zones.push({ ...structuredClone(z), name: null, plate: R, faces: fr, cells: undefined, linkFaces: false, linkAbove: false });
+  Object.assign(z, { plate: L, faces: fl, cells: undefined });
+  return m.zones.length - 1;
+}
+
+// A zone's re-entrant corners (inside angle over 180°): where a split can start. Plate points with the
+// directions of the faces meeting there, pointing into the zone.
+export function reentrantCorners(m, i) {
+  const P = m.zones[i].plate, n = P.length, out = [];
+  P.forEach((p, k) => {
+    const a = P[(k - 1 + n) % n], b = P[(k + 1) % n], u = [p[0] - a[0], p[1] - a[1]], v = [b[0] - p[0], b[1] - p[1]];
+    if (u[0] * v[1] - u[1] * v[0] >= -1e-9) return; // a right turn, counterclockwise, is a re-entrant corner
+    const lu = Math.hypot(...u), lv = Math.hypot(...v);
+    out.push({ k, p, dirs: [[u[0] / lu, u[1] / lu], [-v[0] / lv, -v[1] / lv]] });
+  });
+  return out;
 }
 
 // ---------- a zone's handles ----------

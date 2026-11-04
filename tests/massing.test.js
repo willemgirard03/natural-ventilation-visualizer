@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { importEpJSON } from '../src/model/import-epjson.js';
 import { enclosedVolume } from '../src/model/geometry.js';
-import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0, applyMassing, setWindowSize, setWindowFigure, breakWindow, applyToArray, dragPitch, addWindows, upgradeMassing, MASSING_SETTINGS0, zoneHeight, faceLength, moveLevel, pushFace, WINDOWS0 } from '../src/model/massing.js';
+import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0, applyMassing, setWindowSize, setWindowFigure, breakWindow, applyToArray, dragPitch, addWindows, upgradeMassing, MASSING_SETTINGS0, zoneHeight, faceLength, moveLevel, pushFace, WINDOWS0,
+  addZone, splitZone, reentrantCorners, setArraySpan, setJustify, arraySpan, bayExtents } from '../src/model/massing.js';
 // A massing from older storeys (rectangular plates stacked), as the tool upgrades them.
 const stack = (...storeys) => upgradeMassing({ name: 'Floor', rot: 0, storeys, settings: MASSING_SETTINGS0() });
 import { edit } from '../src/model/edit.js';
@@ -162,4 +163,52 @@ test('levels move the zones on them: a roof pushed lifts the levels above, a flo
   // a face pushed out moves its edge; one pushed past folding is held
   near(pushFace(m, 0, 1, 2), 2); near(faceLength(m, 0, 0), 22, 1e-9);
   assert.ok(pushFace(m, 0, 1, -30) > -22);
+});
+
+test('a zone added against a face or on a roof abuts, and never overlaps one on its levels', () => {
+  const m = massing0();
+  const j = addZone(m, 0, 1, { u: 5 });
+  assert.deepEqual(m.zones[j].plate, [[10, -1.5], [13, -1.5], [13, 1.5], [10, 1.5]]);
+  assert.deepEqual([m.zones[j].base, m.zones[j].top], [0, 1]);
+  assert.equal(addZone(m, 0, 1, { u: 5 }), -1, 'a second one there would overlap it');
+  // on the top roof: a new level 3 m up
+  const r = addZone(m, 1, 'roof', { at: [0, 0] });
+  assert.deepEqual(m.levels.map((l) => l.z), [0, 3.5, 7, 10]);
+  assert.deepEqual([m.zones[r].base, m.zones[r].top], [2, 3]);
+  const model = importEpJSON(massingEpJSON(m));
+  assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
+  near(volumes(model)[`Floor1_${j}`], 9 * 3.5, 1e-4);
+});
+
+test('a zone split keeps each window wholly on one part where it was, and pairs the new walls', () => {
+  const m = massing0();
+  const before = massingGeometry(m)[0].windows.filter((w) => w.face === 0).map((w) => w.vertices[0][0]);
+  const n = splitZone(m, 0, [3, -10], [3, 10]);
+  assert.ok(n > 0);
+  const g = massingGeometry(m), after = [...g[0].windows, ...g[n].windows].filter((w) => w.vertices[0][1] < -4.9).map((w) => w.vertices[0][0]).sort((a, b) => a - b);
+  // the window across the cut (1.5 to 3.5 m) is gone, the others stay put
+  assert.deepEqual(after.map((x) => +x.toFixed(6)), before.filter((x) => x + 2 <= 3 || x >= 3).map((x) => +x.toFixed(6)));
+  const model = importEpJSON(massingEpJSON(m));
+  assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
+  const v = volumes(model);
+  near(v.Floor1_0 + v[`Floor1_${n}`], 200 * 3.5, 1e-4);
+  // a split that misses the zone is refused
+  assert.equal(splitZone(m, 0, [50, -10], [50, 10]), -1);
+  // an L's re-entrant corner, and the faces meeting there pointing in
+  const L = { zones: [{ plate: [[0, 0], [10, 0], [10, 5], [5, 5], [5, 10], [0, 10]] }] };
+  assert.deepEqual(reentrantCorners(L, 0).map((c) => c.p), [[5, 5]]);
+});
+
+test('an array has a length of its own, justified on its face; its bays are what its bracket spans', () => {
+  const m = massing0(), g = m.zones[0].faces[0]; // 4 by number on 20 m
+  assert.deepEqual(bayExtents(g, 20), [0, 20]);
+  setArraySpan(m, 0, 0, 2, 12); // by number: 4 windows over 10 m from 2 m in
+  assert.deepEqual(arraySpan(g, 20), [2, 12]);
+  setJustify(m, 0, 0, 'right'); assert.deepEqual(arraySpan(g, 20), [2, 12]); // the stretch stays where it is
+  near(g.off, 8, 1e-9);
+  Object.assign(g, { winBy: 'spacing', winSp: 3 });
+  setArraySpan(m, 0, 0, 2, 12.4); // by spacing: whole bays
+  const [a, b] = arraySpan(g, 20); near(b - a, 9, 1e-9);
+  near(bayExtents(g, 20)[1] - bayExtents(g, 20)[0], 9, 1e-9);
+  setArraySpan(m, 0, 0, -5, 30); assert.ok(!('len' in g), 'the whole face again');
 });

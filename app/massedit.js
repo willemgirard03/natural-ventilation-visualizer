@@ -29,7 +29,7 @@
 import * as THREE from 'three';
 import { askNumber } from './sections.js';
 import { AXIS, CLICK_PX, gripMark, gripAt, cursorFor, dragLength, dragAngle, angleOf, dragOnPlane, screenDir, dim, label, line, head, path, poly, circle, arrayBracket } from './handles.js';
-import { zoneFrame, pushFace, moveStorey, turnZone, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows, faceLength, zoneHeight, faceBearing, compassWord } from '../src/model/massing.js';
+import { bayExtents, setArraySpan, zoneFrame, pushFace, moveStorey, turnZone, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows, faceLength, zoneHeight, faceBearing, compassWord } from '../src/model/massing.js';
 
 // A face named for the way it looks ('south face'), or the roof or floor.
 const faceName = (m, i, f) => (f === 'roof' || f === 'floor' ? f : `${{ N: 'north', NE: 'north-east', E: 'east', SE: 'south-east', S: 'south', SW: 'south-west', W: 'west', NW: 'north-west' }[compassWord(faceBearing(m, i, f))]} face`);
@@ -116,7 +116,7 @@ export class MassingEditor {
       grips.push({ p, key: { kind: 'face', face: f.key }, from: 0, dir: screenDir(P, f.at, f.normal), low });
       return gripMark(p[0], p[1], half);
     };
-    if (this.target.window !== undefined) g += this.isolated() ? '' : this.bracket(m, i, face); // a window: its array alone
+    if (this.target.window !== undefined) g += this.isolated() ? '' : this.bracket(m, i, face, grips); // a window: its array alone
     else if (face === null) {
       // the floor: its gumball, and the floor's own grip in the quarter the gumball leaves free
       const C = [fr.centre[0], fr.centre[1], fr.z0], ex = fr.x, ey = fr.y;
@@ -136,7 +136,7 @@ export class MassingEditor {
       if (f) {
         g += this.edges(grips, fr, face, i);
         g += faceGrip(f);
-        if (Number.isInteger(face)) g += this.bracket(m, i, face);
+        if (Number.isInteger(face)) g += this.bracket(m, i, face, grips);
       }
     }
     if (this.pitchDraft) g += this.sideOutlines(this.pitchDraft);
@@ -174,7 +174,9 @@ export class MassingEditor {
 
   // A side's array bracketed: a dotted line through its windows' middles 0.6 m out from the facade, at
   // the zone's height less 150 mm or 450 mm over the heads, a tick at each window, its number and spacing.
-  bracket(m, i, f) {
+  // Its line runs over the bays, end to end, a tick at each bay's edge; a grip at each end sets the
+  // array's length (the other end held), and typed with a click.
+  bracket(m, i, f, grips) {
     const z = m.zones[i], g = z.faces[f];
     if (!g) return '';
     const fr = zoneFrame(m, i), A = fr.corners[f], B = fr.corners[(f + 1) % fr.corners.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
@@ -183,8 +185,16 @@ export class MassingEditor {
     const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len], n = fr.faces.find((x) => x.key === f).normal, mid = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
     const h = zoneHeight(m, i), top = h - (z.slab || 0), heads = Array.from({ length: lay.n }, (_, j) => windowHeights(unitOf(g, j), top).head);
     const v = Math.min(h - 0.15, Math.max(...heads) + 0.45);
-    const pts = Array.from({ length: lay.n }, (_, j) => { const u = lay.first + j * lay.pitch; return this.P([mid[0] + U[0] * u + n[0] * 0.6, mid[1] + U[1] * u + n[1] * 0.6, fr.z0 + v]); });
-    return arrayBracket(pts, true, lay.n, lay.pitch, 'window');
+    const at = (u) => [mid[0] + U[0] * u + n[0] * 0.6, mid[1] + U[1] * u + n[1] * 0.6, fr.z0 + v];
+    const pts = Array.from({ length: lay.n + 1 }, (_, j) => this.P(at(lay.first + (j - 0.5) * lay.pitch)));
+    let out = arrayBracket(pts, true, lay.n, lay.pitch, 'window');
+    if (this.draft || !grips) return out;
+    [lay.first - lay.pitch / 2, lay.first + (lay.n - 0.5) * lay.pitch].forEach((u, end) => {
+      const p = this.P(at(u));
+      grips.push({ p, key: { kind: 'span', end }, from: 0, dir: screenDir(this.P, at(u), [U[0], U[1], 0]) });
+      out += gripMark(p[0], p[1]);
+    });
+    return out;
   }
 
   // A face's frame: its middle and its run (model axes) and the zone's floor level.
@@ -302,6 +312,12 @@ export class MassingEditor {
   apply(m, key, x) {
     const i = this.target.zone;
     if (key.kind === 'face') pushFace(m, i, key.face, x);
+    else if (key.kind === 'span') {
+      // an end of the array's bays dragged along its face, the other end held
+      const f = this.target.face, [a, b] = bayExtents(m.zones[i].faces[f], faceLength(m, i, f));
+      setArraySpan(m, i, f, key.end ? a : a + x, key.end ? b + x : b);
+      spreadSide(m, i, f);
+    }
     else if (key.kind === 'move') moveStorey(m, i, key.axis, x);
     else if (key.kind === 'free') { moveStorey(m, i, 'x', x[0]); moveStorey(m, i, 'y', x[1]); }
     else if (key.kind === 'rot') turnZone(m, i, +((((m.zones[i].rot || 0) - x + 540) % 360) - 180).toFixed(3)); // the arc runs from x toward y: anticlockwise
@@ -309,6 +325,7 @@ export class MassingEditor {
   }
   what(key) {
     const s = `zone ${this.target.zone + 1}`;
+    if (key.kind === 'span') return `${faceName(this.massing(), this.target.zone, this.target.face)}: window array length set`;
     return key.kind === 'face' ? `${s} ${faceName(this.massing(), this.target.zone, key.face)} pushed or pulled` : key.kind === 'rot' ? `${s} turned` : `${s} moved`;
   }
 
@@ -365,6 +382,14 @@ export class MassingEditor {
   // A handle clicked rather than dragged: how far to push, move or turn.
   typeHandle(e, key) {
     if (key.kind === 'free') return;
+    if (key.kind === 'span') {
+      const i = this.target.zone, f = this.target.face, m0 = this.massing(), [a, b] = bayExtents(m0.zones[i].faces[f], faceLength(m0, i, f));
+      askNumber(this.view.container, e, `array length mm, now ${Math.round((b - a) * 1000)}`, (x) => this.onChange((m) => {
+        setArraySpan(m, i, f, key.end ? a : b - x / 1000, key.end ? a + x / 1000 : b);
+        spreadSide(m, i, f);
+      }, this.what(key)));
+      return;
+    }
     const label = key.kind === 'rot' ? 'turn °, anticlockwise' : key.kind === 'move' ? `move mm along ${key.axis}` : `push or pull the ${faceName(this.massing(), this.target.zone, key.face)}, mm`;
     askNumber(this.view.container, e, label, (x) => this.onChange((m) => this.apply(m, key, key.kind === 'rot' ? x : x / 1000), this.what(key)));
   }

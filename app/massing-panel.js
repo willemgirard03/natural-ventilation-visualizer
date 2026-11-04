@@ -4,7 +4,7 @@
 // change goes through `change`, which rewrites the model from the massing (applyMassing) as one
 // undoable edit.
 
-import { WINDOWS0, unitLayout, sideWindows, setWindowFigure, setWindowSize, spreadSide, moveLevel, faceLength, zoneHeight, faceBearing, compassWord, polyArea, levelName } from '../src/model/massing.js';
+import { massingGeometry, WINDOWS0, unitLayout, sideWindows, setWindowFigure, setWindowSize, spreadSide, moveLevel, faceLength, zoneHeight, faceBearing, compassWord, polyArea, levelName } from '../src/model/massing.js';
 import { SIZES } from '../src/model/windows.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -47,8 +47,9 @@ export function massingPanel(box, { get, change }) {
     const lvOpts = (now, from, to) => m.levels.map((lv, L) => (L >= from && L <= to ? `<option value="${L}"${L === now ? ' selected' : ''}>${esc(lv.name || levelName(L))}</option>` : '')).join('');
     h += '<table class="libtable mstable"><thead><tr><th title="Click a zone to set its windows">Zone</th><th title="The level it stands on">Base</th><th title="The level its roof reaches">Top</th>'
       + '<th class="num" title="Its floor area">Area<span class="unit"> m²</span></th><th class="num" title="Its windows, all faces">Windows</th><th></th></tr></thead><tbody>';
+    const made = massingGeometry(m); // the windows as written: none where a face meets another zone
     m.zones.forEach((x, i) => {
-      const n = x.plate.reduce((a, _, k) => a + sideWindows(x.faces[k], faceLength(m, i, k), zoneHeight(m, i), x.slab).length, 0);
+      const n = made[i].windows.length;
       h += `<tr class="${i === sel ? 'on' : ''}" data-zn="${i}"><td><button type="button" class="linkbtn" data-act="pick" data-v="${i}" title="Set this zone's windows">${zoneLabel(i)}</button></td>`
         + `<td><select class="popsel" data-act="zone-base">${lvOpts(x.base, 0, x.top - 1)}</select></td><td><select class="popsel" data-act="zone-top">${lvOpts(x.top, x.base + 1, m.levels.length - 1)}</select></td>`
         + `<td class="num">${fmt(Math.abs(polyArea(x.plate)), 1)}</td><td class="num">${n}</td>`
