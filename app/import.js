@@ -102,9 +102,9 @@ function candidatesAt(e) {
 function edgesOf(c) {
   const o = view.origin, pos = [], seen = new Set();
   const polys = c.kind === 'shading' ? model.shading.filter((x) => x.name === c.name) : view.find(c.name)?.polys || [];
-  // with thickness: the edges of the solids the walls are drawn as
-  const thick = c.kind !== 'shading' && view.outlineOf(polys);
-  if (thick) return thick;
+  // with thickness: the outer bounds of the solids the walls are drawn as (a window or door: its own outline)
+  const thick = !['shading', 'window', 'door'].includes(c.kind) && view.outerOutlineOf(`${c.kind}:${c.name}`, polys);
+  if (thick?.length) return thick;
   for (const { vertices: v } of polys) {
     for (let i = 0; i < v.length; i++) {
       const a = v[i], b = v[(i + 1) % v.length], k = [a, b].map((p) => p.map((x) => x.toFixed(3)).join()).sort().join('|');
@@ -608,7 +608,8 @@ for (const b of document.querySelectorAll('[data-add]')) {
 // Opening and closing windows one by one or room by room, from the details of what is selected.
 $('info').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-act]');
-  if (!b || !airflow || !['window', 'room'].includes(b.dataset.act)) return;
+  if (!b || !airflow || !['window', 'room', 'wall'].includes(b.dataset.act)) return;
+  if (b.dataset.act === 'wall') for (const n of model.surfaces[b.dataset.surface].windows) windowSet.set(n, b.dataset.open === '1');
   if (b.dataset.act === 'window') windowSet.set(b.dataset.name, b.dataset.open === '1');
   if (b.dataset.act === 'room') {
     roomSet.set(b.dataset.zone, b.dataset.open === '1');
@@ -865,7 +866,7 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
 // (as the Solar Shading Explorer's): its settings to change, the air through it, and any checks that
 // name it. The pop-up keeps beside its selection on screen, clear of it, as the view turns, until it
 // is dragged somewhere; then it stays there while the same thing is selected.
-let popKey = null, popMin = false, layersOpen = false, popPinned = false;
+let popKey = null, popMin = false, layersOpen = false, popPinned = false, popShut = null; // popShut: the selection whose pop-up was closed
 function showInfo(found) {
   const box = $('info');
   // a window of a massing: the Massing window turns to its storey and side
@@ -876,15 +877,18 @@ function showInfo(found) {
   if (mt) massEdit.start(mt); else massEdit.stop();
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
-  if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; return; }
+  if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; popShut = null; return; }
   const { kind, item } = found, key = `${kind}:${item.name}`;
+  // its pop-up closed: the selection stays, the pop-up stays shut until another is selected
+  if (key === popShut) { box.hidden = true; return; }
+  popShut = null;
   // Not redrawn under a figure being typed, unless the selection changed.
   if (key === popKey && box.contains(document.activeElement) && document.activeElement.matches('input:not([type=range]), select')) return;
   const { title, rows } = popContent(kind, item);
   box.dataset.kind = kind;
   box.innerHTML = `<div class="pophd" title="Drag to move"><span class="popttl">${title}</span><span class="popbtns">`
     + `<button type="button" data-pop="min" title="${popMin ? 'Show the details' : 'Fold the details away'}">${popMin ? '▸' : '–'}</button>`
-    + '<button type="button" data-pop="close" title="Close (Esc)">×</button></span></div>'
+    + '<button type="button" data-pop="close" title="Close this pop-up; the selection stays (Esc deselects)">×</button></span></div>'
     + `<div class="popbody"${popMin ? ' hidden' : ''}>${rows.map((r) => (r.startsWith('<div') ? r : `<div>${r}</div>`)).join('')}</div>`;
   box.hidden = false;
   if (key !== popKey) { popKey = key; popPinned = false; placePop(); }
@@ -925,17 +929,25 @@ function followPop() {
       x0 = Math.min(x0, s2.x); x1 = Math.max(x1, s2.x); y0 = Math.min(y0, s2.y); y1 = Math.max(y1, s2.y);
     }
   }
+  // A massing's handles and figures count as part of it.
+  if (massEdit.active && massEdit.svg.childElementCount) {
+    const b = massEdit.svg.getBBox();
+    x0 = Math.min(x0, b.x); x1 = Math.max(x1, b.x + b.width); y0 = Math.min(y0, b.y); y1 = Math.max(y1, b.y + b.height);
+  }
   const pad = winEdit.active ? 64 : 14, v = $('viewer'), W = v.clientWidth, H = v.clientHeight, w = box.offsetWidth, h = box.offsetHeight;
-  let x = x1 + pad, y = Math.max(8, Math.min((y0 + y1) / 2 - h / 2, H - h - 8));
-  if (x + w > W - 8) x = x0 - pad - w;
-  if (x < 8) { x = Math.max(8, Math.min((x0 + x1) / 2 - w / 2, W - w - 8)); y = y1 + pad + h < H - 8 ? y1 + pad : Math.max(8, y0 - pad - h); }
+  const cy = Math.max(8, Math.min((y0 + y1) / 2 - h / 2, H - h - 8)), cx = Math.max(8, Math.min((x0 + x1) / 2 - w / 2, W - w - 8));
+  // Right of it, left, below, above; where none fits clear, the place that covers least of it.
+  const places = [[x1 + pad, cy], [x0 - pad - w, cy], [cx, y1 + pad], [cx, y0 - pad - h]]
+    .map(([px, py]) => [Math.max(8, Math.min(px, W - w - 8)), Math.max(8, Math.min(py, H - h - 8))]);
+  const cover = ([px, py]) => Math.max(0, Math.min(px + w, x1) - Math.max(px, x0)) * Math.max(0, Math.min(py + h, y1) - Math.max(py, y0));
+  const [x, y] = places.reduce((a, b) => (cover(b) < cover(a) ? b : a));
   const l = `${Math.round(x)}px`, t = `${Math.round(y)}px`;
   if (box.style.left !== l || box.style.top !== t) Object.assign(box.style, { left: l, top: t, bottom: '' });
 }
 $('info').addEventListener('click', (e) => {
   const b = e.target.closest('[data-pop]');
   if (!b) return;
-  if (b.dataset.pop === 'close') { winEdit.stop(); view.sections.select(null); view.select(null); return; }
+  if (b.dataset.pop === 'close') { popShut = popKey; $('info').hidden = true; return; }
   popMin = !popMin;
   showInfo(current());
 });
@@ -984,7 +996,7 @@ function popContent(kind, item) {
     }
     if (kind === 'zone') rows.push(...roomButton(item.name));
     if (kind === 'surface' || kind === 'window') rows.push(`Room: ${co2Line(item.zone)}`);
-    if (kind === 'surface') rows.push(...roomButton(item.zone));
+    if (kind === 'surface') rows.push(...wallButton(item));
   }
   for (const c of model.checks.filter((c) => c.objects.includes(item.name))) {
     const cls = c.level === 'error' ? 'error-text' : c.level === 'warning' ? 'warning-text' : 'muted';
@@ -1235,7 +1247,14 @@ function amountText(l) {
   return `${fmt((100 * angle) / maxAngleOf(l), 0)}% of its travel: ${fmt(angle, 0)}°, ${fmt(100 * now, 0)}% free (EnergyPlus opening factor ${fmt(now, 2)})`;
 }
 
-// A button to open or close all of a room's operable windows, for the room or one of its surfaces.
+// A button to open or close all the operable windows on one wall.
+function wallButton(surface) {
+  const own = net.links.filter((l) => l.control === 'zone' && surface.windows.includes(l.name));
+  if (!airflow || !own.length) return [];
+  const anyOpen = own.some((l) => airflow.conditions.open[l.name] > 0);
+  return [`<button class="quiet" data-act="wall" data-surface="${esc(surface.name)}" data-open="${anyOpen ? 0 : 1}">${anyOpen ? 'Close' : 'Open'} the windows on this wall</button>`];
+}
+// A button to open or close all of a room's operable windows.
 function roomButton(zone) {
   const own = net.links.filter((l) => l.control === 'zone' && l.from === zone);
   if (!airflow || !own.length) return [];

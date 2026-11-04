@@ -92,7 +92,12 @@ export class SkyDome {
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     this.svg.setAttribute('class', 'mhandles skyover');
     view.container.appendChild(this.svg);
-    this.svg.addEventListener('click', (e) => { if (e.target.closest('[data-edit]')) this.typeNorth(e); });
+    // taken on press, as the massing's figures are (the overlay is redrawn with every frame)
+    this.svg.addEventListener('pointerdown', (e) => {
+      if (!e.target.closest('[data-edit]') || e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation();
+      this.typeNorth(e);
+    });
     this.wire();
   }
 
@@ -185,7 +190,7 @@ export class SkyDome {
   // The labels, the sun and the knob, redrawn with the view.
   beforeRender() {
     const s = this.state;
-    if (!s || (!this.shown && !this.sunShown)) { this.svg.innerHTML = ''; this.marks = null; return; }
+    if (!s || (!this.shown && !this.sunShown)) { this.svg.innerHTML = this.html = ''; this.marks = null; return; }
     this.group.updateMatrixWorld();
     const R = s.R, out = [], P = this.P, on = (k) => this.shown && this.layers[k];
     const tag = (p, t, o) => { const q = P(p); if (q) out.push(label(q[0], q[1], t, o)); };
@@ -232,7 +237,8 @@ export class SkyDome {
         this.marks.knob = k; this.marks.arrow = [from, k];
       }
     }
-    this.svg.innerHTML = out.join('');
+    const html = out.join('');
+    if (this.html !== html) this.svg.innerHTML = this.html = html; // only when it changed
   }
 
   // What a press here would take: the sun, its ray, the north knob or its arrow.

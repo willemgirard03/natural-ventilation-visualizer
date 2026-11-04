@@ -397,6 +397,7 @@ export class View3D {
     const pos = [], col = [], owner = [], c = new THREE.Color();
     this.solids = []; // each thick surface's closed solid (triangles, view coordinates), for the cut caps
     this.solidOf = new Map(); // surface name -> its solid (both of a shared pair), for selection and hover
+    this.outerMemo = null;
     this.surfaces.forEach((s, k) => {
       const shared = s.boundary === 'Surface' && s.adjacentSurface;
       if (thick && shared && s.name > s.adjacentSurface) return; // drawn once for the pair
@@ -675,6 +676,44 @@ export class View3D {
       out.push(...e.getAttribute('position').array);
       g.dispose(); e.dispose();
     });
+    return out;
+  }
+
+  // Only the outer bounds of the solids: the edges between their outermost faces (a face is outer
+  // when nothing of the same solids lies in front of it), so reveals, inner faces and openings drop
+  // out. For the hover preview. Kept per name until the model or walls change.
+  outerOutlineOf(name, polys) {
+    const memo = (this.outerMemo ??= new Map());
+    if (memo.has(name)) return memo.get(name);
+    const solids = polys.map((p) => this.thickOf(p)).filter(Boolean);
+    if (!solids.length) { memo.set(name, null); return null; }
+    const V = (a, i) => new THREE.Vector3(a[i], a[i + 1], a[i + 2]), tris = [];
+    for (const s of solids) for (let i = 0; i + 8 < s.length; i += 9) {
+      const t = [V(s, i), V(s, i + 3), V(s, i + 6)], n = new THREE.Vector3().subVectors(t[1], t[0]).cross(new THREE.Vector3().subVectors(t[2], t[0]));
+      if (n.lengthSq() < 1e-12) continue;
+      tris.push({ t, n: n.normalize(), box: new THREE.Box3().setFromPoints(t) });
+    }
+    const ray = new THREE.Ray(), hit = new THREE.Vector3();
+    for (const a of tris) {
+      ray.origin.copy(a.t[0]).add(a.t[1]).add(a.t[2]).divideScalar(3).addScaledVector(a.n, 1e-3);
+      ray.direction.copy(a.n);
+      a.outer = !tris.some((b) => b !== a && ray.intersectsBox(b.box) && ray.intersectTriangle(b.t[0], b.t[1], b.t[2], false, hit));
+    }
+    // Each edge with the triangles on it: kept between two outer faces that meet at an angle, or at
+    // the solid's own boundary; dropped where it borders a face that is not outer (an opening's rim).
+    const key = (p) => `${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)}`, edges = new Map();
+    for (const a of tris) for (let k = 0; k < 3; k++) {
+      const p = a.t[k], q = a.t[(k + 1) % 3], ka = key(p), kb = key(q), id = ka < kb ? ka + '|' + kb : kb + '|' + ka;
+      if (!edges.has(id)) edges.set(id, { p, q, on: [] });
+      edges.get(id).on.push(a);
+    }
+    const out = [];
+    for (const { p, q, on } of edges.values()) {
+      if (!on.every((a) => a.outer)) continue;
+      if (on.length === 2 && on[0].n.dot(on[1].n) > Math.cos(THREE.MathUtils.degToRad(20))) continue;
+      out.push(p.x, p.y, p.z, q.x, q.y, q.z);
+    }
+    memo.set(name, out);
     return out;
   }
 

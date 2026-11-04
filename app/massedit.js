@@ -34,7 +34,14 @@ export class MassingEditor {
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     this.svg.setAttribute('class', 'mhandles');
     view.container.appendChild(this.svg);
-    this.svg.addEventListener('click', (e) => { const f = e.target.closest('[data-edit]'); if (f) this.typeFigure(e, f.dataset.edit); });
+    // A figure is taken on press: the overlay is redrawn with every frame while the air moves, so a
+    // press and its release can land on two different copies of it and never make a click.
+    this.svg.addEventListener('pointerdown', (e) => {
+      const f = e.target.closest('[data-edit]');
+      if (!f || e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation();
+      this.typeFigure(e, f.dataset.edit);
+    });
     this.wire();
   }
 
@@ -43,7 +50,7 @@ export class MassingEditor {
   stop() {
     if (!this.target) return;
     this.target = null; this.draft = null; this.grips = [];
-    this.svg.innerHTML = '';
+    this.svg.innerHTML = this.shown = '';
     this.view.render();
   }
   // The massing changed (an edit, undo or redo): the handles as it is now.
@@ -110,7 +117,7 @@ export class MassingEditor {
       }
     }
     this.grips = grips;
-    this.svg.innerHTML = g;
+    if (this.shown !== g) this.svg.innerHTML = this.shown = g; // only when it changed
     if (render) this.view.render();
   }
 

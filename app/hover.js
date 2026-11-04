@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 
-const LINE = '#4B5855';
+const LINE = '#2F6F68'; // --glass: the drawing style's colour for selection and editing
 
 export class HoverPick {
   // candidatesAt(event) -> [{ kind, name, label, polys }] under the pointer, the likeliest first;
