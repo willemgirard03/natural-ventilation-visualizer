@@ -3,6 +3,11 @@
 // click. A jamb grows the window both ways about its middle, at twice the pointer's run; the sill moves
 // with the head held, the head with the sill held. The glass itself drags across its wall.
 //
+// A window free to move (broken out of its array, or any window not in a massing's array) gets a gumball
+// at its middle: a red arrow along its wall and a blue arrow up, each moving it along that axis only; a
+// click on one types the move. The glass dragged moves along whichever axis the pointer takes first.
+// A window of an array has none: dragged, it sets the array's pitch instead (massedit.js).
+//
 // A window of a massing has a Size (sizeOf): its figures are then those that Size keeps - Fixed: width,
 // height, sill; Offsets: the gap to the slab, to its bay's edge, the sill; Proportional: shares of the
 // bay and the wall - and its bay is drawn dashed. Any other window shows Fixed's. A drag commits a new
@@ -11,7 +16,7 @@
 
 import * as THREE from 'three';
 import { askNumber } from './sections.js';
-import { gripMark, label, poly, CLICK_PX } from './handles.js';
+import { gripMark, label, poly, CLICK_PX, gumball3D, gripAt, AXIS } from './handles.js';
 
 const GRIP_HIT = 11, SNAP = 0.005; // m: drags move in 5 mm steps, 100 mm with Shift
 const BAD = '#C0442B';
@@ -108,6 +113,13 @@ export class WindowEditor {
     }
     g += poly(c, { fill: col, op: 0.42 }) + poly(c, { stroke: col, w: 3 }) + poly(c, { stroke: 'var(--panel)', w: 1.2, dash: '3 2.5' });
     for (const q of this.grips(r)) { const p = P(q.at); g += gripMark(p[0], p[1]); }
+    this.gum = [];
+    if (!sz || sz.free) {
+      const mid = this.at((r.s0 + r.s1) / 2, (r.z0 + r.z1) / 2), O = P(mid), right = new THREE.Vector3(...this.rect.frame.right);
+      const run = (v) => { const a = this.view.sections.screen(mid), b = this.view.sections.screen(mid.clone().add(v)); return [b.x - a.x, b.y - a.y]; };
+      g += gumball3D(this.gum, O, [{ key: 'along', from: 0, dir: run(right), col: AXIS.x }, { key: 'up', from: 0, dir: run(new THREE.Vector3(0, 0, 1)), col: AXIS.z }]);
+      this.gum = this.gum.filter((x) => x.arrow);
+    }
     g += this.figures(r, sz, floor, c);
     if (bad) { const p = P(this.at((r.s0 + r.s1) / 2, r.z1)); g += label(p[0], p[1] - 22, bad, { fill: BAD }); }
     if (this.shown !== g) this.svg.innerHTML = this.shown = g;
@@ -144,6 +156,10 @@ export class WindowEditor {
   handleAt(e) {
     if (!this.name) return null;
     const r = this.view.renderer.domElement.getBoundingClientRect(), m = new THREE.Vector2(e.clientX - r.left, e.clientY - r.top);
+    // the gumball's arrows first, but a grip's own square (the right jamb's can sit on the red arrow) wins
+    const near = this.grips().find((g) => this.screen(g.at).distanceTo(m) < 6);
+    const arrow = !near && this.gum?.length && gripAt(this.gum, [m.x, m.y]);
+    if (arrow) return { type: 'axis', axis: arrow.key };
     for (const g of this.grips()) if (this.screen(g.at).distanceTo(m) < GRIP_HIT) return { type: 'grip', k: g.k };
     const R = this.rect, c = [this.at(R.s0, R.z0), this.at(R.s1, R.z0), this.at(R.s1, R.z1), this.at(R.s0, R.z1)].map((p) => this.screen(p));
     let inside = false;
@@ -168,7 +184,7 @@ export class WindowEditor {
       if (!this.name) return;
       if (!drag) {
         const h = this.handleAt(e);
-        if (h) el.style.cursor = h.type === 'body' ? 'move' : h.k === 'sill' || h.k === 'head' ? 'ns-resize' : 'ew-resize';
+        if (h) el.style.cursor = h.type === 'body' ? 'move' : h.type === 'axis' ? (h.axis === 'up' ? 'ns-resize' : 'ew-resize') : h.k === 'sill' || h.k === 'head' ? 'ns-resize' : 'ew-resize';
         else if (el.style.cursor === 'move' || el.style.cursor.endsWith('-resize')) el.style.cursor = '';
         return;
       }
@@ -187,8 +203,11 @@ export class WindowEditor {
       const top = sz ? sz.top - (sz.slab ? 0 : 0.02) : Infinity, b0 = sz ? sz.bay[0] + 0.01 : -Infinity, b1 = sz ? sz.bay[1] - 0.01 : Infinity;
       const lim = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
       let r = { ...R };
-      if (drag.h.type === 'body') {
-        const s = lim(ds, b0 - R.s0, b1 - R.s1), z = lim(dz, (sz ? floor : -Infinity) - R.z0, top - R.z1);
+      if (drag.h.type === 'body' || drag.h.type === 'axis') {
+        // one axis at a time: the arrow's, or for the glass, the way the pointer first went
+        if (drag.h.type === 'body' && !drag.axis && (ds || dz) && (!sz || sz.free)) drag.axis = Math.abs(ds) >= Math.abs(dz) ? 'along' : 'up';
+        const axis = drag.h.type === 'axis' ? drag.h.axis : drag.axis;
+        const s = axis === 'up' ? 0 : lim(ds, b0 - R.s0, b1 - R.s1), z = axis === 'along' ? 0 : lim(dz, (sz ? floor : -Infinity) - R.z0, top - R.z1);
         r = this.clamp(this.name, { s0: R.s0 + s, s1: R.s1 + s, z0: R.z0 + z, z1: R.z1 + z });
       } else if (drag.h.k === 'sill') r.z0 = lim(R.z0 + dz, sz ? floor : -Infinity, R.z1 - 0.2);
       else if (drag.h.k === 'head') r.z1 = lim(R.z1 + dz, R.z0 + 0.2, top);
@@ -210,6 +229,14 @@ export class WindowEditor {
         this.draft = null;
         if (r && !this.problem(this.name, r)) this.onCommit(this.name, r);
         else this.draw();
+        return;
+      }
+      if (d.h.type === 'axis') {
+        const along = d.h.axis === 'along';
+        askNumber(this.view.container, e, along ? 'move along the wall, mm (+ right, seen from outside)' : 'move up, mm', (x) => {
+          const v = x / 1000, R = this.rect, r = this.clamp(this.name, along ? { ...R, s0: R.s0 + v, s1: R.s1 + v } : { ...R, z0: R.z0 + v, z1: R.z1 + v });
+          if (!this.problem(this.name, r)) this.onCommit(this.name, r);
+        }, true);
         return;
       }
       if (d.h.type === 'grip') {

@@ -896,6 +896,7 @@ export class View3D {
   }
 
   pickAt(e) {
+    this.clicked = true; // a click: a closed pop-up opens again on what it picks
     this.sections.select(null);
     const box = this.container.getBoundingClientRect();
     this.lastPick = [e.clientX - box.left, e.clientY - box.top]; // where the selection's pop-up opens

@@ -156,7 +156,7 @@ const winEdit = new WindowEditor(view, {
     if (!at) return null;
     const s = massing.storeys[at.storey], g = s.sides[at.side], len = at.side === 'N' || at.side === 'S' ? s.w : s.d;
     const lay = unitLayout(g, len), cc = lay.first + at.index * lay.pitch, mid = wallMiddle(name), u = unitOf(g, at.index);
-    return { size: u.size || (g.fillW || g.fillH ? 'offset' : 'fixed'), bay: [mid + Math.max(cc - lay.pitch / 2, -len / 2), mid + Math.min(cc + lay.pitch / 2, len / 2)], top: at.z0 + s.h - (s.slab || 0), slab: (s.slab || 0) > 0 };
+    return { free: !!g.broken?.[at.index], size: u.size || (g.fillW || g.fillH ? 'offset' : 'fixed'), bay: [mid + Math.max(cc - lay.pitch / 2, -len / 2), mid + Math.min(cc + lay.pitch / 2, len / 2)], top: at.z0 + s.h - (s.slab || 0), slab: (s.slab || 0) > 0 };
   },
   onFigure: (name, key, v) => {
     const at = massingWindow(massing, name);
@@ -930,10 +930,12 @@ function showInfo(found) {
   if (mt) massEdit.start(mt); else massEdit.stop();
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
-  if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; popShut = null; return; }
+  if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; popShut = null; view.clicked = false; return; }
   const { kind, item } = found, key = `${kind}:${item.name}`;
   // its pop-up closed: the selection stays, the pop-up stays shut until another is selected
-  if (key === popShut) { box.hidden = true; return; }
+  const clicked = view.clicked;
+  view.clicked = false;
+  if (key === popShut && !clicked) { box.hidden = true; return; }
   popShut = null;
   // Not redrawn under a figure being typed, unless the selection changed.
   if (key === popKey && box.contains(document.activeElement) && document.activeElement.matches('input:not([type=range]), select')) return;
