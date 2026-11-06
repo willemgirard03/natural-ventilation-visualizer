@@ -107,6 +107,20 @@ export function envelopeSolids(surfaces, origin, line) {
     for (const p of s.vertices) at.set(key(p), [...(at.get(key(p)) || []), i]);
     return { n, a, b };
   });
+  // A corner on the edge of another surface of its zone, not one of that surface's corners (a seam
+  // where a face is split in two meets a floor or roof drawn whole), meets that surface too.
+  const onEdge = (p, t) => t.vertices.some((a, k) => {
+    const b = t.vertices[(k + 1) % t.vertices.length], ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+    const l2 = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2, u = (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / (l2 || 1);
+    if (u <= 1e-6 || u >= 1 - 1e-6) return false;
+    return Math.hypot(ap[0] - u * ab[0], ap[1] - u * ab[1], ap[2] - u * ab[2]) < 1e-4;
+  });
+  surfaces.forEach((s, i) => {
+    for (const p of s.vertices) {
+      const list = at.get(keyOf(s)(p));
+      surfaces.forEach((t, j) => { if (j !== i && (t.zone ?? '') === (s.zone ?? '') && !list.includes(j) && onEdge(p, t)) list.push(j); });
+    }
+  });
   const o = new THREE.Vector3(...origin);
   return surfaces.map((s, i) => {
     const me = info[i], key = keyOf(s);

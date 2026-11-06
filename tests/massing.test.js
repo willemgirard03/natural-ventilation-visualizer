@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { importEpJSON } from '../src/model/import-epjson.js';
 import { enclosedVolume } from '../src/model/geometry.js';
 import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0, applyMassing, setWindowSize, setWindowFigure, breakWindow, applyToArray, dragPitch, addWindows, upgradeMassing, MASSING_SETTINGS0, zoneHeight, faceLength, moveLevel, pushFace, WINDOWS0,
-  addZone, splitZone, reentrantCorners, setArraySpan, setJustify, arraySpan, bayExtents } from '../src/model/massing.js';
+  addZone, splitZone, reentrantCorners, setArraySpan, setJustify, arraySpan, bayExtents, splitFace, extrudeFace } from '../src/model/massing.js';
 // A massing from older storeys (rectangular plates stacked), as the tool upgrades them.
 const stack = (...storeys) => upgradeMassing({ name: 'Floor', rot: 0, storeys, settings: MASSING_SETTINGS0() });
 import { edit } from '../src/model/edit.js';
@@ -211,4 +211,37 @@ test('an array has a length of its own, justified on its face; its bays are what
   const [a, b] = arraySpan(g, 20); near(b - a, 9, 1e-9);
   near(bayExtents(g, 20)[1] - bayExtents(g, 20)[0], 9, 1e-9);
   setArraySpan(m, 0, 0, -5, 30); assert.ok(!('len' in g), 'the whole face again');
+});
+
+test('a face split keeps its windows where they were; pushed out from the split it makes an L', () => {
+  const m = massing0();
+  const xs = (i) => massingGeometry(m)[i].windows.filter((w) => w.vertices[0][1] < -4.99).map((w) => +w.vertices[0][0].toFixed(6)).sort((a, b) => a - b);
+  const before = xs(1);
+  assert.ok(splitFace(m, 1, 0, 12));
+  assert.deepEqual(xs(1), before.filter((x) => x + 2 <= 2 || x >= 2)); // the window across the seam (1.5 to 3.5) is gone
+  assert.ok(extrudeFace(m, 1, 1, 3));
+  assert.deepEqual(m.zones[1].plate, [[-10, -5], [2, -5], [2, -8], [10, -8], [10, 5], [-10, 5]]);
+  const model = importEpJSON(massingEpJSON(m));
+  assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
+  near(volumes(model).Floor2_1, 224 * 3.5, 1e-4);
+  // pushed in past the far side it would fold: refused
+  assert.ok(!extrudeFace(m, 1, 1, -20));
+  // a face meeting corners at both ends stretches its neighbours instead
+  const m2 = massing0();
+  assert.ok(extrudeFace(m2, 0, 1, 2));
+  assert.deepEqual(m2.zones[0].plate, [[-10, -5], [12, -5], [12, 5], [-10, 5]]);
+});
+
+test('a zone split from another takes its settings: loads, opening controls and assemblies', async () => {
+  const { edit, setZoneSetting } = await import('../src/model/edit.js');
+  const m = massing0(), ep = massingEpJSON(m);
+  edit(ep, (tx) => { setZoneSetting(tx, 'Floor1_0', 'peoplePerArea', 0.2); applyMassing(tx, m); });
+  ep['BuildingSurface:Detailed']['Floor1_0:f1'].construction_name = 'Massing Roof';
+  const n = splitZone(m, 0, [3, -10], [3, 10]);
+  edit(ep, (tx) => applyMassing(tx, m));
+  const Z = `Floor1_${n}`;
+  near(ep.People[`People ${Z}`].people_per_floor_area, 0.2);
+  const s = Object.entries(ep['BuildingSurface:Detailed']).find(([, o]) => o.zone_name === Z && o.surface_type === 'Wall' && o.outside_boundary_condition === 'Outdoors');
+  assert.equal(s[1].construction_name, 'Massing Roof');
+  assert.ok(!m.zones[n].copyFrom, 'copied once');
 });

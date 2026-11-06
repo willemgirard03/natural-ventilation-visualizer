@@ -551,11 +551,18 @@ export function applyMassing(tx, m, opts = {}) {
     const area = glazing.reduce((s, w) => s + windowArea(w), 0);
     vent[Z] = { fraction: area > 0 ? v.opening_area / area : null, controls: Object.fromEntries(KEEP_VENT.filter((k) => k in v).map((k) => [k, v[k]])) };
   }
+  // a zone new to the model split from another (copyFrom: that zone's name as written) takes its
+  // settings: its loads, outdoor air, opening controls and, surface by surface, its assemblies
+  const copies = {};
+  m.zones.forEach((z, i) => { const Z = zoneName(m, i); if (z.copyFrom && !ep.Zone?.[Z] && ep.Zone?.[z.copyFrom]) copies[Z] = z.copyFrom; });
+  for (const [Z, S] of Object.entries(copies)) if (vent[S]) vent[Z] = vent[S];
+  const assemblyFrom = (S, o) => Object.values(ep['BuildingSurface:Detailed'] || {}).find((x) => x.zone_name === S && x.surface_type === o.surface_type && x.outside_boundary_condition === o.outside_boundary_condition)?.construction_name;
   for (const type of GEOMETRY) {
     for (const n of Object.keys(ep[type] || {})) if (!fresh[type]?.[n]) tx.remove(type, n);
     for (const [n, o] of Object.entries(fresh[type] || {})) {
       const old = ep[type]?.[n], next = structuredClone(o);
       if (old && (type === 'BuildingSurface:Detailed' ? old.surface_type === o.surface_type && old.outside_boundary_condition === o.outside_boundary_condition : type === 'FenestrationSurface:Detailed')) next.construction_name = old.construction_name;
+      else if (!old && type === 'BuildingSurface:Detailed' && copies[o.zone_name]) next.construction_name = assemblyFrom(copies[o.zone_name], o) ?? next.construction_name;
       if (type === 'ZoneVentilation:WindandStackOpenArea' && vent[o.zone_or_space_name]) {
         const v = vent[o.zone_or_space_name], f = m.settings?.operableFraction ?? MASSING_SETTINGS0().operableFraction;
         Object.assign(next, v.controls);
@@ -571,6 +578,17 @@ export function applyMassing(tx, m, opts = {}) {
     if (GEOMETRY.includes(type)) continue;
     for (const [n, o] of Object.entries(objs)) if (!ep[type]?.[n]) Object.assign(tx.get(type, n, true), structuredClone(o));
   }
+  for (const [Z, S] of Object.entries(copies)) {
+    for (const type of ['People', 'Lights', 'ElectricEquipment', 'ZoneInfiltration:DesignFlowRate']) {
+      const src = Object.values(ep[type] || {}).find((o) => zoneField(o) === S), mine = Object.keys(fresh[type] || {}).find((n) => zoneField(fresh[type][n]) === Z);
+      if (!src || !mine) continue;
+      const t = tx.get(type, mine), key = Object.keys(t).find((k) => t[k] === Z);
+      Object.assign(t, structuredClone(src), { [key]: Z });
+    }
+    const oa = ep['DesignSpecification:OutdoorAir']?.[`${S}MinFreshAir`];
+    if (oa && ep['DesignSpecification:OutdoorAir'][`${Z}MinFreshAir`]) Object.assign(tx.get('DesignSpecification:OutdoorAir', `${Z}MinFreshAir`), structuredClone(oa));
+  }
+  for (const z of m.zones) delete z.copyFrom;
 }
 function windowArea(w) {
   const p = [1, 2, 3, 4].map((i) => [w[`vertex_${i}_x_coordinate`], w[`vertex_${i}_y_coordinate`], w[`vertex_${i}_z_coordinate`]]).filter((q) => q[0] != null);
@@ -829,9 +847,64 @@ export function splitZone(m, i, a, b) {
   };
   const L = start(left[0]), R = start(right[0]);
   const fl = facesOf(L), fr = facesOf(R);
-  m.zones.push({ ...structuredClone(z), name: null, plate: R, faces: fr, cells: undefined, linkFaces: false, linkAbove: false });
+  m.zones.push({ ...structuredClone(z), name: null, plate: R, faces: fr, cells: undefined, linkFaces: false, linkAbove: false, copyFrom: zoneName(m, i) });
   Object.assign(z, { plate: L, faces: fl, cells: undefined });
   return m.zones.length - 1;
+}
+
+// Face k of zone i split at u m from its start: a seam there, two faces in line where there was one,
+// each keeping the windows wholly on it where they were (splitArray). False when too near an end.
+export function splitFace(m, i, k, u) {
+  const z = m.zones[i], len = faceLength(m, i, k);
+  if (u < EDGE_MIN - 1e-9 || u > len - EDGE_MIN + 1e-9) return false;
+  const { A, U } = faceAxes(m, i, k), g = z.faces[k];
+  z.plate.splice(k + 1, 0, [R6(A[0] + U[0] * u), R6(A[1] + U[1] * u)]);
+  z.faces.splice(k, 1, splitArray(g, len, 0, u), splitArray(g, len, u, len));
+  return true;
+}
+
+// Face k of zone i pushed out (or in, d < 0) by d m, square to itself, as a push/pull tool does: where
+// it meets a face in line with it (a seam), it steps out from there, a new face joining the two, so the
+// footprint becomes an L (or a notch); where it meets a corner, the face beside it stretches to meet it.
+// The face keeps its windows; the new faces are bare. False where that would fold the footprint, leave
+// a face under EDGE_MIN, or run into a zone on the same levels.
+export function extrudeFace(m, i, k, d) {
+  if (Math.abs(d) < 1e-3) return false;
+  const z = m.zones[i], P = z.plate, n = P.length, { U, n: N } = faceAxes(m, i, k);
+  const a = P[k], b = P[(k + 1) % n], prev = P[(k - 1 + n) % n], next = P[(k + 2) % n];
+  const a2 = [a[0] + N[0] * d, a[1] + N[1] * d], b2 = [b[0] + N[0] * d, b[1] + N[1] * d];
+  const inLine = (p, q, r) => Math.abs((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])) < 1e-6 * Math.max(1, Math.hypot(r[0] - p[0], r[1] - p[1]));
+  // where the moved face's line meets the line p -> q
+  const meet = (p, q) => {
+    const e = [q[0] - p[0], q[1] - p[1]], den = U[0] * e[1] - U[1] * e[0];
+    if (Math.abs(den) < 1e-9) return null;
+    const t = ((p[0] - a2[0]) * e[1] - (p[1] - a2[1]) * e[0]) / den;
+    return [a2[0] + U[0] * t, a2[1] + U[1] * t];
+  };
+  const ring = []; // [corner, the face from it to the next]
+  for (let j = 0; j < n; j++) {
+    if (j === k) {
+      if (inLine(prev, a, b)) ring.push([a, null], [a2, z.faces[k]]);
+      else { const p = meet(prev, a); if (!p) return false; ring.push([p, z.faces[k]]); }
+    } else if (j === (k + 1) % n) {
+      if (inLine(a, b, next)) ring.push([b2, null], [b, z.faces[j]]);
+      else { const p = meet(b, next); if (!p) return false; ring.push([p, z.faces[j]]); }
+    } else ring.push([P[j], z.faces[j]]);
+  }
+  const out = ring.map(([p, f]) => [[R6(p[0]), R6(p[1])], f]);
+  const plate = out.map(([p]) => p);
+  const ok = plate.every((p, j) => Math.hypot(plate[(j + 1) % plate.length][0] - p[0], plate[(j + 1) % plate.length][1] - p[1]) >= EDGE_MIN - 1e-9)
+    && Math.sign(polyArea(plate)) === Math.sign(polyArea(P));
+  if (!ok) return false;
+  // a simple outline: polygon-clipping finds it one piece of the same area
+  const one = pieces(pc.union(geom(plate)));
+  if (one.length !== 1 || Math.abs(Math.abs(polyArea(one[0])) - Math.abs(polyArea(plate))) > 1e-6) return false;
+  const lv = (L) => m.levels[L].z;
+  if (m.zones.some((y, j) => j !== i && lv(y.base) < lv(z.top) - 1e-6 && lv(y.top) > lv(z.base) + 1e-6 && intersect(y.plate, plate).some((Q) => Math.abs(polyArea(Q)) > 1e-3))) return false;
+  z.plate = plate;
+  z.faces = out.map(([, f]) => f);
+  if (z.cells) delete z.cells;
+  return true;
 }
 
 // A zone's re-entrant corners (inside angle over 180°): where a split can start. Plate points with the

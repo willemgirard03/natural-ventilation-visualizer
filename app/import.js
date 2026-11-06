@@ -1548,7 +1548,10 @@ function legend() {
 
 $('color-by').addEventListener('change', (e) => { view.setColorBy(e.target.value); legend(); });
 $('show-shading').addEventListener('change', (e) => view.setShadingVisible(e.target.checked));
-$('walls').addEventListener('change', (e) => view.setWalls(e.target.value));
+// The thickness switch: off, the thin surfaces as modelled; on, the location line chosen.
+const wallMode = () => ($('wall-thick').checked ? $('walls').value : 'thin');
+$('walls').addEventListener('change', () => view.setWalls(wallMode()));
+$('wall-thick').addEventListener('change', () => { $('walls').disabled = !$('wall-thick').checked; view.setWalls(wallMode()); });
 // Room air from the start: the particles clear and the grid solver begins again from still air.
 function restartAir() {
   if (!model) return;
@@ -2045,7 +2048,7 @@ function render(m) {
   renderLibrary();
   $('results').hidden = false;
   view.resize();
-  view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value });
+  view.setModel(m, { doors: interiorDoors(m), walls: wallMode() });
   hover.clear();
   net = buildNetwork(m);
   rooms = prepareRoomFlow(voxelize(m), net, m);
@@ -2108,7 +2111,7 @@ function refreshModel(geometry = true) {
   edits++;
   axisCache = null; schedCache.clear();
   fillDetails(m);
-  view.setModel(m, { doors: interiorDoors(m), walls: $('walls').value, keep: true });
+  view.setModel(m, { doors: interiorDoors(m), walls: wallMode(), keep: true });
   hover.clear();
   if (geometry) {
     net = buildNetwork(m);

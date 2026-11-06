@@ -98,8 +98,10 @@ function hull2(pts) {
 
 // Edges (flat xyz pairs) less those inside a flat face: an edge with the same face on both sides of
 // it - triangles of one plane, facing the same way, cover a point just either side - is a seam between
-// coplanar pieces (two storeys' walls, a wall split around a slab) and is not drawn. tris: flat xyz.
-function dropSeams(edges, tris) {
+// coplanar pieces (two storeys' walls, a wall split around a slab) and is not drawn - unless the two
+// sides are different surfaces of the same zone: a seam made on purpose (a face split in two), kept.
+// tris: flat xyz; zoneOf(t), surfaceOf(t): triangle t's zone and surface.
+function dropSeams(edges, tris, zoneOf = () => 0, surfaceOf = () => 0) {
   const planes = new Map(), v = (a, i) => new THREE.Vector3(a[i], a[i + 1], a[i + 2]);
   for (let i = 0; i + 8 < tris.length; i += 9) {
     const a = v(tris, i), b = v(tris, i + 3), c = v(tris, i + 6), n = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
@@ -107,10 +109,12 @@ function dropSeams(edges, tris) {
     n.normalize();
     const d = n.dot(a), key = `${n.x.toFixed(3)},${n.y.toFixed(3)},${n.z.toFixed(3)},${d.toFixed(3)}`;
     if (!planes.has(key)) planes.set(key, { n, d, t: [] });
-    planes.get(key).t.push(new THREE.Triangle(a, b, c));
+    const t = new THREE.Triangle(a, b, c);
+    t.id = i / 9;
+    planes.get(key).t.push(t);
   }
   const list = [...planes.values()], p = new THREE.Vector3(), q = new THREE.Vector3(), mid = new THREE.Vector3(), w = new THREE.Vector3(), x = new THREE.Vector3();
-  const covered = (pl, pt) => pl.t.some((t) => t.containsPoint(pt));
+  const cover = (pl, pt) => pl.t.find((t) => t.containsPoint(pt))?.id ?? -1;
   const out = [];
   for (let i = 0; i + 5 < edges.length; i += 6) {
     p.set(edges[i], edges[i + 1], edges[i + 2]); q.set(edges[i + 3], edges[i + 4], edges[i + 5]);
@@ -118,7 +122,9 @@ function dropSeams(edges, tris) {
     const seam = list.some((pl) => {
       if (Math.abs(pl.n.dot(p) - pl.d) > 1e-3 || Math.abs(pl.n.dot(q) - pl.d) > 1e-3) return false;
       w.subVectors(q, p).cross(pl.n).normalize().multiplyScalar(0.01);
-      return covered(pl, x.copy(mid).add(w)) && covered(pl, x.copy(mid).sub(w));
+      const a = cover(pl, x.copy(mid).add(w)), b = cover(pl, x.copy(mid).sub(w));
+      if (a < 0 || b < 0) return false;
+      return surfaceOf(a) === surfaceOf(b) || zoneOf(a) !== zoneOf(b);
     });
     if (!seam) out.push(edges[i], edges[i + 1], edges[i + 2], edges[i + 3], edges[i + 4], edges[i + 5]);
   }
@@ -523,10 +529,25 @@ export class View3D {
 
   // Outlines: of the modelled polygons when thin, of the solids' edges when thick.
   edgesGeometry() {
-    const e = this.walls && this.walls !== 'thin' ? new THREE.EdgesGeometry(this.front.geometry, 25) : edgeGeometry([...this.surfaces, ...this.windows, ...this.doors], this.origin);
+    // thick: each solid's own edges, so where two solids meet in line (a face split in two) the seam
+    // between them is there to keep, which one merged outline would have smoothed away
+    let e;
+    if (this.walls && this.walls !== 'thin' && this.solids?.length) {
+      const pos = [];
+      for (const tris of this.solids) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(tris, 3));
+        const eg = new THREE.EdgesGeometry(g, 25);
+        pos.push(...eg.getAttribute('position').array);
+        g.dispose(); eg.dispose();
+      }
+      e = new THREE.BufferGeometry();
+      e.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    } else e = this.walls && this.walls !== 'thin' ? new THREE.EdgesGeometry(this.front.geometry, 25) : edgeGeometry([...this.surfaces, ...this.windows, ...this.doors], this.origin);
     // coplanar faces read as one: the seams inside them dropped
     let kept;
-    try { kept = dropSeams(e.getAttribute('position').array, this.front.geometry.getAttribute('position').array); } catch { return e; }
+    const owner = this.front.geometry.userData.owner || [];
+    try { kept = dropSeams(e.getAttribute('position').array, this.front.geometry.getAttribute('position').array, (t) => this.surfaces[owner[t]]?.zone, (t) => owner[t]); } catch { return e; }
     e.dispose();
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(kept, 3));
