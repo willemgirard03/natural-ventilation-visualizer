@@ -203,9 +203,10 @@ for (int i = 0; i < ${MAX}; i++) {
     return p;
   }
 
-  add(kind, at, along = null) {
+  add(kind, at, along = null, flip = false) {
     if (this.planes.length >= MAX) return null;
     const before = this.state(), p = this.make(kind, at, along);
+    p.flip = flip;
     p.id = ++this.count;
     p.name = `Clipping plane ${p.id}`;
     this.planes.push(p);
@@ -607,33 +608,47 @@ for (int i = 0; i < ${MAX}; i++) {
   }
 
   // Starts placing: the ghost follows the pointer over the view until a click (or release, when
-  // dragged in) puts the plane there. Esc cancels.
+  // dragged in) puts the plane there. Space steps through what it is: a section facing the eye, the
+  // same turned round, a plan cut looking down, and one looking up. Esc cancels.
   startPlacing(kind, dragged) {
     this.stopPlacing();
-    const el = this.view.renderer.domElement;
-    this.placing = { kind };
+    const el = this.view.renderer.domElement, WAYS = [['section', false], ['section', true], ['plan', false], ['plan', true]];
+    this.placing = { kind, flip: false, way: kind === 'plan' ? 2 : 0 };
     document.body.classList.add(dragged ? 'placedrag' : 'placing');
-    const move = (e) => {
-      const pt = this.pointAt(e);
-      this.showGhost(pt ? this.make(kind, ...this.placeAt(kind, pt)) : null);
+    let last = null;
+    const ghost = (e) => {
+      const pt = e && this.pointAt(e), { kind: k, flip } = this.placing;
+      if (!pt) { this.showGhost(null); return; }
+      const p = this.make(k, ...this.placeAt(k, pt));
+      p.flip = flip;
+      this.showGhost(p);
     };
+    const move = (e) => { last = e; ghost(e); };
     const put = (e) => {
-      const pt = this.pointAt(e);
+      const pt = this.pointAt(e), { kind: k, flip } = this.placing;
       this.stopPlacing();
-      if (pt) this.add(kind, ...this.placeAt(kind, pt));
+      if (pt) this.add(k, ...this.placeAt(k, pt), flip);
     };
     const down = (e) => { if (e.button === 0 && !dragged) { e.stopImmediatePropagation(); put(e); } };
     const up = (e) => { if (dragged) put(e); };
-    const key = (e) => { if (e.key === 'Escape') this.stopPlacing(); };
+    const key = (e) => {
+      if (e.key === 'Escape') this.stopPlacing();
+      if (e.key === ' ' && !e.target.closest?.('input, select, textarea')) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        this.placing.way = (this.placing.way + 1) % WAYS.length;
+        [this.placing.kind, this.placing.flip] = WAYS[this.placing.way];
+        ghost(last);
+      }
+    };
     window.addEventListener('pointermove', move);
     el.addEventListener('pointerdown', down, true);
     window.addEventListener('pointerup', up);
-    window.addEventListener('keydown', key);
+    window.addEventListener('keydown', key, true);
     this.placing.off = () => {
       window.removeEventListener('pointermove', move);
       el.removeEventListener('pointerdown', down, true);
       window.removeEventListener('pointerup', up);
-      window.removeEventListener('keydown', key);
+      window.removeEventListener('keydown', key, true);
     };
   }
 

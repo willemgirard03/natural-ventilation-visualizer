@@ -308,3 +308,20 @@ svg.asm .side{font:500 9px var(--mono); fill:var(--ink3)}
 /* a massing's handles over the 3D view (app/massedit.js, in the edit-handles skill's style) */
 .mhandles{position:absolute; left:0; top:0; pointer-events:none; overflow:visible; z-index:4}
 .mhandles .editable{pointer-events:auto; cursor:text}
+
+/* ---------- the page fills the window: the 3D view takes what the bars leave, Model details a bar along
+   the bottom that opens upward over it; nothing scrolls past the view ---------- */
+html,body{height:100%}
+body{display:flex; flex-direction:column; overflow:hidden}
+.masthead,.calcbar{flex:none}
+.calcbar{position:relative}
+main#results{flex:1; min-height:0; display:flex; flex-direction:column; position:relative}
+main#results[hidden]{display:none}
+main#results>.views{flex:1; min-height:0; display:flex; flex-direction:column; border-bottom:0}
+#view3d{flex:1; min-height:0}
+#view3d .viewer{flex:1; height:auto; min-height:0}
+#view3d>.v3dbar{position:relative; top:auto}
+main#results>.refs{flex:none; border-top:1px solid var(--rule); border-bottom:0; background:var(--panel)}
+main#results>.refs>summary{padding:6px 18px; font-size:13.5px}
+main#results>.refs[open]>section{max-height:45vh; overflow:auto}
+footer[hidden]{display:none}

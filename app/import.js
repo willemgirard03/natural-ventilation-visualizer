@@ -30,7 +30,7 @@ import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 import {
   massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
-  faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify,
+  faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
   setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch,
 } from '../src/model/massing.js';
 import { PRESETS, SIZES } from '../src/model/windows.js';
@@ -1368,6 +1368,14 @@ function massingSide(kind, item) {
   const g = massing.zones[at.zone].faces[at.face];
   return { ...at, n: g ? unitLayout(g, faceLength(massing, at.zone, at.face)).n : 0 };
 }
+// A massing's zone deleted (Delete, or its pop-up): where it was alone on its levels they close up.
+function removeZone(i) {
+  if (!massing || massing.zones.length < 2) { popMessage('The last zone stays: a massing needs one.'); return; }
+  view.select(null);
+  massingChange((x) => deleteZone(x, i), 'zone deleted');
+}
+// Zones left floating (held up by nothing) are hatched grey in the view.
+function markFloating() { view.setFloating(massing ? floatingZones(massing).map((i) => zoneName(massing, i)) : []); }
 // A massing's zone stands on a base level and reaches a top level: pushing its roof or floor moves
 // those levels, and so every zone on them.
 function zoneLevelRows(item) {
@@ -1375,8 +1383,10 @@ function zoneLevelRows(item) {
   if (i < 0) return [];
   const z = massing.zones[i], opts = (now, from, to) => massing.levels.map((lv, L) => (L >= from && L <= to ? `<option value="${L}"${L === now ? ' selected' : ''}>${esc(lv.name || levelName(L))}</option>` : '')).join('');
   return [`<div class="poprow"><span class="tipped" title="The level this zone stands on and the level its roof reaches. Its roof and floor handles move these levels, and with them every zone on them.">Levels</span>`
-    + `<select class="popsel" data-zlevel="base" data-zone="${i}" title="Base level">${opts(z.base, 0, z.top - 1)}</select> to <select class="popsel" data-zlevel="top" data-zone="${i}" title="Top level">${opts(z.top, z.base + 1, massing.levels.length - 1)}</select></div>`];
+    + `<select class="popsel" data-zlevel="base" data-zone="${i}" title="Base level">${opts(z.base, 0, z.top - 1)}</select> to <select class="popsel" data-zlevel="top" data-zone="${i}" title="Top level">${opts(z.top, z.base + 1, massing.levels.length - 1)}</select>`
+    + (massing.zones.length > 1 ? `<button type="button" class="quiet" data-zdelete="${i}" title="Delete this zone (Delete). Where nothing else stands on its levels, they close up and everything above drops down. A zone left held up by nothing is hatched grey.">Delete zone</button>` : '') + '</div>'];
 }
+$('info').addEventListener('click', (e) => { const b = e.target.closest('[data-zdelete]'); if (b && massing) removeZone(Number(b.dataset.zdelete)); });
 $('info').addEventListener('change', (e) => {
   const el = e.target.closest('[data-zlevel]');
   if (!el || !massing) return;
@@ -2105,6 +2115,7 @@ function popMessage(text) {
 }
 function refreshModel(geometry = true) {
   const keep = selected, keepPlane = view.sections.selected;
+  queueMicrotask(markFloating);
   const m = importEpJSON(model.epjson, { fileName: model.source.fileName });
   model = m;
   modelEdited = true;
@@ -2142,8 +2153,9 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape' && !view.sections.selected && !$('view3d').classList.contains('full')) {
     if (winEdit.active) { winEdit.stop(); showInfo(current()); } else if (selected) view.select(null);
   } else if (e.key === 'Delete' && massing && selected) {
-    const found = current(), at = found && massingSide(found.kind, found.item);
+    const found = current(), at = found && massingSide(found.kind, found.item), zt = found?.kind === 'zone' && massingTarget(found);
     if (at && massing.zones[at.zone].faces[at.face]) { sideEdit(at, (x) => { x.zones[at.zone].faces[at.face] = null; }, 'windows removed'); e.preventDefault(); }
+    else if (zt) { removeZone(zt.zone); e.preventDefault(); }
   }
 });
 $('edited').addEventListener('click', undo);

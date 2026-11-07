@@ -819,15 +819,24 @@ export function addZone(m, i, k, { u = null, at = null, w = 3, d = 3, h = 3 } = 
 // the same turn. Each face cut keeps, on each part, the windows wholly on that part (splitArray); the
 // new faces along the cut are bare (they become the walls between the two). Returns the new zone's
 // index, or -1 where the plane misses the zone or leaves a sliver.
-export function splitZone(m, i, a, b) {
+//   From a corner (`fromCorner`: a is one of its corners, b along the cut), the cut runs only from that
+// corner to the first face it meets, not on through the rest of the zone.
+export function splitZone(m, i, a, b, { fromCorner = false } = {}) {
   const z = m.zones[i], d = [b[0] - a[0], b[1] - a[1]], l = Math.hypot(d[0], d[1]);
   if (l < 1e-9) return -1;
   const D = [d[0] / l, d[1] / l], N = [D[1], -D[0]], far = 1e4;
-  const half = (side) => {
-    const o = [a[0] - D[0] * far, a[1] - D[1] * far], e = [a[0] + D[0] * far, a[1] + D[1] * far], s = side * far;
-    return [o, e, [e[0] - N[0] * s, e[1] - N[1] * s], [o[0] - N[0] * s, o[1] - N[1] * s]];
-  };
-  const left = intersect(z.plate, half(1)), right = intersect(z.plate, half(-1));
+  let left, right;
+  if (fromCorner) {
+    const parts = chordSplit(z.plate, a, D);
+    if (!parts) return -1;
+    [left, right] = parts.map((P) => [P]);
+  } else {
+    const half = (side) => {
+      const o = [a[0] - D[0] * far, a[1] - D[1] * far], e = [a[0] + D[0] * far, a[1] + D[1] * far], s = side * far;
+      return [o, e, [e[0] - N[0] * s, e[1] - N[1] * s], [o[0] - N[0] * s, o[1] - N[1] * s]];
+    };
+    left = intersect(z.plate, half(1)); right = intersect(z.plate, half(-1));
+  }
   if (left.length !== 1 || right.length !== 1 || Math.abs(polyArea(left[0])) < 0.5 || Math.abs(polyArea(right[0])) < 0.5) return -1;
   const facesOf = (P) => P.map((p, q) => {
     // the original face this edge lies on, and where along it: its windows carried over
@@ -852,6 +861,30 @@ export function splitZone(m, i, a, b) {
   return m.zones.length - 1;
 }
 
+// A footprint cut from its corner at `a` along D to the first face the cut meets: the two outlines, or
+// null when `a` is not a corner of it or the cut leaves it at once.
+function chordSplit(P, a, D) {
+  const n = P.length, ia = P.findIndex((p) => Math.hypot(p[0] - a[0], p[1] - a[1]) < 1e-6);
+  if (ia < 0) return null;
+  let best = null;
+  for (let k = 0; k < n; k++) {
+    if (k === ia || (k + 1) % n === ia) continue; // the faces from the corner itself
+    const p = P[k], q = P[(k + 1) % n], e = [q[0] - p[0], q[1] - p[1]], den = D[0] * e[1] - D[1] * e[0];
+    if (Math.abs(den) < 1e-12) continue;
+    const w = [p[0] - a[0], p[1] - a[1]], t = (w[0] * e[1] - w[1] * e[0]) / den, s = (w[0] * D[1] - w[1] * D[0]) / den;
+    if (t > 1e-6 && s >= -1e-9 && s <= 1 + 1e-9 && (!best || t < best.t)) best = { t, k, s };
+  }
+  if (!best) return null;
+  // the cut must run inside: its middle within the footprint
+  const mid = [a[0] + D[0] * best.t / 2, a[1] + D[1] * best.t / 2];
+  if (!pc.intersection(geom(P), [[[mid[0] - 1e-3, mid[1] - 1e-3], [mid[0] + 1e-3, mid[1] - 1e-3], [mid[0] + 1e-3, mid[1] + 1e-3], [mid[0] - 1e-3, mid[1] + 1e-3]]]).length) return null;
+  const q = [R6(a[0] + D[0] * best.t), R6(a[1] + D[1] * best.t)], walk = (from, to) => { const out = []; for (let j = from; ; j = (j + 1) % n) { out.push(P[j]); if (j === to) break; } return out; };
+  const atStart = best.s < 1e-6, atEnd = best.s > 1 - 1e-6, k1 = (best.k + 1) % n;
+  // one part: the corner round to the face met, then the point met; the other: from there back round
+  const one = [...walk(ia, best.k), ...(atStart ? [] : [q])], two = [...(atEnd ? [] : [q]), ...walk(k1, ia)];
+  return [one, two].map((R) => R.filter((p, j) => Math.hypot(p[0] - R[(j + 1) % R.length][0], p[1] - R[(j + 1) % R.length][1]) > 1e-9));
+}
+
 // Face k of zone i split at u m from its start: a seam there, two faces in line where there was one,
 // each keeping the windows wholly on it where they were (splitArray). False when too near an end.
 export function splitFace(m, i, k, u) {
@@ -866,14 +899,23 @@ export function splitFace(m, i, k, u) {
 // Face k of zone i pushed out (or in, d < 0) by d m, square to itself, as a push/pull tool does: where
 // it meets a face in line with it (a seam), it steps out from there, a new face joining the two, so the
 // footprint becomes an L (or a notch); where it meets a corner, the face beside it stretches to meet it.
-// The face keeps its windows; the new faces are bare. False where that would fold the footprint, leave
-// a face under EDGE_MIN, or run into a zone on the same levels.
-export function extrudeFace(m, i, k, d) {
-  if (Math.abs(d) < 1e-3) return false;
+// Pushed back level with a face it stepped from, the face between them goes and the two are in line
+// again (a seam): within EDGE_MIN of that it snaps there. The face keeps its windows; the new faces are
+// bare. The footprint only (geometry checks; zoneFits says whether it may stand). False where it would
+// fold, cross itself or leave a face under EDGE_MIN.
+function extrudeRaw(m, i, k, d) {
+  if (Math.abs(d) < 1e-6) return false;
   const z = m.zones[i], P = z.plate, n = P.length, { U, n: N } = faceAxes(m, i, k);
   const a = P[k], b = P[(k + 1) % n], prev = P[(k - 1 + n) % n], next = P[(k + 2) % n];
-  const a2 = [a[0] + N[0] * d, a[1] + N[1] * d], b2 = [b[0] + N[0] * d, b[1] + N[1] * d];
   const inLine = (p, q, r) => Math.abs((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])) < 1e-6 * Math.max(1, Math.hypot(r[0] - p[0], r[1] - p[1]));
+  // level with the far end of a face square to this one beside it: snap there, and that face goes
+  for (const [q, c] of [[prev, a], [next, b]]) {
+    const e = [c[0] - q[0], c[1] - q[1]], l = Math.hypot(...e) || 1;
+    if (Math.abs((e[0] * U[0] + e[1] * U[1]) / l) > 1e-6) continue; // not square to the face
+    const flush = (q[0] - c[0]) * N[0] + (q[1] - c[1]) * N[1];
+    if (Math.abs(d - flush) < EDGE_MIN) d = flush;
+  }
+  const a2 = [a[0] + N[0] * d, a[1] + N[1] * d], b2 = [b[0] + N[0] * d, b[1] + N[1] * d];
   // where the moved face's line meets the line p -> q
   const meet = (p, q) => {
     const e = [q[0] - p[0], q[1] - p[1]], den = U[0] * e[1] - U[1] * e[0];
@@ -881,7 +923,7 @@ export function extrudeFace(m, i, k, d) {
     const t = ((p[0] - a2[0]) * e[1] - (p[1] - a2[1]) * e[0]) / den;
     return [a2[0] + U[0] * t, a2[1] + U[1] * t];
   };
-  const ring = []; // [corner, the face from it to the next]
+  let ring = []; // [corner, the face from it to the next]
   for (let j = 0; j < n; j++) {
     if (j === k) {
       if (inLine(prev, a, b)) ring.push([a, null], [a2, z.faces[k]]);
@@ -891,19 +933,129 @@ export function extrudeFace(m, i, k, d) {
       else { const p = meet(b, next); if (!p) return false; ring.push([p, z.faces[j]]); }
     } else ring.push([P[j], z.faces[j]]);
   }
-  const out = ring.map(([p, f]) => [[R6(p[0]), R6(p[1])], f]);
-  const plate = out.map(([p]) => p);
-  const ok = plate.every((p, j) => Math.hypot(plate[(j + 1) % plate.length][0] - p[0], plate[(j + 1) % plate.length][1] - p[1]) >= EDGE_MIN - 1e-9)
-    && Math.sign(polyArea(plate)) === Math.sign(polyArea(P));
-  if (!ok) return false;
-  // a simple outline: polygon-clipping finds it one piece of the same area
-  const one = pieces(pc.union(geom(plate)));
-  if (one.length !== 1 || Math.abs(Math.abs(polyArea(one[0])) - Math.abs(polyArea(plate))) > 1e-6) return false;
-  const lv = (L) => m.levels[L].z;
-  if (m.zones.some((y, j) => j !== i && lv(y.base) < lv(z.top) - 1e-6 && lv(y.top) > lv(z.base) + 1e-6 && intersect(y.plate, plate).some((Q) => Math.abs(polyArea(Q)) > 1e-3))) return false;
+  ring = ring.map(([p, f]) => [[R6(p[0]), R6(p[1])], f]);
+  // a face shrunk to nothing goes; the corner after it keeps the face that followed
+  for (let again = true; again && ring.length > 3;) {
+    again = false;
+    for (let j = 0; j < ring.length; j++) {
+      const q = ring[(j + 1) % ring.length];
+      if (Math.hypot(q[0][0] - ring[j][0][0], q[0][1] - ring[j][0][1]) < 1e-6) { ring[j] = [ring[j][0], q[1]]; ring.splice((j + 1) % ring.length, 1); again = true; break; }
+    }
+  }
+  const plate = ring.map(([p]) => p);
+  if (!simpleOutline(plate, P)) return false;
   z.plate = plate;
-  z.faces = out.map(([, f]) => f);
+  z.faces = ring.map(([, f]) => f);
   if (z.cells) delete z.cells;
+  return true;
+}
+// An outline that may stand: as counterclockwise as the one it replaces, each face at least EDGE_MIN,
+// and simple (polygon-clipping finds it one piece of the same area: it does not cross itself).
+function simpleOutline(plate, was = plate) {
+  if (plate.length < 3 || Math.sign(polyArea(plate)) !== Math.sign(polyArea(was))) return false;
+  if (!plate.every((p, j) => Math.hypot(plate[(j + 1) % plate.length][0] - p[0], plate[(j + 1) % plate.length][1] - p[1]) >= EDGE_MIN - 1e-9)) return false;
+  // no corner where the outline turns straight back on itself (a spike of no width)
+  const n = plate.length;
+  for (let j = 0; j < n; j++) {
+    const a = plate[(j - 1 + n) % n], c = plate[j], b = plate[(j + 1) % n], u = [c[0] - a[0], c[1] - a[1]], v = [b[0] - c[0], b[1] - c[1]];
+    if (Math.abs(u[0] * v[1] - u[1] * v[0]) < 1e-9 * Math.hypot(...u) * Math.hypot(...v) && u[0] * v[0] + u[1] * v[1] < 0) return false;
+  }
+  let one;
+  try { one = pieces(pc.union(geom(plate))); } catch { return false; }
+  return one.length === 1 && Math.abs(Math.abs(polyArea(one[0])) - Math.abs(polyArea(plate))) < 1e-6;
+}
+
+// ---------- what may stand: zones never overlapping, always in touch ----------
+
+const levelsOf = (m, z) => [m.levels[z.base].z, m.levels[z.top].z];
+// Whether two zones on overlapping levels overlap in plan (more than a sliver).
+function overlapping(m, a, b) {
+  const [a0, a1] = levelsOf(m, a), [b0, b1] = levelsOf(m, b);
+  if (a0 >= b1 - 1e-6 || a1 <= b0 + 1e-6) return false;
+  return intersect(a.plate, b.plate).some((Q) => Math.abs(polyArea(Q)) > 1e-3);
+}
+// Whether two zones touch: one stands on the other where their footprints overlap, or a face of one
+// runs along a face of the other, back to back, over some length, on levels they share.
+export function touching(m, a, b) {
+  if (a.top === b.base || a.base === b.top) return intersect(a.plate, b.plate).some((Q) => Math.abs(polyArea(Q)) > 1e-3);
+  const [a0, a1] = levelsOf(m, a), [b0, b1] = levelsOf(m, b);
+  if (a0 >= b1 - 1e-6 || a1 <= b0 + 1e-6) return false;
+  return a.plate.some((A, k) => {
+    const B = a.plate[(k + 1) % a.plate.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]), U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
+    const off = (p) => (p[0] - A[0]) * U[1] - (p[1] - A[1]) * U[0], at = (p) => (p[0] - A[0]) * U[0] + (p[1] - A[1]) * U[1];
+    return b.plate.some((C, q) => {
+      const D = b.plate[(q + 1) % b.plate.length];
+      if (Math.abs(off(C)) > 1e-4 || Math.abs(off(D)) > 1e-4) return false;
+      const uc = at(C), ud = at(D);
+      return ud < uc && Math.min(len, uc) - Math.max(0, ud) > 0.05;
+    });
+  });
+}
+// Whether zone i may stand as it is: a simple footprint, overlapping no zone on its levels, and (where
+// there are other zones) touching one of them - it never floats free of the building.
+export function zoneFits(m, i) {
+  const z = m.zones[i];
+  if (!simpleOutline(z.plate)) return false;
+  if (m.zones.some((y, j) => j !== i && overlapping(m, z, y))) return false;
+  return m.zones.length === 1 || m.zones.some((y, j) => j !== i && touching(m, z, y));
+}
+// The zones held up by nothing: not standing on the ground, nor joined to it through zones they touch.
+export function floatingZones(m) {
+  const held = new Set(m.zones.map((z, i) => (z.base === 0 ? i : -1)).filter((i) => i >= 0)), todo = [...held];
+  while (todo.length) {
+    const i = todo.pop();
+    m.zones.forEach((y, j) => { if (!held.has(j) && touching(m, m.zones[i], y)) { held.add(j); todo.push(j); } });
+  }
+  return m.zones.map((_, i) => i).filter((i) => !held.has(i));
+}
+// A change to zone i made as far as it can go: `act(trial, x)` makes it on a copy, for x the change
+// asked for, scaled back (to a millimetre) until zone i fits - so a move stops where the zone would
+// collide, cross itself or come away from the building. Returns the change made.
+function limited(m, i, x, act) {
+  const scale = (t) => (Array.isArray(x) ? x.map((v) => v * t) : x * t);
+  const tryAt = (t) => { const trial = structuredClone(m); return act(trial, scale(t)) !== false && zoneFits(trial, i) ? trial : null; };
+  let best = tryAt(1), bt = 1;
+  if (!best) {
+    let lo = 0, hi = 1;
+    bt = 0;
+    const size = Array.isArray(x) ? Math.hypot(...x) : Math.abs(x);
+    for (let n = 0; n < 24 && (hi - lo) * size > 5e-4; n++) {
+      const mid = (lo + hi) / 2, t = tryAt(mid);
+      if (t) { lo = mid; best = t; bt = mid; } else hi = mid;
+    }
+  }
+  if (!best) return Array.isArray(x) ? [0, 0] : 0;
+  m.levels = best.levels; m.zones = best.zones;
+  return scale(bt);
+}
+// The pushed face, as far as it may go. Returns the distance taken.
+export function extrudeFace(m, i, k, d) { return limited(m, i, d, (x, v) => extrudeRaw(x, i, k, v)); }
+
+// A seam (corner v of zone i, between two faces in line) slid along them by du m: one face longer, the
+// other shorter, as far as each stays EDGE_MIN long. Returns the distance taken.
+export function slideSeam(m, i, v, du) {
+  return limited(m, i, du, (x, t) => {
+    const P = x.zones[i].plate, n = P.length, a = P[(v - 1 + n) % n], c = P[v], b = P[(v + 1) % n];
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]), U = [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
+    if (Math.abs((c[0] - a[0]) * U[1] - (c[1] - a[1]) * U[0]) > 1e-6) return false; // not a seam
+    P[v] = [R6(c[0] + U[0] * t), R6(c[1] + U[1] * t)];
+  });
+}
+export const isSeam = (m, i, v) => {
+  const P = m.zones[i].plate, n = P.length, a = P[(v - 1 + n) % n], c = P[v], b = P[(v + 1) % n];
+  return Math.abs((c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])) < 1e-6 * Math.max(1, Math.hypot(b[0] - a[0], b[1] - a[1]));
+};
+
+// Zone i taken out of the massing. Where nothing else stands on its levels, those levels close up: the
+// levels above drop by its height, and the zones on them with it. The last zone stays.
+export function deleteZone(m, i) {
+  if (m.zones.length < 2) return false;
+  const [z] = m.zones.splice(i, 1), [z0, z1] = levelsOf(m, z);
+  if (m.zones.some((y) => { const [y0, y1] = levelsOf(m, y); return y0 < z1 - 1e-6 && y1 > z0 + 1e-6; })) return true;
+  const h = z1 - z0, gone = z.top - z.base;
+  for (let L = z.top; L < m.levels.length; L++) m.levels[L].z = +(m.levels[L].z - h).toFixed(6);
+  m.levels.splice(z.base + 1, gone);
+  for (const y of m.zones) { if (y.base >= z.top) y.base -= gone; if (y.top >= z.top) y.top -= gone; }
   return true;
 }
 
@@ -948,57 +1100,43 @@ export function moveLevel(m, L, dist, above = true) {
   return dist;
 }
 
-// A footprint with face k moved out by `dist` m along its normal, its neighbours keeping their lines;
-// null when that would fold it or leave a face under EDGE_MIN.
-function movedPlate(P, k, dist) {
-  const n = P.length, A = P[k], B = P[(k + 1) % n], l = Math.hypot(B[0] - A[0], B[1] - A[1]);
-  const U = [(B[0] - A[0]) / l, (B[1] - A[1]) / l], N = [U[1], -U[0]];
-  const A2 = [A[0] + N[0] * dist, A[1] + N[1] * dist], B2 = [B[0] + N[0] * dist, B[1] + N[1] * dist];
-  // where the moved face's line meets a neighbour's (or, in line with it, just moved out)
-  const meet = (p, q, fallback) => {
-    const d = [q[0] - p[0], q[1] - p[1]], den = U[0] * d[1] - U[1] * d[0];
-    if (Math.abs(den) < 1e-9) return fallback;
-    const t = ((p[0] - A2[0]) * d[1] - (p[1] - A2[1]) * d[0]) / den;
-    return [A2[0] + U[0] * t, A2[1] + U[1] * t];
-  };
-  const out = P.map((p) => [...p]);
-  out[k] = meet(P[(k - 1 + n) % n], A, A2);
-  out[(k + 1) % n] = meet(B, P[(k + 2) % n], B2);
-  const ok = Math.sign(polyArea(out)) === Math.sign(polyArea(P)) && out.every((p, j) => Math.hypot(out[(j + 1) % n][0] - p[0], out[(j + 1) % n][1] - p[1]) >= EDGE_MIN - 1e-9);
-  return ok ? out.map(([x, y]) => [R6(x), R6(y)]) : null;
-}
-
-// A face of zone i pushed or pulled by `dist` m along its outward normal: a face takes its edge of the
-// footprint with it (its neighbours keep their lines), the roof moves the zone's top level and every
-// level above, the floor moves its base level alone (the zones below grow or shrink to meet it).
-// Returns the distance taken.
+// A face of zone i pushed or pulled by `dist` m along its outward normal: a face as the push/pull tool
+// pushes it (extrudeFace), as far as it may go; the roof moves the zone's top level and every level
+// above, the floor moves its base level alone (the zones below grow or shrink to meet it). Returns the
+// distance taken.
 export function pushFace(m, i, face, dist) {
   const z = m.zones[i];
   if (face === 'roof') return moveLevel(m, z.top, dist, true);
   if (face === 'floor') return z.base > 0 ? -moveLevel(m, z.base, -dist, false) : 0;
-  for (let t = dist, tries = 0; tries < 12; tries++, t /= 2) {
-    const P = movedPlate(z.plate, face, t);
-    if (P) { z.plate = P; return t; }
-  }
-  return 0;
+  return extrudeFace(m, i, face, dist);
 }
 
 // Zone i moved along its own x or y axis, or up ('z': its base level and every level above rise, the
-// zones below growing to meet it).
+// zones below growing to meet it); moved in plan only as far as it may go.
 export function moveStorey(m, i, axis, dist) {
   const z = m.zones[i];
   if (axis === 'z') return z.base > 0 ? moveLevel(m, z.base, dist, true) : 0;
   const [dx, dy] = turnPlan(axis === 'x' ? [1, 0] : [0, 1], z.rot || 0);
-  const move = (P) => P.map(([x, y]) => [R6(x + dx * dist), R6(y + dy * dist)]);
-  z.plate = move(z.plate);
-  if (z.cells) z.cells = z.cells.map(move);
-  return dist;
+  const [mx, my] = moveZone(m, i, [dx * dist, dy * dist]);
+  return Math.hypot(mx, my) * Math.sign(dist);
+}
+// Zone i moved by [dx, dy] in plan (the building's axes before its turn), as far as it may go.
+export function moveZone(m, i, d) {
+  return limited(m, i, d, (x, [dx, dy]) => {
+    const z = x.zones[i], move = (P) => P.map(([px, py]) => [R6(px + dx), R6(py + dy)]);
+    z.plate = move(z.plate);
+    if (z.cells) z.cells = z.cells.map(move);
+  });
 }
 
-// Zone i turned to `deg` (clockwise, its own axes against the building's) about its middle.
+// Zone i turned to `deg` (clockwise, its own axes against the building's) about its middle, as far
+// as it may go.
 export function turnZone(m, i, deg) {
-  const z = m.zones[i], d = deg - (z.rot || 0), c = centroid(z.plate);
-  z.plate = z.plate.map(([x, y]) => { const [u, v] = turnPlan([x - c[0], y - c[1]], d); return [R6(u + c[0]), R6(v + c[1])]; });
-  if (z.cells) z.cells = z.cells.map((P) => P.map(([x, y]) => { const [u, v] = turnPlan([x - c[0], y - c[1]], d); return [R6(u + c[0]), R6(v + c[1])]; }));
-  z.rot = deg;
+  const from = m.zones[i].rot || 0;
+  return from + limited(m, i, deg - from, (x, d) => {
+    const z = x.zones[i], c = centroid(z.plate), turn = (P) => P.map(([px, py]) => { const [u, v] = turnPlan([px - c[0], py - c[1]], d); return [R6(u + c[0]), R6(v + c[1])]; });
+    z.plate = turn(z.plate);
+    if (z.cells) z.cells = z.cells.map(turn);
+    z.rot = from + d;
+  });
 }

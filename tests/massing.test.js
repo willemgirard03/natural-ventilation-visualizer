@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { importEpJSON } from '../src/model/import-epjson.js';
 import { enclosedVolume } from '../src/model/geometry.js';
 import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0, applyMassing, setWindowSize, setWindowFigure, breakWindow, applyToArray, dragPitch, addWindows, upgradeMassing, MASSING_SETTINGS0, zoneHeight, faceLength, moveLevel, pushFace, WINDOWS0,
-  addZone, splitZone, reentrantCorners, setArraySpan, setJustify, arraySpan, bayExtents, splitFace, extrudeFace } from '../src/model/massing.js';
+  addZone, splitZone, reentrantCorners, setArraySpan, setJustify, arraySpan, bayExtents, splitFace, extrudeFace,
+  moveZone, deleteZone, floatingZones, zoneFits, slideSeam } from '../src/model/massing.js';
 // A massing from older storeys (rectangular plates stacked), as the tool upgrades them.
 const stack = (...storeys) => upgradeMassing({ name: 'Floor', rot: 0, storeys, settings: MASSING_SETTINGS0() });
 import { edit } from '../src/model/edit.js';
@@ -224,8 +225,12 @@ test('a face split keeps its windows where they were; pushed out from the split 
   const model = importEpJSON(massingEpJSON(m));
   assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
   near(volumes(model).Floor2_1, 224 * 3.5, 1e-4);
-  // pushed in past the far side it would fold: refused
-  assert.ok(!extrudeFace(m, 1, 1, -20));
+  // pushed back in, it stops level with the face it stepped from, the step gone and the seam back
+  near(extrudeFace(m, 1, 2, -3), -3); // the face that stepped out (face 1 is now the step beside it)
+  assert.deepEqual(m.zones[1].plate, [[-10, -5], [2, -5], [10, -5], [10, 5], [-10, 5]]);
+  // pushed in past the far side it would fold: it stops short
+  const t = extrudeFace(m, 1, 0, -20);
+  assert.ok(t < 0 && t > -10);
   // a face meeting corners at both ends stretches its neighbours instead
   const m2 = massing0();
   assert.ok(extrudeFace(m2, 0, 1, 2));
@@ -244,4 +249,47 @@ test('a zone split from another takes its settings: loads, opening controls and 
   const s = Object.entries(ep['BuildingSurface:Detailed']).find(([, o]) => o.zone_name === Z && o.surface_type === 'Wall' && o.outside_boundary_condition === 'Outdoors');
   assert.equal(s[1].construction_name, 'Massing Roof');
   assert.ok(!m.zones[n].copyFrom, 'copied once');
+});
+
+test('zones never overlap or come away: moves stop at a collision, or where they would lose touch', () => {
+  const m = massing0();
+  const j = addZone(m, 0, 1); // a 3 x 3 m annex against the east face, x 10 to 13
+  // slid along the face it stops where it would leave it (its far edge 0.05 m short of the corner, or level with it)
+  const [, dy] = moveZone(m, j, [0, 20]);
+  assert.ok(dy > 3 && dy < 7, `slid ${dy}`);
+  assert.ok(zoneFits(m, j));
+  // pulled away from the building it does not move; pushed into it, it does not either
+  assert.deepEqual(moveZone(m, j, [5, 0]).map((x) => +x.toFixed(6)), [0, 0]);
+  assert.deepEqual(moveZone(m, j, [-2, 0]).map((x) => +x.toFixed(6)), [0, 0]);
+});
+
+test('a zone deleted: where it was alone on its levels they close up and the zones above drop', () => {
+  const m = massing0();
+  addZone(m, 1, 'roof', { at: [0, 0] }); // a zone on the roof, levels 2 to 3
+  assert.ok(deleteZone(m, 1)); // the upper storey, alone on its levels
+  assert.deepEqual(m.levels.map((l) => l.z), [0, 3.5, 6.5]);
+  assert.deepEqual(m.zones.map((z) => [z.base, z.top]), [[0, 1], [1, 2]]);
+  // with nothing under it the roof zone would float; the ground zone holds it here
+  assert.deepEqual(floatingZones(m), []);
+  m.zones[1].plate = m.zones[1].plate.map(([x, y]) => [x + 30, y]);
+  assert.deepEqual(floatingZones(m), [1]);
+  assert.ok(!deleteZone(stack(storey0()), 0), 'the last zone stays');
+});
+
+test('a split from a re-entrant corner runs only to the first face it meets', () => {
+  const m = massing0();
+  // a U: the cut from an inner corner along x stops at the arm's far face; a whole line would also
+  // cut through the other arm
+  m.zones[0].plate = [[0, 0], [12, 0], [12, 10], [8, 10], [8, 4], [4, 4], [4, 10], [0, 10]];
+  m.zones[0].faces = m.zones[0].plate.map(() => null);
+  assert.equal(splitZone(structuredClone(m), 0, [8, 4], [9, 4]), -1);
+  const n = splitZone(m, 0, [8, 4], [9, 4], { fromCorner: true });
+  assert.ok(n > 0);
+  const areas = [m.zones[0], m.zones[n]].map((z) => Math.abs(z.plate.reduce((a, p, k, P) => a + p[0] * P[(k + 1) % P.length][1] - P[(k + 1) % P.length][0] * p[1], 0) / 2)).sort((a, b) => a - b);
+  assert.deepEqual(areas, [24, 72]);
+  // a face's seam slides along its line
+  const m2 = massing0();
+  splitFace(m2, 0, 0, 5);
+  near(slideSeam(m2, 0, 1, 2), 2);
+  assert.deepEqual(m2.zones[0].plate[1], [-3, -5]);
 });

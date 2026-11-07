@@ -122,23 +122,21 @@ export class ModelTools {
   }
 
   splitAt(m, t, e) {
+    const i = t.zone, [z0, z1] = zoneLevels(m, i), r = this.view.renderer.domElement.getBoundingClientRect(), px = [e.clientX - r.left, e.clientY - r.top];
+    // a re-entrant corner near the pointer (its edge up the walls, or its point on the roof) takes the
+    // cut: along either face meeting there or at 45°, the one the pointer leans toward (Space steps
+    // through them), running from the corner only as far as the first face it meets
+    let best = null;
+    for (const c of reentrantCorners(m, i)) {
+      const a = this.P([...c.p, z0]), b = this.P([...c.p, z1]), dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1;
+      const s = Math.max(0, Math.min(1, ((px[0] - a[0]) * dx + (px[1] - a[1]) * dy) / l2)), dist = Math.hypot(px[0] - a[0] - s * dx, px[1] - a[1] - s * dy);
+      if (dist < CORNER_PX * (t.face === 'roof' ? 2.5 : 1) && (!best || dist < best.dist)) best = { c, dist };
+    }
+    if (best) return this.splitAtCorner(m, t, best.c);
     if (t.face === 'roof') return this.splitFromRoof(m, t);
     if (!Number.isInteger(t.face)) return null;
-    const i = t.zone, [z0, z1] = zoneLevels(m, i), r = this.view.renderer.domElement.getBoundingClientRect(), px = [e.clientX - r.left, e.clientY - r.top];
-    // a re-entrant corner near the pointer takes the cut: along either face meeting there, or at 45°
-    const corner = reentrantCorners(m, i).find((c) => {
-      const a = this.P([...c.p, z0]), b = this.P([...c.p, z1]), dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1;
-      const s = Math.max(0, Math.min(1, ((px[0] - a[0]) * dx + (px[1] - a[1]) * dy) / l2));
-      return Math.hypot(px[0] - a[0] - s * dx, px[1] - a[1] - s * dy) < CORNER_PX;
-    });
     let a, d, note;
-    if (corner) {
-      const [u, v] = corner.dirs, bis = [u[0] + v[0], u[1] + v[1]], lb = Math.hypot(...bis);
-      const options = [u, v, [bis[0] / lb, bis[1] / lb]];
-      d = options[this.dir % 3];
-      a = corner.p;
-      note = ['along one face', 'along the other face', 'at 45°'][this.dir % 3] + ' · Space for the next';
-    } else {
+    {
       // square to the face through the pointer, to the nearest 50 mm along it
       const { A, U, n } = faceAxes(m, i, t.face), len = faceLength(m, i, t.face);
       const s = Math.min(len - SNAP, Math.max(SNAP, Math.round(((t.point[0] - A[0]) * U[0] + (t.point[1] - A[1]) * U[1]) / SNAP) * SNAP));
@@ -154,6 +152,33 @@ export class ModelTools {
       what: 'zone split',
       mutate: (x) => splitZone(x, i, a, b),
       draw: () => this.box(m.zones[i].plate, z0, z1, true) + shared.map(([p, q]) => this.cut(p, q, z0, z1)).join('') + this.note(a, z1, note),
+    };
+  }
+
+  // A cut from a re-entrant corner: its three ways (along each face meeting there, and at 45° between
+  // them) drawn faintly, the one taken in full. The pointer's lean picks it until Space is pressed at
+  // that corner; then Space steps through them.
+  splitAtCorner(m, t, c) {
+    const i = t.zone, [z0, z1] = zoneLevels(m, i), [u, v] = c.dirs, bis = [u[0] + v[0], u[1] + v[1]], lb = Math.hypot(...bis);
+    const options = [u, v, [bis[0] / lb, bis[1] / lb]];
+    if (this.corner !== `${i}:${c.k}`) { this.corner = `${i}:${c.k}`; this.spaced = this.dir; }
+    let pick;
+    if (this.dir !== this.spaced) pick = this.dir % 3;
+    else {
+      const w = [t.point[0] - c.p[0], t.point[1] - c.p[1]], lw = Math.hypot(...w) || 1;
+      pick = options.map((o, q) => [q, (o[0] * w[0] + o[1] * w[1]) / lw]).sort((x, y) => y[1] - x[1])[0][0];
+      this.dir = this.spaced = pick + 3 * Math.ceil(this.dir / 3);
+    }
+    const cutOf = (o) => { const trial = structuredClone(m), j = splitZone(trial, i, c.p, [c.p[0] + o[0], c.p[1] + o[1]], { fromCorner: true }); return j < 0 ? null : { trial, j }; };
+    const cuts = options.map(cutOf), chosen = cuts[pick];
+    if (!chosen) return null;
+    const d = options[pick], b = [c.p[0] + d[0], c.p[1] + d[1]];
+    const faint = cuts.map((x, q) => (x && q !== pick ? this.sharedEdges(x.trial, i, x.j).map(([p, r]) => { const P0 = this.P([...p, z1]), P1 = this.P([...r, z1]); return line(P0[0], P0[1], P1[0], P1[1], { stroke: 'var(--glass)', w: 1, dash: '3 3' }); }).join('') : '')).join('');
+    return {
+      what: 'zone split from a corner',
+      mutate: (x) => splitZone(x, i, c.p, b, { fromCorner: true }),
+      draw: () => this.box(m.zones[i].plate, z0, z1, true) + faint + this.sharedEdges(chosen.trial, i, chosen.j).map(([p, r]) => this.cut(p, r, z0, z1)).join('')
+        + this.note(c.p, z1, `${['along one face', 'along the other face', 'at 45°'][pick]} · Space for the next`),
     };
   }
 
@@ -214,8 +239,8 @@ export class ModelTools {
     p.moved = true;
     const l2 = p.dir[0] ** 2 + p.dir[1] ** 2 || 1, step = e.shiftKey ? 0.1 : SNAP, m = this.massing();
     p.d = Math.round(((dx * p.dir[0] + dy * p.dir[1]) / l2) / step) * step;
-    const trial = structuredClone(m), ok = extrudeFace(trial, p.i, p.k, p.d), [z0, z1] = zoneLevels(m, p.i);
-    p.ok = ok;
+    const trial = structuredClone(m), taken = extrudeFace(trial, p.i, p.k, p.d), ok = Math.abs(taken) > 1e-6, [z0, z1] = zoneLevels(m, p.i);
+    p.ok = ok; p.d = taken; // as far as it may go
     this.svg.innerHTML = (ok ? this.box(trial.zones[p.i].plate, z0, z1) : this.face(m, p.i, p.k)) + this.note(m.zones[p.i].plate[p.k], z1, `${p.d > 0 ? '+' : ''}${Math.round(p.d * 1000)} mm`);
   }
   releasePush(e) {

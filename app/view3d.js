@@ -417,6 +417,7 @@ export class View3D {
 
     this.group.add(this.front, this.back, this.glass, this.doorMesh, this.shading, this.edges, this.problemLayer());
     this.shadowSkins();
+    this.setFloating(this.floatZones);
     if (keep) {
       if (this.sections.planes.length) this.caps.update();
       this.render();
@@ -482,6 +483,30 @@ export class View3D {
     g.computeVertexNormals();
     g.userData.owner = owner;
     return g;
+  }
+
+  // Zones held up by nothing (named): their surfaces covered in a grey diagonal hatch, so a mass left
+  // floating (its support deleted) shows. Kept, and redrawn, as the walls change.
+  setFloating(zones = []) {
+    this.floatZones = zones;
+    if (this.floatMesh) { this.floatMesh.geometry.dispose(); this.floatMesh.material.dispose(); this.group.remove(this.floatMesh); this.floatMesh = null; }
+    if (zones.length && this.front) {
+      const set = new Set(zones), owner = this.front.geometry.userData.owner || [], pos = this.front.geometry.getAttribute('position').array, out = [];
+      for (let t = 0; t < owner.length; t++) if (set.has(this.surfaces[owner[t]]?.zone)) for (let k = 0; k < 9; k++) out.push(pos[t * 9 + k]);
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(out, 3));
+      const mat = new THREE.MeshBasicMaterial({ color: '#93A6AA', transparent: true, opacity: 0.6, side: THREE.DoubleSide, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+      const dpr = this.renderer.getPixelRatio();
+      this.sections.patch(mat, -1, (shader) => {
+        shader.fragmentShader = shader.fragmentShader.replace('#include <dithering_fragment>', `#include <dithering_fragment>
+if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)}) < ${(1.4 * dpr).toFixed(2)}) gl_FragColor = vec4(0.294, 0.345, 0.333, 0.9);`);
+      });
+      this.floatMesh = new THREE.Mesh(g, mat);
+      this.floatMesh.renderOrder = 4;
+      this.floatMesh.raycast = () => {};
+      this.group.add(this.floatMesh);
+    }
+    this.render();
   }
 
   // What the sun's shadows fall on: a skin over the surfaces that draws only shadow, and the ground
@@ -600,6 +625,7 @@ export class View3D {
     this.edges.geometry.dispose();
     this.edges.geometry = this.edgesGeometry();
     this.redrawWindows();
+    this.setFloating(this.floatZones);
     this.caps.update();
   }
 

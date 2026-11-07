@@ -4,7 +4,7 @@
 // change goes through `change`, which rewrites the model from the massing (applyMassing) as one
 // undoable edit.
 
-import { massingGeometry, WINDOWS0, unitLayout, sideWindows, setWindowFigure, setWindowSize, spreadSide, moveLevel, faceLength, zoneHeight, faceBearing, compassWord, polyArea, levelName } from '../src/model/massing.js';
+import { deleteZone, massingGeometry, WINDOWS0, unitLayout, sideWindows, setWindowFigure, setWindowSize, spreadSide, moveLevel, faceLength, zoneHeight, faceBearing, compassWord, polyArea, levelName } from '../src/model/massing.js';
 import { SIZES } from '../src/model/windows.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -157,7 +157,7 @@ export function massingPanel(box, { get, change }) {
       for (const z of x.zones.filter((y) => y.top === T)) x.zones.push({ ...structuredClone(z), name: null, base: T, top: T + 1 });
       sel = x.zones.length - 1;
     }, 'storey added');
-    else if (act === 'del') change((x) => { x.zones.splice(i, 1); sel = Math.min(sel, x.zones.length - 1); }, 'zone removed');
+    else if (act === 'del') change((x) => { deleteZone(x, i); sel = Math.min(sel, x.zones.length - 1); }, 'zone deleted');
     else if (act === 'level-del') change((x) => {
       x.levels.splice(i, 1);
       for (const z of x.zones) { if (z.base > i) z.base--; if (z.top > i) z.top--; }

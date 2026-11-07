@@ -29,7 +29,7 @@
 import * as THREE from 'three';
 import { askNumber } from './sections.js';
 import { AXIS, CLICK_PX, gripMark, gripAt, cursorFor, dragLength, dragAngle, angleOf, dragOnPlane, screenDir, dim, label, line, head, path, poly, circle, arrayBracket } from './handles.js';
-import { bayExtents, setArraySpan, zoneFrame, pushFace, moveStorey, turnZone, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows, faceLength, zoneHeight, faceBearing, compassWord } from '../src/model/massing.js';
+import { isSeam, slideSeam, moveZone, turnPlan, bayExtents, setArraySpan, zoneFrame, pushFace, moveStorey, turnZone, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows, faceLength, zoneHeight, faceBearing, compassWord } from '../src/model/massing.js';
 
 // A face named for the way it looks ('south face'), or the roof or floor.
 const faceName = (m, i, f) => (f === 'roof' || f === 'floor' ? f : `${{ N: 'north', NE: 'north-east', E: 'east', SE: 'south-east', S: 'south', SW: 'south-west', W: 'west', NW: 'north-west' }[compassWord(faceBearing(m, i, f))]} face`);
@@ -287,19 +287,25 @@ export class MassingEditor {
       const k = face, A = c[k], B = c[(k + 1) % n];
       list.push([[A[0], A[1], z1], [B[0], B[1], z1], 'roof']);
       list.push([[A[0], A[1], z0], [B[0], B[1], z0], 'floor']);
-      list.push([[A[0], A[1], z0], [A[0], A[1], z1], (k + n - 1) % n]);
-      list.push([[B[0], B[1], z0], [B[0], B[1], z1], (k + 1) % n]);
+      // a side edge at a seam slides the seam along the face (in its plane); at a corner it pushes the
+      // face beyond
+      const U = [(B[0] - A[0]), (B[1] - A[1])], l = Math.hypot(...U) || 1;
+      for (const [v, p, beyond, sgn] of [[k, A, (k + n - 1) % n, -1], [(k + 1) % n, B, (k + 1) % n, 1]]) {
+        if (isSeam(this.massing(), i, v)) list.push([[p[0], p[1], z0], [p[0], p[1], z1], null, { kind: 'seam', vertex: v }, [(U[0] / l) * sgn, (U[1] / l) * sgn, 0]]);
+        else list.push([[p[0], p[1], z0], [p[0], p[1], z1], beyond]);
+      }
     } else {
       const z = face === 'roof' ? z1 : z0;
       c.forEach((_, k) => list.push([[c[k][0], c[k][1], z], [c[(k + 1) % n][0], c[(k + 1) % n][1], z], k]));
     }
     let g = '';
-    for (const [a, b, beyond] of list) {
+    for (const [a, b, beyond, own, out] of list) {
       const f = byKey[beyond];
-      if (!f) continue;
+      if (!f && !own) continue;
       const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2], pa = P(a), pb = P(b), pm = P(mid);
       g += line(pa[0], pa[1], pb[0], pb[1], { stroke: 'var(--glass)', w: 1.6 });
-      grips.push({ p: pm, key: { kind: 'face', face: beyond }, from: 0, dir: screenDir(P, mid, f.normal) });
+      // a seam's grip runs out along the face from its middle (a positive drag lengthens this face)
+      grips.push(own ? { p: pm, key: own, from: 0, dir: screenDir(P, mid, out), sgn: out } : { p: pm, key: { kind: 'face', face: beyond }, from: 0, dir: screenDir(P, mid, f.normal) });
       g += gripMark(pm[0], pm[1], 4.5);
     }
     return g;
@@ -319,13 +325,22 @@ export class MassingEditor {
       spreadSide(m, i, f);
     }
     else if (key.kind === 'move') moveStorey(m, i, key.axis, x);
-    else if (key.kind === 'free') { moveStorey(m, i, 'x', x[0]); moveStorey(m, i, 'y', x[1]); }
+    else if (key.kind === 'free') moveZone(m, i, turnPlan(x, m.zones[i].rot || 0)); // along its own axes, as far as it may go
+    else if (key.kind === 'seam') {
+      // along the face from this one's middle: out lengthens it; the seam moves along its line
+      const P = m.zones[i].plate, n = P.length, v = key.vertex, f = this.target.face, a = P[f], b = P[(f + 1) % n];
+      const l = Math.hypot(b[0] - a[0], b[1] - a[1]), dir = v === f ? -1 : 1;
+      const prev = P[(v - 1 + n) % n], next = P[(v + 1) % n], run = [next[0] - prev[0], next[1] - prev[1]], lr = Math.hypot(...run);
+      const along = ((b[0] - a[0]) * run[0] + (b[1] - a[1]) * run[1]) / (l * lr); // +1 when the face runs the seam's way
+      slideSeam(m, i, v, x * dir * along);
+    }
     else if (key.kind === 'rot') turnZone(m, i, +((((m.zones[i].rot || 0) - x + 540) % 360) - 180).toFixed(3)); // the arc runs from x toward y: anticlockwise
     return m;
   }
   what(key) {
     const s = `zone ${this.target.zone + 1}`;
     if (key.kind === 'span') return `${faceName(this.massing(), this.target.zone, this.target.face)}: window array length set`;
+    if (key.kind === 'seam') return `zone ${this.target.zone + 1} seam moved`;
     return key.kind === 'face' ? `${s} ${faceName(this.massing(), this.target.zone, key.face)} pushed or pulled` : key.kind === 'rot' ? `${s} turned` : `${s} moved`;
   }
 
@@ -390,7 +405,7 @@ export class MassingEditor {
       }, this.what(key)));
       return;
     }
-    const label = key.kind === 'rot' ? 'turn °, anticlockwise' : key.kind === 'move' ? `move mm along ${key.axis}` : `push or pull the ${faceName(this.massing(), this.target.zone, key.face)}, mm`;
+    const label = key.kind === 'seam' ? 'lengthen this face by, mm (the seam moves)' : key.kind === 'rot' ? 'turn °, anticlockwise' : key.kind === 'move' ? `move mm along ${key.axis}` : `push or pull the ${faceName(this.massing(), this.target.zone, key.face)}, mm`;
     askNumber(this.view.container, e, label, (x) => this.onChange((m) => this.apply(m, key, key.kind === 'rot' ? x : x / 1000), this.what(key)));
   }
 
