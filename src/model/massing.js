@@ -64,7 +64,7 @@ export function upgradeMassing(m) {
   let z = 0;
   m.storeys.forEach((s, i) => { z += s.h; levels.push({ name: levelName(i + 1), z: +z.toFixed(6) }); });
   const zones = m.storeys.map((s, i) => ({
-    name: s.name || null, base: i, top: i + 1, rot: s.rot || 0, plate: platePolygon(s), faces: SIDES.map((f) => s.sides?.[f] ?? null),
+    id: i, name: s.name || null, base: i, top: i + 1, rot: s.rot || 0, plate: platePolygon(s), faces: SIDES.map((f) => s.sides?.[f] ?? null),
     slab: s.slab ?? 0, linkFaces: !!s.linkSides, linkAbove: !!s.linkAbove,
   }));
   const { storeys, ...rest } = m;
@@ -75,7 +75,11 @@ export function upgradeMassing(m) {
 export const zoneLevels = (m, i) => [m.levels[m.zones[i].base].z, m.levels[m.zones[i].top].z];
 export const zoneHeight = (m, i) => { const [a, b] = zoneLevels(m, i); return b - a; };
 // A zone's name as written: its own or the massing's with its base level's number, and its index.
-export const zoneName = (m, i) => { const z = m.zones[i]; return `${String(z.name || `${m.name || 'Floor'}${z.base + 1}`).replace(/[,;!]/g, ' ').trim()}_${i}`; };
+//   Its number is its own id, kept as zones are added, deleted and merged, so a zone keeps its name (and
+// with it its settings in the model) whatever happens to the others; a zone without one goes by its place.
+export const zoneName = (m, i) => { const z = m.zones[i]; return `${String(z.name || `${m.name || 'Floor'}${z.base + 1}`).replace(/[,;!]/g, ' ').trim()}_${z.id ?? i}`; };
+// The id a new zone takes: one past the highest.
+export const nextZoneId = (m) => m.zones.reduce((a, z, i) => Math.max(a, (z.id ?? i) + 1), 0);
 
 // ---------- the window arrays (as the shading tool's cells) ----------
 
@@ -810,7 +814,7 @@ export function addZone(m, i, k, { u = null, at = null, w = 3, d = 3, h = 3 } = 
   }
   const lv = (L) => m.levels[L].z, overlaps = m.zones.some((y) => lv(y.base) < lv(top) - 1e-6 && lv(y.top) > lv(base) + 1e-6 && intersect(y.plate, plate).some((P) => Math.abs(polyArea(P)) > 1e-3));
   if (overlaps) return -1;
-  m.zones.push({ name: null, base, top, rot: z.rot || 0, plate, faces: plate.map(() => null) });
+  m.zones.push({ id: nextZoneId(m), name: null, base, top, rot: z.rot || 0, plate, faces: plate.map(() => null) });
   return m.zones.length - 1;
 }
 
@@ -821,15 +825,25 @@ export function addZone(m, i, k, { u = null, at = null, w = 3, d = 3, h = 3 } = 
 // index, or -1 where the plane misses the zone or leaves a sliver.
 //   From a corner (`fromCorner`: a is one of its corners, b along the cut), the cut runs only from that
 // corner to the first face it meets, not on through the rest of the zone.
-export function splitZone(m, i, a, b, { fromCorner = false } = {}) {
+//   From a face (`fromFace`: a on it), likewise from there to the first face the cut meets; from inside
+// (`within`: a in the zone, as on its roof), both ways from a to the faces the cut meets.
+export function splitZone(m, i, a, b, { fromCorner = false, fromFace = false, within = false } = {}) {
   const z = m.zones[i], d = [b[0] - a[0], b[1] - a[1]], l = Math.hypot(d[0], d[1]);
   if (l < 1e-9) return -1;
   const D = [d[0] / l, d[1] / l], N = [D[1], -D[0]], far = 1e4;
   let left, right;
-  if (fromCorner) {
-    const parts = chordSplit(z.plate, a, D);
+  if (fromCorner || fromFace || within) {
+    let P = z.plate, from = a;
+    if (within) {
+      // back along the cut to the face behind the point: the cut starts there
+      const back = rayExit(P, a, [-D[0], -D[1]]);
+      if (!back) return -1;
+      from = back.pt;
+    }
+    if (!P.some((p) => Math.hypot(p[0] - from[0], p[1] - from[1]) < 1e-6)) P = withPoint(P, from);
+    const parts = P && chordSplit(P, from, D);
     if (!parts) return -1;
-    [left, right] = parts.map((P) => [P]);
+    [left, right] = parts.map((Q) => [Q]);
   } else {
     const half = (side) => {
       const o = [a[0] - D[0] * far, a[1] - D[1] * far], e = [a[0] + D[0] * far, a[1] + D[1] * far], s = side * far;
@@ -856,11 +870,34 @@ export function splitZone(m, i, a, b, { fromCorner = false } = {}) {
   };
   const L = start(left[0]), R = start(right[0]);
   const fl = facesOf(L), fr = facesOf(R);
-  m.zones.push({ ...structuredClone(z), name: null, plate: R, faces: fr, cells: undefined, linkFaces: false, linkAbove: false, copyFrom: zoneName(m, i) });
+  m.zones.push({ ...structuredClone(z), id: nextZoneId(m), name: null, plate: R, faces: fr, cells: undefined, linkFaces: false, linkAbove: false, copyFrom: zoneName(m, i) });
   Object.assign(z, { plate: L, faces: fl, cells: undefined });
   return m.zones.length - 1;
 }
 
+// Where a ray from a along D first leaves a footprint: the point and the face (index), passing over the
+// faces a lies on. null when it meets none.
+function rayExit(P, a, D) {
+  const n = P.length;
+  let best = null;
+  for (let k = 0; k < n; k++) {
+    const p = P[k], q = P[(k + 1) % n], e = [q[0] - p[0], q[1] - p[1]], den = D[0] * e[1] - D[1] * e[0];
+    if (Math.abs(den) < 1e-12) continue;
+    const w = [p[0] - a[0], p[1] - a[1]], t = (w[0] * e[1] - w[1] * e[0]) / den, s = (w[0] * D[1] - w[1] * D[0]) / den;
+    if (t > 1e-6 && s >= -1e-9 && s <= 1 + 1e-9 && (!best || t < best.t)) best = { t, k, pt: [R6(a[0] + D[0] * t), R6(a[1] + D[1] * t)] };
+  }
+  return best;
+}
+// A footprint with point x put in as a corner on the face it lies on; null when it lies on none.
+function withPoint(P, x) {
+  const n = P.length;
+  for (let k = 0; k < n; k++) {
+    const p = P[k], q = P[(k + 1) % n], e = [q[0] - p[0], q[1] - p[1]], l2 = e[0] ** 2 + e[1] ** 2, u = ((x[0] - p[0]) * e[0] + (x[1] - p[1]) * e[1]) / (l2 || 1);
+    if (u <= 1e-9 || u >= 1 - 1e-9) continue;
+    if (Math.hypot(p[0] + e[0] * u - x[0], p[1] + e[1] * u - x[1]) < 1e-6) return [...P.slice(0, k + 1), [R6(x[0]), R6(x[1])], ...P.slice(k + 1)];
+  }
+  return null;
+}
 // A footprint cut from its corner at `a` along D to the first face the cut meets: the two outlines, or
 // null when `a` is not a corner of it or the cut leaves it at once.
 function chordSplit(P, a, D) {
@@ -1058,6 +1095,120 @@ export function deleteZone(m, i) {
   for (const y of m.zones) { if (y.base >= z.top) y.base -= gone; if (y.top >= z.top) y.top -= gone; }
   return true;
 }
+
+// ---------- merging zones and faces, removing seams ----------
+
+// The window arrays a new outline P takes from the faces of zones `from` it lies along: each edge the
+// array of the face it overlaps most (the larger face's, where it spans several), set out on the new
+// edge with its windows where they were (splitArray); the whole face's own where it is that face.
+function carryArrays(m, from, P) {
+  return P.map((p, q) => {
+    const r = P[(q + 1) % P.length];
+    let best = null;
+    for (const i of from) {
+      m.zones[i].plate.forEach((_, k) => {
+        const { A, U } = faceAxes(m, i, k), len = faceLength(m, i, k), off = (x) => (x[0] - A[0]) * U[1] - (x[1] - A[1]) * U[0], at = (x) => (x[0] - A[0]) * U[0] + (x[1] - A[1]) * U[1];
+        if (Math.abs(off(p)) > 1e-4 || Math.abs(off(r)) > 1e-4) return;
+        const u0 = at(p), u1 = at(r), ov = Math.min(len, u1) - Math.max(0, u0);
+        if (u1 > u0 && ov > 1e-6 && (!best || ov > best.ov)) best = { ov, g: m.zones[i].faces[k], len, u0, u1 };
+      });
+    }
+    if (!best?.g) return null;
+    return Math.abs(best.u0) < 1e-4 && Math.abs(best.u1 - best.len) < 1e-4 ? structuredClone(best.g) : splitArray(best.g, best.len, best.u0, best.u1);
+  });
+}
+// An outline with every point of `pts` lying along one of its faces (not at its corners) put in as a
+// corner: the seams where the faces of what was merged met.
+function withSeams(P, pts) {
+  const out = [];
+  P.forEach((p, k) => {
+    const q = P[(k + 1) % P.length], e = [q[0] - p[0], q[1] - p[1]], l2 = e[0] ** 2 + e[1] ** 2;
+    out.push(p);
+    const on = pts.map((x) => [x, ((x[0] - p[0]) * e[0] + (x[1] - p[1]) * e[1]) / (l2 || 1)])
+      .filter(([x, u]) => u > 1e-6 && u < 1 - 1e-6 && Math.hypot(p[0] + e[0] * u - x[0], p[1] + e[1] * u - x[1]) < 1e-6)
+      .sort((a, b) => a[1] - b[1]);
+    for (const [x] of on) if (!out.some((y) => Math.hypot(y[0] - x[0], y[1] - x[1]) < 1e-6)) out.push([R6(x[0]), R6(x[1])]);
+  });
+  return out;
+}
+// Zones merged into the first of `list`: one zone over all their footprints, with the first's settings
+// (its id, and so its name), the walls between them gone. Keeping seams, the faces that met in line
+// stay two faces, and the floors and roofs stay the pieces they were (cells); without, the outline's
+// faces in line are one face each (the larger one's windows) and the floor and roof one piece. They
+// must stand on the same levels and make one outline. Returns the merged zone's index, or why not.
+export function mergeZones(m, list, keepSeams = true) {
+  if (list.length < 2) return 'Pick two or more zones.';
+  const zs = list.map((i) => m.zones[i]), first = zs[0];
+  if (zs.some((z) => z.base !== first.base || z.top !== first.top)) return 'Only zones on the same levels can be merged.';
+  let union;
+  try { union = pc.union(...zs.map((z) => geom(z.plate))); } catch { return 'These zones cannot be merged.'; }
+  if (union.length !== 1) return 'The zones must meet along a face to be merged.';
+  if (union[0].length > 1) return 'Merged, they would enclose a courtyard: not yet possible.';
+  let P = pieces(union)[0];
+  if (keepSeams) P = withSeams(P, zs.flatMap((z) => z.plate));
+  // begin the outline at the corner nearest where the first zone's began, so its faces keep their order
+  const q = P.reduce((b, p, j) => (Math.hypot(p[0] - first.plate[0][0], p[1] - first.plate[0][1]) < Math.hypot(P[b][0] - first.plate[0][0], P[b][1] - first.plate[0][1]) ? j : b), 0);
+  P = [...P.slice(q), ...P.slice(0, q)];
+  const faces = carryArrays(m, list, P), cells = keepSeams ? zs.flatMap(cellsOf).map((c) => c.map(([x, y]) => [R6(x), R6(y)])) : undefined;
+  Object.assign(first, { plate: P, faces, cells });
+  if (!cells) delete first.cells;
+  for (const i of list.slice(1).sort((a, b) => b - a)) m.zones.splice(i, 1);
+  return list[0] - list.slice(1).filter((i) => i < list[0]).length;
+}
+// A zone's seams: the corners where two of its faces meet in line (up its walls), and the edges where
+// two of its floor and roof pieces meet (each [p, q] in plan).
+export function zoneSeams(m, i) {
+  const z = m.zones[i], walls = z.plate.map((_, v) => v).filter((v) => isSeam(m, i, v)), cells = [];
+  const C = cellsOf(z);
+  C.forEach((a, ia) => a.forEach((p, k) => {
+    const q = a[(k + 1) % a.length];
+    C.forEach((b, ib) => {
+      if (ib <= ia) return;
+      b.forEach((r, j) => {
+        const t = b[(j + 1) % b.length], len = Math.hypot(q[0] - p[0], q[1] - p[1]), U = [(q[0] - p[0]) / len, (q[1] - p[1]) / len];
+        const off = (x) => (x[0] - p[0]) * U[1] - (x[1] - p[1]) * U[0], at = (x) => (x[0] - p[0]) * U[0] + (x[1] - p[1]) * U[1];
+        if (Math.abs(off(r)) > 1e-4 || Math.abs(off(t)) > 1e-4) return;
+        const lo = Math.max(0, Math.min(at(r), at(t))), hi = Math.min(len, Math.max(at(r), at(t)));
+        if (hi - lo > 1e-3) cells.push({ cells: [ia, ib], p: [p[0] + U[0] * lo, p[1] + U[1] * lo], q: [p[0] + U[0] * hi, p[1] + U[1] * hi] });
+      });
+    });
+  }));
+  return { walls, cells };
+}
+// A seam up a zone's walls (corner v, between two faces in line) taken out: one face, the larger
+// one's windows set out along it where they were.
+export function removeWallSeam(m, i, v) {
+  if (!isSeam(m, i, v)) return false;
+  const P = m.zones[i].plate.filter((_, j) => j !== v), faces = carryArrays(m, [i], P);
+  Object.assign(m.zones[i], { plate: P, faces });
+  return true;
+}
+// Two of a zone's floor and roof pieces made one (where they make one outline).
+export function mergeCells(m, i, list) {
+  const z = m.zones[i], C = cellsOf(z), pick = [...new Set(list)];
+  if (pick.length < 2) return false;
+  const one = pieces(pc.union(...pick.map((c) => geom(C[c]))));
+  if (one.length !== 1) return false;
+  const rest = C.filter((_, c) => !pick.includes(c));
+  z.cells = [...rest, one[0]];
+  if (z.cells.length === 1) delete z.cells;
+  return true;
+}
+// Faces of a zone made one where they run in line one after another: the seams between them go.
+export function mergeFaces(m, i, faces) {
+  const z = m.zones[i], set = new Set(faces), n = z.plate.length;
+  const drop = z.plate.map((_, v) => v).filter((v) => set.has((v - 1 + n) % n) && set.has(v) && isSeam(m, i, v));
+  if (!drop.length) return false;
+  const P = z.plate.filter((_, v) => !drop.includes(v)), arrays = carryArrays(m, [i], P);
+  Object.assign(z, { plate: P, faces: arrays });
+  return true;
+}
+// The floor or roof piece of a zone a plan point lies in.
+export function cellAt(m, i, pt) {
+  const C = cellsOf(m.zones[i]);
+  return C.findIndex((c) => { let inside = false; for (let a = 0, b = c.length - 1; a < c.length; b = a++) if ((c[a][1] > pt[1]) !== (c[b][1] > pt[1]) && pt[0] < ((c[b][0] - c[a][0]) * (pt[1] - c[a][1])) / (c[b][1] - c[a][1]) + c[a][0]) inside = !inside; return inside; });
+}
+export { cellsOf };
 
 // A zone's re-entrant corners (inside angle over 180°): where a split can start. Plate points with the
 // directions of the faces meeting there, pointing into the zone.

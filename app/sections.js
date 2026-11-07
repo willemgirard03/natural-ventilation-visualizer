@@ -581,7 +581,9 @@ for (int i = 0; i < ${MAX}; i++) {
     if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) return null;
     const ray = new THREE.Raycaster();
     ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), v.camera);
-    const hit = ray.intersectObjects([v.front, v.back].filter(Boolean), false).find((h) => !this.removed(h.point));
+    // the glass and doors count as their wall (open or not), so a plane is not placed through a window
+    // onto what lies beyond it
+    const hit = ray.intersectObjects([v.front, v.back, v.glass, v.sashMesh, v.doorMesh].filter(Boolean), false).find((h) => !this.removed(h.point));
     if (hit) {
       const item = hit.object.userData.items?.[hit.object.geometry.userData.owner?.[hit.faceIndex]];
       return { point: hit.point.clone(), zone: v.model?.zones[item?.zone], normal: hit.face?.normal.clone() };
@@ -608,26 +610,39 @@ for (int i = 0; i < ${MAX}; i++) {
   }
 
   // Starts placing: the ghost follows the pointer over the view until a click (or release, when
-  // dragged in) puts the plane there. Space steps through what it is: a section facing the eye, the
-  // same turned round, a plan cut looking down, and one looking up. Esc cancels.
+  // dragged in) puts the plane there. Space steps through what it is: over a wall, a section square to
+  // it, the same turned round, a plan cut looking down, and one looking up; over a roof (as Split zone
+  // does), a section along the building's x, along its y, and each turned round. An arrow shows the way
+  // the cut looks. Esc cancels.
   startPlacing(kind, dragged) {
     this.stopPlacing();
     const el = this.view.renderer.domElement, WAYS = [['section', false], ['section', true], ['plan', false], ['plan', true]];
-    this.placing = { kind, flip: false, way: kind === 'plan' ? 2 : 0 };
+    this.placing = { kind, flip: false, way: kind === 'plan' ? 2 : 0, roofWay: 0, overRoof: false };
     document.body.classList.add(dragged ? 'placedrag' : 'placing');
     let last = null;
+    // what the plane would be here: [kind, point, along, flip]
+    const what = (pt) => {
+      const roof = pt.zone && pt.normal && pt.normal.z > 0.7;
+      this.placing.overRoof = !!roof;
+      if (roof) {
+        const w = this.placing.roofWay % 4, yaw = (this.view.longAxis || 0) + (w % 2 ? Math.PI / 2 : 0);
+        return ['section', pt.point.clone(), new THREE.Vector3(Math.cos(yaw), Math.sin(yaw), 0), w >= 2];
+      }
+      const { kind: k, flip } = this.placing;
+      return [k, ...this.placeAt(k, pt), flip];
+    };
     const ghost = (e) => {
-      const pt = e && this.pointAt(e), { kind: k, flip } = this.placing;
+      const pt = e && this.pointAt(e);
       if (!pt) { this.showGhost(null); return; }
-      const p = this.make(k, ...this.placeAt(k, pt));
+      const [k, at, along, flip] = what(pt), p = this.make(k, at, along);
       p.flip = flip;
       this.showGhost(p);
     };
     const move = (e) => { last = e; ghost(e); };
     const put = (e) => {
-      const pt = this.pointAt(e), { kind: k, flip } = this.placing;
+      const pt = this.pointAt(e), w = pt && what(pt);
       this.stopPlacing();
-      if (pt) this.add(k, ...this.placeAt(k, pt), flip);
+      if (w) this.add(w[0], w[1], w[2], w[3]);
     };
     const down = (e) => { if (e.button === 0 && !dragged) { e.stopImmediatePropagation(); put(e); } };
     const up = (e) => { if (dragged) put(e); };
@@ -635,8 +650,11 @@ for (int i = 0; i < ${MAX}; i++) {
       if (e.key === 'Escape') this.stopPlacing();
       if (e.key === ' ' && !e.target.closest?.('input, select, textarea')) {
         e.preventDefault(); e.stopImmediatePropagation();
-        this.placing.way = (this.placing.way + 1) % WAYS.length;
-        [this.placing.kind, this.placing.flip] = WAYS[this.placing.way];
+        if (this.placing.overRoof) this.placing.roofWay++;
+        else {
+          this.placing.way = (this.placing.way + 1) % WAYS.length;
+          [this.placing.kind, this.placing.flip] = WAYS[this.placing.way];
+        }
         ghost(last);
       }
     };
@@ -667,7 +685,12 @@ for (int i = 0; i < ${MAX}; i++) {
       const line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(c), new THREE.LineDashedMaterial({ color, dashSize: 0.5, gapSize: 0.3, depthTest: false, transparent: true }));
       line.computeLineDistances();
       const fill = new THREE.Mesh(new THREE.BufferGeometry().setFromPoints([c[0], c[1], c[2], c[0], c[2], c[3]]), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false }));
-      g.add(line, fill);
+      // the way the cut looks: an arrow from the plane's middle into what it keeps
+      const f = frameOf(p), mid = c.reduce((a, q) => a.add(q), new THREE.Vector3()).multiplyScalar(0.25);
+      const size = Math.max(1.5, Math.min(c[0].distanceTo(c[1]), c[1].distanceTo(c[2])) * 0.18);
+      const arrow = new THREE.ArrowHelper(f.n.clone().negate(), mid, size, color, size * 0.35, size * 0.22);
+      arrow.traverse((o) => { if (o.material) Object.assign(o.material, { depthTest: false, transparent: true }); });
+      g.add(line, fill, arrow);
       g.traverse((o) => { o.renderOrder = 11; });
       this.ghost = g;
       this.layer.add(g);

@@ -220,8 +220,10 @@ const tools = new ModelTools(view, {
   },
   onChange: (mutate, what) => massingChange(mutate, what),
   onAdded: (j) => { const z = massingGeometry(massing)[j]; if (z && model.zones[z.name]) view.select(z.name); },
+  keepSeams: () => $('keep-seams').checked,
   onTool: (tool) => {
     for (const b of document.querySelectorAll('#model-tools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
+    $('keep-seams-l').hidden = tool !== 'merge';
     if (tool) { winEdit.stop(); view.select(null); hover.clear(); }
   },
 });

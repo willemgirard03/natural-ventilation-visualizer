@@ -6,7 +6,7 @@ import { importEpJSON } from '../src/model/import-epjson.js';
 import { enclosedVolume } from '../src/model/geometry.js';
 import { massing0, massingEpJSON, massingGeometry, sideWindows, unitLayout, storey0, applyMassing, setWindowSize, setWindowFigure, breakWindow, applyToArray, dragPitch, addWindows, upgradeMassing, MASSING_SETTINGS0, zoneHeight, faceLength, moveLevel, pushFace, WINDOWS0,
   addZone, splitZone, reentrantCorners, setArraySpan, setJustify, arraySpan, bayExtents, splitFace, extrudeFace,
-  moveZone, deleteZone, floatingZones, zoneFits, slideSeam } from '../src/model/massing.js';
+  moveZone, deleteZone, floatingZones, zoneFits, slideSeam, mergeZones, zoneSeams, removeWallSeam, mergeCells, mergeFaces, zoneName } from '../src/model/massing.js';
 // A massing from older storeys (rectangular plates stacked), as the tool upgrades them.
 const stack = (...storeys) => upgradeMassing({ name: 'Floor', rot: 0, storeys, settings: MASSING_SETTINGS0() });
 import { edit } from '../src/model/edit.js';
@@ -54,7 +54,7 @@ test('a massing changed keeps the edits made since, where they still apply, and 
   ep['BuildingSurface:Detailed']['Floor1_0:f1'].construction_name = 'Massing Roof';
   edit(ep, (tx) => setZoneSetting(tx, 'Floor2_1', 'peoplePerArea', 0.1));
   const edited = JSON.stringify(ep);
-  m.levels.push({ name: 'Level 4', z: 10.5 }); m.zones.push({ ...structuredClone(m.zones[1]), base: 2, top: 3 });
+  m.levels.push({ name: 'Level 4', z: 10.5 }); m.zones.push({ ...structuredClone(m.zones[1]), id: 2, base: 2, top: 3 });
   m.zones[0].plate = [[-12, -5], [12, -5], [12, 5], [-12, 5]]; m.zones[0].faces[0].winN = 6;
   const e = edit(ep, (tx) => applyMassing(tx, m));
   let model = importEpJSON(ep);
@@ -292,4 +292,52 @@ test('a split from a re-entrant corner runs only to the first face it meets', ()
   splitFace(m2, 0, 0, 5);
   near(slideSeam(m2, 0, 1, 2), 2);
   assert.deepEqual(m2.zones[0].plate[1], [-3, -5]);
+});
+
+test('a cut from a face, or from the roof, runs only to the faces it meets: the arm of a U splits alone', () => {
+  const U = () => { const m = massing0(); m.zones[0].plate = [[0, 0], [12, 0], [12, 10], [8, 10], [8, 4], [4, 4], [4, 10], [0, 10]]; m.zones[0].faces = m.zones[0].plate.map(() => null); return m; };
+  const area = (z) => Math.abs(z.plate.reduce((a, p, k, P) => a + p[0] * P[(k + 1) % P.length][1] - P[(k + 1) % P.length][0] * p[1], 0) / 2);
+  // square to the arm's inner face (x = 8, facing -x) at y = 7: across the arm only
+  let m = U(), n = splitZone(m, 0, [8, 7], [9, 7], { fromFace: true });
+  assert.ok(n > 0);
+  assert.deepEqual([area(m.zones[0]), area(m.zones[n])].sort((a, b) => a - b), [12, 84]);
+  // from the roof of the arm along x at y = 7: the same
+  m = U(); n = splitZone(m, 0, [10, 7], [11, 7], { within: true });
+  assert.deepEqual([area(m.zones[0]), area(m.zones[n])].sort((a, b) => a - b), [12, 84]);
+});
+
+test('zones merged: the wall between goes; with seams kept the faces and the roof stay pieces', () => {
+  const m = massing0(), n = splitZone(m, 0, [0, -10], [0, 10]); // the ground floor in two halves
+  const merged = mergeZones(m, [0, n], true);
+  assert.equal(merged, 0);
+  assert.equal(m.zones.length, 2);
+  const g = massingGeometry(m)[0];
+  assert.equal(g.surfaces.filter((s) => s.type === 'Wall').length, 6); // front and back each two, the ends one
+  assert.equal(g.surfaces.filter((s) => s.type === 'Floor').length, 2);
+  assert.equal(zoneSeams(m, 0).walls.length, 2);
+  assert.equal(zoneSeams(m, 0).cells.length, 1);
+  // a seam taken out: one face; the roof pieces made one
+  assert.ok(removeWallSeam(m, 0, zoneSeams(m, 0).walls[0]));
+  assert.ok(mergeCells(m, 0, zoneSeams(m, 0).cells[0].cells));
+  assert.equal(massingGeometry(m)[0].surfaces.filter((s) => s.type === 'Floor').length, 1);
+  // without seams: one face each way, the floor whole
+  const m2 = massing0(), n2 = splitZone(m2, 0, [0, -10], [0, 10]);
+  mergeZones(m2, [0, n2], false);
+  assert.equal(m2.zones[0].plate.length, 4);
+  assert.ok(!m2.zones[0].cells);
+  const model = importEpJSON(massingEpJSON(m2));
+  assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
+  // zones on different levels are not merged
+  assert.equal(typeof mergeZones(massing0(), [0, 1]), 'string');
+  // faces merged: the seam between two faces in line goes
+  const m3 = massing0(); splitFace(m3, 0, 0, 5);
+  assert.ok(mergeFaces(m3, 0, [0, 1]));
+  assert.equal(m3.zones[0].plate.length, 4);
+});
+
+test('a zone keeps its name when another before it is deleted', () => {
+  const m = massing0(), j = addZone(m, 0, 1);
+  const name = zoneName(m, j);
+  deleteZone(m, 1);
+  assert.equal(zoneName(m, m.zones.length - 1), name);
 });

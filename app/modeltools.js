@@ -13,13 +13,21 @@
 //    switching. Click to cut the zone in two (the new part takes the zone's settings); the tool stays on.
 //  - Split face: over a face, a vertical seam through the pointer (to the nearest 50 mm, its distances
 //    to the face's ends shown). Click to split the face in two, each keeping the windows wholly on it.
+//  - Merge zones: click zones to pick them, the first outlined orange (its settings are kept), the
+//    others in glass; a second click lets one go; Enter merges them, the walls between going. With Keep
+//    seams on, the faces and floor and roof pieces that met stay pieces; off, they become one.
+//  - Merge faces: click faces of one zone running in line (or pieces of its roof or floor) to pick
+//    them; Enter makes them one, the seams between them going.
+//  - Remove seam: over a zone, the seam nearest the pointer (up a wall, or across its roof) outlined
+//    orange; click to take it out.
 //  - Push/pull: over a face, the face outlined; dragged, it moves square to itself by 50 mm steps
 //    (100 mm with Shift), stepping out from a seam to make an L or in to make a notch, its neighbours
 //    stretching where it meets a corner; a click types how far. The tool stays on.
 
 import * as THREE from 'three';
 import { label, line, poly } from './handles.js';
-import { addZone, splitZone, splitFace, extrudeFace, reentrantCorners, faceAxes, faceLength, zoneLevels, turnPlan, zoneFrame } from '../src/model/massing.js';
+import { addZone, splitZone, splitFace, extrudeFace, reentrantCorners, faceAxes, faceLength, zoneLevels, turnPlan, zoneFrame,
+  mergeZones, mergeFaces, mergeCells, removeWallSeam, zoneSeams, cellAt, cellsOf } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
 
 const SNAP = 0.05; // m along a face
@@ -29,8 +37,10 @@ export class ModelTools {
   // massing() -> the massing; targetAt(e) -> { zone, face, point } under the pointer: a massing's zone,
   // the face hit (an index, 'roof' or 'floor') and the point hit in the plan's own coordinates (before
   // the building's turn), or null; onChange(mutate, what) -> true when made; onAdded(zoneIndex).
-  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {} }) {
-    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool });
+  // keepSeams() -> whether Merge zones keeps the seams; onMessage(text) says why a merge is refused.
+  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {} }) {
+    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage });
+    this.picked = [];
     this.tool = null;
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     this.svg.setAttribute('class', 'mhandles');
@@ -52,6 +62,7 @@ export class ModelTools {
     this.tool = tool;
     this.dragged = dragged;
     this.dir = 0;
+    this.picked = [];
     document.body.classList.add(dragged ? 'placedrag' : 'placing');
     const el = this.view.renderer.domElement;
     const move = (e) => { this.last = e; if (this.pushing) this.dragPush(e); else this.preview(e); };
@@ -59,6 +70,7 @@ export class ModelTools {
       if (e.button !== 0 || this.dragged) return;
       e.stopImmediatePropagation();
       if (this.tool === 'push') { this.pressPush(e); return; }
+      if (this.tool === 'merge' || this.tool === 'mergefaces') { this.pick(e); return; }
       this.commit(e);
     };
     const up = (e) => {
@@ -68,6 +80,7 @@ export class ModelTools {
     const key = (e) => {
       if (e.target.closest?.('input, select, textarea')) return;
       if (e.key === 'Escape') { e.stopImmediatePropagation(); this.stop(); }
+      if (e.key === 'Enter' && (this.tool === 'merge' || this.tool === 'mergefaces')) { e.preventDefault(); e.stopImmediatePropagation(); this.mergePicked(); }
       if (e.key === ' ' && this.tool === 'split') { e.preventDefault(); e.stopImmediatePropagation(); this.dir++; if (this.last) this.preview(this.last); }
     };
     window.addEventListener('pointermove', move);
@@ -100,6 +113,9 @@ export class ModelTools {
     if (this.tool === 'add') return this.addAt(m, t);
     if (this.tool === 'face') return this.faceAt(m, t);
     if (this.tool === 'push') return this.pushAt(m, t);
+    if (this.tool === 'merge') return this.mergeAt(m, t);
+    if (this.tool === 'mergefaces') return this.mergeFacesAt(m, t);
+    if (this.tool === 'seam') return this.seamAt(m, t, e);
     return this.splitAt(m, t, e);
   }
 
@@ -144,13 +160,13 @@ export class ModelTools {
       d = [-n[0], -n[1]];
       note = `${Math.round(s * 1000)} | ${Math.round((len - s) * 1000)} mm`;
     }
-    const b = [a[0] + d[0], a[1] + d[1]], trial = structuredClone(m), j = splitZone(trial, i, a, b);
+    const b = [a[0] + d[0], a[1] + d[1]], trial = structuredClone(m), j = splitZone(trial, i, a, b, { fromFace: true });
     if (j < 0) return null;
     // the cut drawn where it runs through the zone: the edge the two parts now share
     const shared = this.sharedEdges(trial, i, j);
     return {
       what: 'zone split',
-      mutate: (x) => splitZone(x, i, a, b),
+      mutate: (x) => splitZone(x, i, a, b, { fromFace: true }),
       draw: () => this.box(m.zones[i].plate, z0, z1, true) + shared.map(([p, q]) => this.cut(p, q, z0, z1)).join('') + this.note(a, z1, note),
     };
   }
@@ -188,12 +204,12 @@ export class ModelTools {
     const d = turnPlan(along ? [0, 1] : [1, 0], z.rot || 0), q = [d[1], -d[0]]; // the cut's run, and square to it
     const off = Math.round((t.point[0] * q[0] + t.point[1] * q[1]) / SNAP) * SNAP, s = t.point[0] * d[0] + t.point[1] * d[1];
     const a = [q[0] * off + d[0] * s, q[1] * off + d[1] * s], b = [a[0] + d[0], a[1] + d[1]];
-    const trial = structuredClone(m), j = splitZone(trial, i, a, b);
+    const trial = structuredClone(m), j = splitZone(trial, i, a, b, { within: true });
     if (j < 0) return null;
     const shared = this.sharedEdges(trial, i, j);
     return {
       what: 'zone split',
-      mutate: (x) => splitZone(x, i, a, b),
+      mutate: (x) => splitZone(x, i, a, b, { within: true }),
       draw: () => this.box(z.plate, z0, z1, true) + shared.map(([p, r]) => this.cut(p, r, z0, z1)).join('') + this.note(a, z1, `along ${along ? 'y' : 'x'} · Space for ${along ? 'x' : 'y'}`),
     };
   }
@@ -263,10 +279,89 @@ export class ModelTools {
   }
 
   // A zone as a box outlined in glass, its footprint at both levels and its corners.
-  box(plate, z0, z1, quiet = false) {
-    const lo = plate.map((p) => this.P([...p, z0])), hi = plate.map((p) => this.P([...p, z1])), o = { stroke: 'var(--glass)', w: quiet ? 1 : 1.6, dash: quiet ? '4 3' : undefined };
+  box(plate, z0, z1, quiet = false, color = 'var(--glass)') {
+    const lo = plate.map((p) => this.P([...p, z0])), hi = plate.map((p) => this.P([...p, z1])), o = { stroke: color, w: quiet ? 1 : 1.6, dash: quiet ? '4 3' : undefined };
     return poly(lo, o) + poly(hi, o) + lo.map((p, k) => line(p[0], p[1], hi[k][0], hi[k][1], o)).join('');
   }
+  // ---------- merging and seams ----------
+
+  // The zones picked so far (the first orange: its settings are kept; the others in glass), and the one
+  // under the pointer.
+  mergeAt(m, t) {
+    const hover = t.zone;
+    return {
+      what: '', mutate: null, target: { zone: hover },
+      draw: () => this.picked.map((i, q) => { const [z0, z1] = zoneLevels(m, i); return this.box(m.zones[i].plate, z0, z1, false, q ? 'var(--glass)' : 'var(--sun)'); }).join('')
+        + (this.picked.includes(hover) ? '' : (() => { const [z0, z1] = zoneLevels(m, hover); return this.box(m.zones[hover].plate, z0, z1, true); })())
+        + this.note(m.zones[hover].plate[0], zoneLevels(m, hover)[1], this.picked.length > 1 ? `Enter to merge ${this.picked.length} zones` : this.picked.length ? 'click the zones to merge with it' : 'click the zone whose settings to keep'),
+    };
+  }
+  // A face of a zone, or a piece of its roof or floor, picked or under the pointer.
+  mergeFacesAt(m, t) {
+    const item = Number.isInteger(t.face) ? { zone: t.zone, face: t.face } : { zone: t.zone, cell: cellAt(m, t.zone, t.point), at: t.face };
+    if (item.cell !== undefined && item.cell < 0) return null;
+    return {
+      what: '', mutate: null, target: item,
+      draw: () => [...this.picked, item].map((x, q) => this.part(m, x, q < this.picked.length)).join('')
+        + (this.picked.length > 1 ? this.note(m.zones[t.zone].plate[0], zoneLevels(m, t.zone)[1], `Enter to merge ${this.picked.length}`) : ''),
+    };
+  }
+  part(m, x, picked) {
+    const [z0, z1] = zoneLevels(m, x.zone);
+    if (x.face !== undefined) return this.face(m, x.zone, x.face, !picked);
+    const c = cellsOf(m.zones[x.zone])[x.cell], z = x.at === 'floor' ? z0 : z1, pts = c.map((p) => this.P([...p, z]));
+    return poly(pts, { fill: picked ? 'var(--glass)' : 'none', op: picked ? 0.18 : undefined }) + poly(pts, { stroke: 'var(--glass)', w: picked ? 2 : 1.2, dash: picked ? undefined : '4 3' });
+  }
+  pick(e) {
+    const m = this.massing(), plan = this.planAt(e);
+    if (!plan?.target) return;
+    const t = plan.target, same = (a) => (this.tool === 'merge' ? a === t.zone : JSON.stringify(a) === JSON.stringify(t)), at = this.picked.findIndex(same);
+    if (at >= 0) this.picked.splice(at, 1);
+    else if (this.tool === 'mergefaces' && this.picked.length && (this.picked[0].zone !== t.zone || ('face' in this.picked[0]) !== ('face' in t))) this.picked = [t]; // another zone, or faces and pieces mixed: start again
+    else this.picked.push(this.tool === 'merge' ? t.zone : t);
+    this.preview(e);
+  }
+  mergePicked() {
+    const list = this.picked;
+    if (list.length < 2) return;
+    let why = null;
+    if (this.tool === 'merge') {
+      this.onChange((x) => { const r = mergeZones(x, list, this.keepSeams()); if (typeof r === 'string') { why = r; return false; } return r; }, `${list.length} zones merged`);
+    } else if ('face' in list[0]) {
+      this.onChange((x) => { if (!mergeFaces(x, list[0].zone, list.map((y) => y.face))) { why = 'Only faces in line, one after another, can be merged.'; return false; } }, `${list.length} faces merged`);
+    } else {
+      this.onChange((x) => { if (!mergeCells(x, list[0].zone, list.map((y) => y.cell))) { why = 'Only pieces that meet can be merged.'; return false; } }, `${list.length} roof or floor pieces merged`);
+    }
+    this.picked = [];
+    if (why) this.flashMessage(why); else if (this.last) this.preview(this.last);
+  }
+
+  // Why something could not be done, shown beside the pointer for a moment.
+  flashMessage(text) {
+    const r = this.view.renderer.domElement.getBoundingClientRect(), e = this.last;
+    if (!e) return;
+    this.svg.innerHTML = label(e.clientX - r.left, e.clientY - r.top - 16, text, { size: 9.5, fill: 'var(--bad, #C0442B)' });
+    clearTimeout(this.flashTimer);
+    this.flashTimer = setTimeout(() => { if (this.last && this.tool) this.preview(this.last); }, 2200);
+  }
+
+  // The seam of the zone under the pointer nearest it: up a wall (a corner between two faces in line),
+  // or across its roof (where two of its pieces meet).
+  seamAt(m, t, e) {
+    const i = t.zone, [z0, z1] = zoneLevels(m, i), r = this.view.renderer.domElement.getBoundingClientRect(), px = [e.clientX - r.left, e.clientY - r.top];
+    const { walls, cells } = zoneSeams(m, i), P = m.zones[i].plate, near = [];
+    const dist = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1, u = Math.max(0, Math.min(1, ((px[0] - a[0]) * dx + (px[1] - a[1]) * dy) / l2)); return Math.hypot(px[0] - a[0] - u * dx, px[1] - a[1] - u * dy); };
+    for (const v of walls) { const a = this.P([...P[v], z0]), b = this.P([...P[v], z1]); near.push({ d: dist(a, b), a, b, wall: v }); }
+    for (const c of cells) for (const z of [z1, z0]) { const a = this.P([...c.p, z]), b = this.P([...c.q, z]); near.push({ d: dist(a, b), a, b, cells: c.cells }); }
+    const best = near.sort((x, y) => x.d - y.d)[0];
+    if (!best || best.d > 14) return null;
+    return {
+      what: best.wall !== undefined ? 'seam removed' : 'roof and floor seam removed',
+      mutate: (x) => (best.wall !== undefined ? removeWallSeam(x, i, best.wall) : mergeCells(x, i, best.cells)),
+      draw: () => line(best.a[0], best.a[1], best.b[0], best.b[1], { stroke: 'var(--sun)', w: 3 }),
+    };
+  }
+
   // The cut: a vertical rectangle, filled.
   cut(p, q, z0, z1) {
     const c = [this.P([...p, z0]), this.P([...q, z0]), this.P([...q, z1]), this.P([...p, z1])];
