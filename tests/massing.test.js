@@ -290,6 +290,24 @@ test('a zone deleted leaves its levels; levels are put in, copied, swapped and t
   assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
 });
 
+test('level names and plan views travel with their storey; numbered names renumber', async () => {
+  const { insertStorey, swapStoreys, removeStorey } = await import('../src/model/massing.js');
+  const m = massing0(); // levels 1-3, zones on storeys 0 and 1
+  m.levels[1].name = 'First';
+  m.views = [{ kind: 'plan', name: 'P1', level: 1, cut: 1.2 }, { kind: 'plan', name: 'P0', level: 0, cut: 1.2 }];
+  insertStorey(m, 0, 'above'); // a blank storey on level 1: 'First' and its plan move up
+  assert.deepEqual(m.levels.map((l) => l.name), ['Level 1', 'Level 2', 'First', 'Level 4']);
+  assert.deepEqual(m.views.map((v) => v.level), [2, 0]);
+  insertStorey(m, 3, 'above'); // on top: a new top level
+  assert.deepEqual(m.levels.map((l) => l.name), ['Level 1', 'Level 2', 'First', 'Level 4', 'Level 5']);
+  assert.ok(swapStoreys(m, 1)); // the blank storey and First trade places
+  assert.deepEqual(m.levels.map((l) => l.name), ['Level 1', 'First', 'Level 3', 'Level 4', 'Level 5']);
+  assert.deepEqual(m.views.map((v) => v.level), [1, 0]);
+  assert.ok(removeStorey(m, 0)); // the ground storey goes with its plan; First drops to the ground
+  assert.deepEqual(m.levels.map((l) => l.name), ['First', 'Level 2', 'Level 3', 'Level 4']);
+  assert.deepEqual(m.views.map((v) => [v.name, v.level]), [['P1', 0]]);
+});
+
 test('a split from a re-entrant corner runs only to the first face it meets', () => {
   const m = massing0();
   // a U: the cut from an inner corner along x stops at the arm's far face; a whole line would also

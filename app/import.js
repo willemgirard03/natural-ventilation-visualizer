@@ -2238,7 +2238,27 @@ function refreshPanels() { showInfo(current()); renderLibrary(); }
 // (src/model/massing.js). The massing is kept beside the model; each change to it rewrites the model's
 // geometry as one undoable edit, keeping the assemblies, loads and settings changed since.
 let massing = null;
-const massingUI = massingPanel($('massing'), { get: () => massing, change: massingChange });
+const massingUI = massingPanel($('massing'), {
+  get: () => massing, change: massingChange, changeViews: viewsChange,
+  onOpenView: (id) => openView(id),
+});
+// The plan and section views changed (made, renamed, re-cut, deleted): undone like the clipping planes,
+// touching only the views, not the model.
+function viewsChange(mutate, what) {
+  if (!massing) return false;
+  const before = structuredClone(massing.views || []);
+  mutate(massing);
+  const after = structuredClone(massing.views || []);
+  const put = (v) => { if (massing) massing.views = structuredClone(v); massingUI.render(); viewsChanged(); };
+  undoStack.push({ undo: () => put(before), redo: () => put(after), what, view: true });
+  if (undoStack.length > 100) undoStack.shift();
+  redoStack.length = 0;
+  viewsChanged();
+  return true;
+}
+// filled in by the views workspace
+function openView(id) { void id; }
+function viewsChanged() {}
 function massingChange(mutate, what) {
   if (!massing) return false;
   const before = structuredClone(massing);

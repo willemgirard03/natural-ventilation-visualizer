@@ -1097,6 +1097,12 @@ export function deleteZone(m, i) {
 
 export const STOREYS_MAX = 40;
 const heightOf = (m, s) => m.levels[s + 1].z - m.levels[s].z;
+// Levels still called by their number ("Level 3") renumbered after the stack changes; named ones keep
+// their names. Names travel with the storey standing on the level, as plan views do (m.views: each plan
+// view's `level`).
+const DEFAULT_NAME = /^Level \d+$/;
+function renumber(m) { m.levels.forEach((lv, L) => { if (!lv.name || DEFAULT_NAME.test(lv.name)) lv.name = levelName(L); }); }
+const planViews = (m) => (m.views || []).filter((v) => v.kind === 'plan' && Number.isInteger(v.level));
 // A storey put in above storey s (or below it), as tall as storey s (the storey under the top level
 // where s is the top level). Blank: no zones; a copy: storey s's own zones (those standing on level s
 // and reaching level s + 1) copied into it, taking their settings. Zones running through where it goes
@@ -1108,9 +1114,14 @@ export function insertStorey(m, s, where = 'above', copy = false) {
   const own = m.zones.filter((z) => z.base === src && z.top === src + 1);
   const H = m.levels.slice(1).map((lv, L) => lv.z - m.levels[L].z);
   H.splice(at, 0, h);
-  m.levels.splice(at + 1, 0, { name: levelName(at + 1), z: 0 });
-  m.levels.forEach((lv, L) => { if (L > 0) lv.z = +(m.levels[L - 1].z + H[L - 1]).toFixed(6); });
+  // the storey from level `at` up, its name and its plans, moves up a level; level `at` is the new one
+  const names = m.levels.map((lv) => lv.name), nAt = at === top ? top + 1 : at; // on top: a new top level
+  names.splice(nAt, 0, levelName(nAt));
+  m.levels.splice(at + 1, 0, { name: '', z: 0 });
+  m.levels.forEach((lv, L) => { lv.name = names[L]; if (L > 0) lv.z = +(m.levels[L - 1].z + H[L - 1]).toFixed(6); });
   for (const z of m.zones) { if (z.base >= at) z.base++; if (z.top > at) z.top++; }
+  for (const v of planViews(m)) if (v.level >= nAt) v.level++;
+  renumber(m);
   if (copy) for (const z of own) m.zones.push({ ...structuredClone(z), id: nextZoneId(m), name: null, base: at, top: at + 1, copyFrom: zoneName(m, m.zones.indexOf(z)) });
   return at;
 }
@@ -1125,6 +1136,9 @@ export function swapStoreys(m, s) {
   }
   m.levels[s + 1].z = +(m.levels[s].z + h1).toFixed(6);
   m.levels[s + 2].z = +(m.levels[s + 1].z + h0).toFixed(6);
+  [m.levels[s].name, m.levels[s + 1].name] = [m.levels[s + 1].name, m.levels[s].name];
+  for (const v of planViews(m)) if (v.level === s || v.level === s + 1) v.level = 2 * s + 1 - v.level;
+  renumber(m);
   return true;
 }
 // Storey s taken out: its zones go, zones running through it lose its height, and everything above
@@ -1134,7 +1148,12 @@ export function removeStorey(m, s) {
   const h = heightOf(m, s);
   m.zones = m.zones.filter((z) => !(z.base === s && z.top === s + 1));
   for (const z of m.zones) { if (z.base > s) z.base--; if (z.top > s) z.top--; }
+  // level s now carries the storey that stood on level s + 1, with its name; the removed storey's plans go
+  if (s + 2 < m.levels.length) m.levels[s].name = m.levels[s + 1].name;
+  if (m.views) m.views = m.views.filter((v) => !(v.kind === 'plan' && v.level === s && s + 2 < m.levels.length));
+  for (const v of planViews(m)) if (v.level > s) v.level--;
   m.levels.splice(s + 1, 1);
+  renumber(m);
   for (let L = s + 1; L < m.levels.length; L++) m.levels[L].z = +(m.levels[L].z - h).toFixed(6);
   return m.zones.length > 0;
 }

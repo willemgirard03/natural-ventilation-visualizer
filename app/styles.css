@@ -326,3 +326,17 @@ main#results>.refs>summary{padding:6px 18px; font-size:13.5px}
 main#results>.refs[open]>section{max-height:45vh; overflow:auto}
 footer[hidden]{display:none}
 #keep-seams-l[hidden]{display:none}
+
+/* the Building window's tabs, and the storey-stack rows (the storey-stack skill) */
+.library .pophd .tabs{display:flex; gap:2px; flex:1}
+.library .pophd .popttl{flex:0 0 auto}
+.library .tabs button{border:0; border-bottom:2px solid transparent; background:none; font:inherit; font-weight:500; color:var(--ink3); padding:1px 7px 2px; cursor:pointer}
+.library .tabs button:hover{color:var(--ink)}
+.library .tabs button[aria-selected="true"]{color:var(--ink); border-bottom-color:var(--glass)}
+.massing .mstable tr[data-lv]{cursor:pointer}
+.massing .stgrid{display:grid; gap:3px; margin:2px 0 6px}
+.massing .strow{display:grid; grid-template-columns:18px 22px 22px; align-items:center; gap:3px; color:var(--glass)}
+.massing .pbtn.arw{padding:0; color:var(--glass); font-size:9px; height:18px}
+.massing .pbtn:disabled{opacity:.35; cursor:default}
+.massing .stico{display:block}
+.massing .pbtn.danger{color:#C0442B; border-color:#e3b3a8}
