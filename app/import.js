@@ -35,6 +35,7 @@ import {
 } from '../src/model/massing.js';
 import { PRESETS, SIZES } from '../src/model/windows.js';
 import { massingPanel } from './massing-panel.js';
+import { workspace } from './workspace.js';
 import { MassingEditor } from './massedit.js';
 import { ModelTools } from './modeltools.js';
 
@@ -678,11 +679,19 @@ const current = () => (view.sections.selected ? { kind: 'plane', item: view.sect
 
 // Section planes: added from the bar (dragged in, or a click on the button and then on the view), and
 // picked, moved and turned in the view (sections.js). The air on them follows every change.
-view.sections.onChange = () => drawSlices(true);
+view.sections.onChange = () => { drawSlices(true); planesMoved(); };
 view.sections.onSelect = (p) => {
   if (p) { const c = view.sections.screen(view.sections.centre(p)); view.lastPick = [c.x, c.y]; view.select(null); showInfo({ kind: 'plane', item: p }); }
   else if ($('info').dataset.kind === 'plane') showInfo(current());
 };
+// Section | Plan: what the Clipping plane button places
+for (const k of document.querySelectorAll('#clip-kind [data-clip]')) {
+  k.addEventListener('click', () => {
+    for (const x of document.querySelectorAll('#clip-kind [data-clip]')) x.setAttribute('aria-pressed', String(x === k));
+    document.querySelector('[data-add]').dataset.add = k.dataset.clip;
+    if (view.sections.placing) view.sections.startPlacing(k.dataset.clip, false);
+  });
+}
 for (const b of document.querySelectorAll('[data-add]')) {
   b.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !model) return;
@@ -1118,7 +1127,11 @@ const TIMES = (k) => `×${k < 1 ? k.toFixed(2).replace(/0$/, '') : k}`;
 function planeRows(p) {
   const a = p.air, opt = (list, now) => list.map(([v, l]) => `<option value="${v}"${v === now ? ' selected' : ''}>${l}</option>`).join('');
   const fields = [['', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂']];
+  const made = namedViews().filter((v) => v.plane === p.id), kindWord = p.kind === 'plan' ? 'plan' : 'section';
+  const suggest = p.kind === 'plan' ? `Plan at ${fmt(p.o.z + (view.origin?.[2] || 0), 2)} m` : `Section ${namedViews().filter((v) => v.kind === 'section').length + 1}`;
   return [
+    ...made.map((v) => `<span class="popkv"><span class="tipped" title="A ${v.kind} view made from this plane, linked to it: moving either moves the other">View</span><button type="button" class="pbtn" data-plview-open="${v.id}" title="Show it">${esc(v.name)}</button></span>`),
+    `<div class="poprow"><input class="popname" data-plview-name placeholder="${esc(suggest)}" title="The view's name (Tab takes the suggestion)"><button type="button" class="pbtn" data-plview title="A ${kindWord} view of this cut, named, opened beside the 3D view and linked to this plane">Create ${kindWord} view</button></div>`,
     `<label class="chk" title="Switch the plane's cut off without removing it: the building, the air and the particles show whole; switch it on again to cut as before"><input type="checkbox" data-air="on"${p.off ? '' : ' checked'}> Cut on</label>`,
     `<span class="popkv"><span class="tipped" title="Colour the cut where it passes through rooms: the air's temperature, speed or CO2. Point at the cut to read the values there.">Cut colour</span><select class="popsel" data-air="field">${opt(fields, a.field)}</select></span>`,
     `<label class="chk" title="Particles moving with the air within this plane, trailing, as in a 2D section: their own, apart from the 3D particles"><input type="checkbox" data-air="particles"${a.particles ? ' checked' : ''}> Particles in the cut</label>`,
@@ -1147,6 +1160,20 @@ function onAir(e) {
   legend();
 }
 $('info').addEventListener('input', onAir);
+$('info').addEventListener('click', (e) => {
+  const p = view.sections.selected, b = e.target.closest('[data-plview], [data-plview-open]');
+  if (!b || !p) return;
+  if (b.dataset.plviewOpen !== undefined) { ws.open(Number(b.dataset.plviewOpen)); return; }
+  const input = $('info').querySelector('[data-plview-name]'), name = input.value.trim() || input.placeholder;
+  viewFromPlane(p, name);
+});
+$('info').addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (!t.matches?.('[data-plview-name]')) return;
+  if (e.key === 'Tab' && !t.value) { t.value = t.placeholder; e.preventDefault(); }
+  if (e.key === 'Enter') { e.preventDefault(); t.nextElementSibling.click(); }
+  e.stopPropagation();
+});
 $('info').addEventListener('change', onAir);
 
 const dirWord = (az) => (az === null || az === undefined ? 'skylight' : ['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west'][Math.round(az / 45) % 8]);
@@ -2047,6 +2074,7 @@ function fillDetails(m) {
 }
 
 function render(m) {
+  looseViews = { views: [] };
   fillDetails(m);
   winEdit.stop();
   undoStack.length = 0; redoStack.length = 0; modelEdited = false; axisCache = null; schedCache.clear();
@@ -2245,20 +2273,99 @@ const massingUI = massingPanel($('massing'), {
 // The plan and section views changed (made, renamed, re-cut, deleted): undone like the clipping planes,
 // touching only the views, not the model.
 function viewsChange(mutate, what) {
-  if (!massing) return false;
-  const before = structuredClone(massing.views || []);
-  mutate(massing);
-  const after = structuredClone(massing.views || []);
-  const put = (v) => { if (massing) massing.views = structuredClone(v); massingUI.render(); viewsChanged(); };
+  const host = viewsHost();
+  const before = structuredClone(host.views || []);
+  mutate(host);
+  const after = structuredClone(host.views || []);
+  const put = (v) => { host.views = structuredClone(v); massingUI.render(); viewsChanged(); };
   undoStack.push({ undo: () => put(before), redo: () => put(after), what, view: true });
   if (undoStack.length > 100) undoStack.shift();
   redoStack.length = 0;
   viewsChanged();
   return true;
 }
-// filled in by the views workspace
-function openView(id) { void id; }
-function viewsChanged() {}
+// ---------- the views workspace: the 3D view, plans and sections in rows (workspace.js) ----------
+// The named plan and section views live with the massing (so storeys put in or taken out carry their
+// plans); a model opened from a file keeps them here instead.
+let looseViews = { views: [] };
+const viewsHost = () => massing || looseViews;
+const namedViews = () => viewsHost().views || [];
+const planeById = (id) => (id === null || id === undefined ? null : view.sections.planes.find((p) => p.id === id) || null);
+const ws = workspace({
+  host: document.querySelector('main#results > .views'), view3dEl: $('view3d'), view,
+  views: namedViews,
+  levels: () => massing?.levels || null,
+  planeOf: (id) => planeById(namedViews().find((v) => v.id === id)?.plane),
+  onCut3d: cut3d,
+  onTake: (rec) => {
+    undoStack.push({ undo: () => ws.put(rec), redo: () => ws.take(rec.el), what: 'view removed', view: true });
+    if (undoStack.length > 100) undoStack.shift();
+    redoStack.length = 0;
+  },
+});
+// the building drawn again (a new model, an edit, walls drawn otherwise): the plans and sections cut again
+for (const k of ['setModel', 'setWalls']) { const f = view[k].bind(view); view[k] = (...a) => { const r = f(...a); ws.redraw(); return r; }; }
+function openView(id) { ws.open(id); }
+// The named views changed: the workspace's lists, and each plan linked to a plane moves its plane.
+function viewsChanged() {
+  let moved = false;
+  for (const v of namedViews()) {
+    const p = planeById(v.plane), z = planZ(v);
+    if (p && v.kind === 'plan' && Number.isFinite(z) && Math.abs(p.o.z - (z - view.origin[2])) > 1e-6) { p.o.z = z - view.origin[2]; moved = true; }
+  }
+  if (moved) { view.sections.changed(); if (view.sections.selected) showInfo(current()); }
+  ws.listChanged();
+  ws.redraw();
+}
+// a plan's cut as a model elevation
+const planZ = (v) => (Number.isInteger(v.level) && massing?.levels[v.level] ? massing.levels[v.level].z + v.cut : v.elev);
+// The clipping planes moved: the views linked to them follow (their cut, not an edit of their own).
+function planesMoved() {
+  const o3 = view.origin || [0, 0, 0];
+  for (const v of namedViews()) {
+    const p = planeById(v.plane);
+    if (!p) continue;
+    if (v.kind === 'plan') {
+      const z = p.o.z + o3[2];
+      if (Number.isInteger(v.level) && massing?.levels[v.level]) v.cut = +(z - massing.levels[v.level].z).toFixed(4); else v.elev = +z.toFixed(4);
+    } else v.frame = frameRecord(p);
+  }
+  ws.redraw();
+}
+// a plane's frame in model coordinates, for a section view to keep
+const frameRecord = (p) => { const o3 = view.origin || [0, 0, 0]; return { o: [p.o.x + o3[0], p.o.y + o3[1], p.o.z + o3[2]], q: p.q.toArray(), b: [...p.b], flip: !!p.flip }; };
+// Cut 3D here: the view's linked plane picked, or a plane made at its cut and linked to it.
+function cut3d(id) {
+  const v = namedViews().find((x) => x.id === id), had = planeById(v?.plane);
+  if (!v) return;
+  if (had) { view.sections.select(had); return; }
+  const o3 = view.origin || [0, 0, 0];
+  let p;
+  if (v.kind === 'plan') {
+    const z = planZ(v);
+    if (!Number.isFinite(z)) return;
+    const c = view.sections.box().getCenter(new THREE.Vector3());
+    p = view.sections.add('plan', c.setZ(z - o3[2]));
+  } else {
+    const f = v.frame, q = new THREE.Quaternion().fromArray(f.q);
+    p = view.sections.add('section', new THREE.Vector3(f.o[0] - o3[0], f.o[1] - o3[1], f.o[2] - o3[2]), new THREE.Vector3(1, 0, 0).applyQuaternion(q), f.flip);
+    if (p) { p.q.copy(q); p.b = [...f.b]; p.flip = f.flip; view.sections.changed(); }
+  }
+  if (p) { viewsChange((x) => { x.views.find((y) => y.id === id).plane = p.id; }, `${v.name} linked to ${p.name}`); showInfo(current()); }
+}
+// A view made from a clipping plane's pop-up, named there; linked to the plane.
+function viewFromPlane(p, name) {
+  const host = viewsHost(), o3 = view.origin || [0, 0, 0];
+  let made = null;
+  viewsChange((x) => {
+    x.views ||= [];
+    const id = Math.max(0, ...x.views.map((v) => v.id + 1));
+    made = p.kind === 'plan' ? { id, kind: 'plan', name, level: null, elev: +(p.o.z + o3[2]).toFixed(4), cut: 0, plane: p.id } : { id, kind: 'section', name, frame: frameRecord(p), plane: p.id };
+    x.views.push(made);
+  }, `${p.kind} view ${name} created`);
+  void host;
+  if (made) { ws.open(made.id); showInfo(current()); }
+}
 function massingChange(mutate, what) {
   if (!massing) return false;
   const before = structuredClone(massing);

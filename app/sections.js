@@ -609,20 +609,20 @@ for (int i = 0; i < ${MAX}; i++) {
     return [at, null];
   }
 
-  // Starts placing: the ghost follows the pointer over the view until a click (or release, when
-  // dragged in) puts the plane there. Space steps through what it is: over a wall, a section square to
-  // it, the same turned round, a plan cut looking down, and one looking up; over a roof (as Split zone
-  // does), a section along the building's x, along its y, and each turned round. An arrow shows the way
-  // the cut looks. Esc cancels.
+  // Starts placing a section or a plan (the bar's Section | Plan): the ghost follows the pointer over
+  // the view until a click (or release, when dragged in) puts the plane there. Space steps through its
+  // ways: a section over a wall, square to it and turned round; over a roof (as Split zone does), along
+  // the building's x, along its y, and each turned round; a plan, looking down and looking up. An arrow
+  // shows the way the cut looks. Esc cancels.
   startPlacing(kind, dragged) {
     this.stopPlacing();
-    const el = this.view.renderer.domElement, WAYS = [['section', false], ['section', true], ['plan', false], ['plan', true]];
-    this.placing = { kind, flip: false, way: kind === 'plan' ? 2 : 0, roofWay: 0, overRoof: false };
+    const el = this.view.renderer.domElement;
+    this.placing = { kind, flip: false, roofWay: 0, overRoof: false };
     document.body.classList.add(dragged ? 'placedrag' : 'placing');
     let last = null;
     // what the plane would be here: [kind, point, along, flip]
     const what = (pt) => {
-      const roof = pt.zone && pt.normal && pt.normal.z > 0.7;
+      const roof = kind === 'section' && pt.zone && pt.normal && pt.normal.z > 0.7;
       this.placing.overRoof = !!roof;
       if (roof) {
         const w = this.placing.roofWay % 4, yaw = (this.view.longAxis || 0) + (w % 2 ? Math.PI / 2 : 0);
@@ -651,10 +651,7 @@ for (int i = 0; i < ${MAX}; i++) {
       if (e.key === ' ' && !e.target.closest?.('input, select, textarea')) {
         e.preventDefault(); e.stopImmediatePropagation();
         if (this.placing.overRoof) this.placing.roofWay++;
-        else {
-          this.placing.way = (this.placing.way + 1) % WAYS.length;
-          [this.placing.kind, this.placing.flip] = WAYS[this.placing.way];
-        }
+        else this.placing.flip = !this.placing.flip;
         ghost(last);
       }
     };

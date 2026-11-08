@@ -96,7 +96,7 @@ if (mod((gl_FragCoord.x + gl_FragCoord.y) * 0.70710678, ${SPACING.toFixed(1)} * 
 
 // The segments where triangles (a flat array: a closed solid, or a pane of glass) cross a plane, in the
 // plane's u, v.
-function cutSolid(tris, f) {
+export function cutSolid(tris, f) {
   const segs = [], P = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()], d = [0, 0, 0];
   for (let i = 0; i < tris.length; i += 9) {
     let pos = 0, neg = 0;
@@ -121,7 +121,7 @@ function cutSolid(tris, f) {
 }
 
 // Segments joined end to end into closed loops (points rounded to 0.1 mm to match).
-function chain(segs) {
+export function chain(segs) {
   const key = (p) => `${Math.round(p.x * 1e4)},${Math.round(p.y * 1e4)}`;
   const next = new Map();
   for (const [a, b] of segs) {
