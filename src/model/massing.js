@@ -1028,13 +1028,12 @@ export function touching(m, a, b) {
     });
   });
 }
-// Whether zone i may stand as it is: a simple footprint, overlapping no zone on its levels, and (where
-// there are other zones) touching one of them - it never floats free of the building.
+// Whether zone i may stand as it is: a simple footprint, overlapping no zone on its levels. It may
+// float (held up by nothing): such zones are shown hatched (floatingZones), not refused.
 export function zoneFits(m, i) {
   const z = m.zones[i];
   if (!simpleOutline(z.plate)) return false;
-  if (m.zones.some((y, j) => j !== i && overlapping(m, z, y))) return false;
-  return m.zones.length === 1 || m.zones.some((y, j) => j !== i && touching(m, z, y));
+  return !m.zones.some((y, j) => j !== i && overlapping(m, z, y));
 }
 // The zones held up by nothing: not standing on the ground, nor joined to it through zones they touch.
 export function floatingZones(m) {
@@ -1083,17 +1082,61 @@ export const isSeam = (m, i, v) => {
   return Math.abs((c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])) < 1e-6 * Math.max(1, Math.hypot(b[0] - a[0], b[1] - a[1]));
 };
 
-// Zone i taken out of the massing. Where nothing else stands on its levels, those levels close up: the
-// levels above drop by its height, and the zones on them with it. The last zone stays.
+// Zone i taken out of the massing; its levels stay, empty or not (a level is removed from the Levels
+// tab). The last zone stays.
 export function deleteZone(m, i) {
   if (m.zones.length < 2) return false;
-  const [z] = m.zones.splice(i, 1), [z0, z1] = levelsOf(m, z);
-  if (m.zones.some((y) => { const [y0, y1] = levelsOf(m, y); return y0 < z1 - 1e-6 && y1 > z0 + 1e-6; })) return true;
-  const h = z1 - z0, gone = z.top - z.base;
-  for (let L = z.top; L < m.levels.length; L++) m.levels[L].z = +(m.levels[L].z - h).toFixed(6);
-  m.levels.splice(z.base + 1, gone);
-  for (const y of m.zones) { if (y.base >= z.top) y.base -= gone; if (y.top >= z.top) y.top -= gone; }
+  m.zones.splice(i, 1);
   return true;
+}
+
+// ---------- levels, as the shading tool's storey stack (the storey-stack skill) ----------
+// Storey s is the space from level s up to level s + 1; the top level has none above it. Levels are
+// kept as elevations, but every rule here works on heights: a storey put in lifts everything above it
+// by its height, one taken out drops it.
+
+export const STOREYS_MAX = 40;
+const heightOf = (m, s) => m.levels[s + 1].z - m.levels[s].z;
+// A storey put in above storey s (or below it), as tall as storey s (the storey under the top level
+// where s is the top level). Blank: no zones; a copy: storey s's own zones (those standing on level s
+// and reaching level s + 1) copied into it, taking their settings. Zones running through where it goes
+// in grow by its height. Returns the new storey's index.
+export function insertStorey(m, s, where = 'above', copy = false) {
+  if (m.levels.length > STOREYS_MAX) return -1;
+  const top = m.levels.length - 1, src = Math.max(0, Math.min(s, top - 1)), h = top > 0 ? heightOf(m, src) : 3;
+  const at = Math.min(where === 'below' ? s : s + 1, top); // the new storey's index: from level `at` up
+  const own = m.zones.filter((z) => z.base === src && z.top === src + 1);
+  const H = m.levels.slice(1).map((lv, L) => lv.z - m.levels[L].z);
+  H.splice(at, 0, h);
+  m.levels.splice(at + 1, 0, { name: levelName(at + 1), z: 0 });
+  m.levels.forEach((lv, L) => { if (L > 0) lv.z = +(m.levels[L - 1].z + H[L - 1]).toFixed(6); });
+  for (const z of m.zones) { if (z.base >= at) z.base++; if (z.top > at) z.top++; }
+  if (copy) for (const z of own) m.zones.push({ ...structuredClone(z), id: nextZoneId(m), name: null, base: at, top: at + 1, copyFrom: zoneName(m, m.zones.indexOf(z)) });
+  return at;
+}
+// Storey s and the one above it trade places, each taking its zones; their heights travel with them.
+// Not where a zone runs through either of them into another.
+export function swapStoreys(m, s) {
+  if (s < 0 || s + 2 >= m.levels.length) return false;
+  if (m.zones.some((z) => (z.base <= s && z.top > s + 1) || (z.base < s + 1 && z.top > s + 1 && !(z.base === s && z.top === s + 1)) || (z.base <= s + 1 && z.top > s + 2))) return false;
+  const h0 = heightOf(m, s), h1 = heightOf(m, s + 1);
+  for (const z of m.zones) {
+    if (z.base === s && z.top === s + 1) { z.base = s + 1; z.top = s + 2; } else if (z.base === s + 1 && z.top === s + 2) { z.base = s; z.top = s + 1; }
+  }
+  m.levels[s + 1].z = +(m.levels[s].z + h1).toFixed(6);
+  m.levels[s + 2].z = +(m.levels[s + 1].z + h0).toFixed(6);
+  return true;
+}
+// Storey s taken out: its zones go, zones running through it lose its height, and everything above
+// drops by its height. Never the last storey.
+export function removeStorey(m, s) {
+  if (m.levels.length <= 2 || s < 0 || s + 1 >= m.levels.length) return false;
+  const h = heightOf(m, s);
+  m.zones = m.zones.filter((z) => !(z.base === s && z.top === s + 1));
+  for (const z of m.zones) { if (z.base > s) z.base--; if (z.top > s) z.top--; }
+  m.levels.splice(s + 1, 1);
+  for (let L = s + 1; L < m.levels.length; L++) m.levels[L].z = +(m.levels[L].z - h).toFixed(6);
+  return m.zones.length > 0;
 }
 
 // ---------- merging zones and faces, removing seams ----------

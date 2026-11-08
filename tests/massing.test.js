@@ -251,29 +251,43 @@ test('a zone split from another takes its settings: loads, opening controls and 
   assert.ok(!m.zones[n].copyFrom, 'copied once');
 });
 
-test('zones never overlap or come away: moves stop at a collision, or where they would lose touch', () => {
+test('zones never overlap: moves stop at a collision; a zone may come away and float', () => {
   const m = massing0();
   const j = addZone(m, 0, 1); // a 3 x 3 m annex against the east face, x 10 to 13
-  // slid along the face it stops where it would leave it (its far edge 0.05 m short of the corner, or level with it)
-  const [, dy] = moveZone(m, j, [0, 20]);
-  assert.ok(dy > 3 && dy < 7, `slid ${dy}`);
-  assert.ok(zoneFits(m, j));
-  // pulled away from the building it does not move; pushed into it, it does not either
-  assert.deepEqual(moveZone(m, j, [5, 0]).map((x) => +x.toFixed(6)), [0, 0]);
+  // pushed into the building it does not move
   assert.deepEqual(moveZone(m, j, [-2, 0]).map((x) => +x.toFixed(6)), [0, 0]);
+  // pulled away it moves, and stands on the ground: not floating
+  assert.deepEqual(moveZone(m, j, [5, 0]).map((x) => +x.toFixed(6)), [5, 0]);
+  assert.deepEqual(floatingZones(m), []);
+  // a zone on a roof slid off over nothing floats: allowed, and found
+  const r = addZone(m, 1, 'roof', { at: [0, 0] });
+  moveZone(m, r, [40, 0]);
+  assert.deepEqual(floatingZones(m), [r]);
 });
 
-test('a zone deleted: where it was alone on its levels they close up and the zones above drop', () => {
+test('a zone deleted leaves its levels; levels are put in, copied, swapped and taken out as storeys', async () => {
+  const { insertStorey, swapStoreys, removeStorey } = await import('../src/model/massing.js');
   const m = massing0();
-  addZone(m, 1, 'roof', { at: [0, 0] }); // a zone on the roof, levels 2 to 3
-  assert.ok(deleteZone(m, 1)); // the upper storey, alone on its levels
-  assert.deepEqual(m.levels.map((l) => l.z), [0, 3.5, 6.5]);
-  assert.deepEqual(m.zones.map((z) => [z.base, z.top]), [[0, 1], [1, 2]]);
-  // with nothing under it the roof zone would float; the ground zone holds it here
-  assert.deepEqual(floatingZones(m), []);
-  m.zones[1].plate = m.zones[1].plate.map(([x, y]) => [x + 30, y]);
-  assert.deepEqual(floatingZones(m), [1]);
-  assert.ok(!deleteZone(stack(storey0()), 0), 'the last zone stays');
+  assert.ok(deleteZone(m, 1));
+  assert.deepEqual(m.levels.map((l) => l.z), [0, 3.5, 7]); // the empty storey stays
+  assert.ok(!deleteZone(m, 0), 'the last zone stays');
+  // a copy of the ground storey above it: the upper levels rise by its height
+  const m2 = massing0();
+  assert.equal(insertStorey(m2, 0, 'above', true), 1);
+  assert.deepEqual(m2.levels.map((l) => l.z), [0, 3.5, 7, 10.5]);
+  assert.deepEqual(m2.zones.map((z) => [z.base, z.top]), [[0, 1], [2, 3], [1, 2]]);
+  // a blank storey below the ground: everything rises, nothing on the new one
+  insertStorey(m2, 0, 'below');
+  assert.deepEqual(m2.zones.map((z) => [z.base, z.top]), [[1, 2], [3, 4], [2, 3]]);
+  // the empty storey and the one above trade places
+  assert.ok(swapStoreys(m2, 0));
+  assert.deepEqual(m2.zones.map((z) => [z.base, z.top]), [[0, 1], [3, 4], [2, 3]]);
+  // a storey taken out with its zones, the rest dropping by its height
+  assert.ok(removeStorey(m2, 0));
+  assert.deepEqual(m2.levels.map((l) => l.z), [0, 3.5, 7, 10.5]);
+  assert.deepEqual(m2.zones.map((z) => [z.base, z.top]), [[2, 3], [1, 2]]);
+  const model = importEpJSON(massingEpJSON(m2));
+  assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
 });
 
 test('a split from a re-entrant corner runs only to the first face it meets', () => {

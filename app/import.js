@@ -1370,7 +1370,7 @@ function massingSide(kind, item) {
   const g = massing.zones[at.zone].faces[at.face];
   return { ...at, n: g ? unitLayout(g, faceLength(massing, at.zone, at.face)).n : 0 };
 }
-// A massing's zone deleted (Delete, or its pop-up): where it was alone on its levels they close up.
+// A massing's zone deleted (Delete, or its pop-up); its levels stay.
 function removeZone(i) {
   if (!massing || massing.zones.length < 2) { popMessage('The last zone stays: a massing needs one.'); return; }
   view.select(null);
@@ -1386,7 +1386,7 @@ function zoneLevelRows(item) {
   const z = massing.zones[i], opts = (now, from, to) => massing.levels.map((lv, L) => (L >= from && L <= to ? `<option value="${L}"${L === now ? ' selected' : ''}>${esc(lv.name || levelName(L))}</option>` : '')).join('');
   return [`<div class="poprow"><span class="tipped" title="The level this zone stands on and the level its roof reaches. Its roof and floor handles move these levels, and with them every zone on them.">Levels</span>`
     + `<select class="popsel" data-zlevel="base" data-zone="${i}" title="Base level">${opts(z.base, 0, z.top - 1)}</select> to <select class="popsel" data-zlevel="top" data-zone="${i}" title="Top level">${opts(z.top, z.base + 1, massing.levels.length - 1)}</select>`
-    + (massing.zones.length > 1 ? `<button type="button" class="quiet" data-zdelete="${i}" title="Delete this zone (Delete). Where nothing else stands on its levels, they close up and everything above drops down. A zone left held up by nothing is hatched grey.">Delete zone</button>` : '') + '</div>'];
+    + (massing.zones.length > 1 ? `<button type="button" class="quiet" data-zdelete="${i}" title="Delete this zone (Delete). Its levels stay, empty or not; a storey is taken out from the Levels tab. A zone left held up by nothing is hatched grey.">Delete zone</button>` : '') + '</div>'];
 }
 $('info').addEventListener('click', (e) => { const b = e.target.closest('[data-zdelete]'); if (b && massing) removeZone(Number(b.dataset.zdelete)); });
 $('info').addEventListener('change', (e) => {
