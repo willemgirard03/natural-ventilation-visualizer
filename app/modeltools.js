@@ -1,4 +1,6 @@
-// The modelling tools for a massing (src/model/massing.js), in the 3D view's toolbar. One tool is on at
+// The modelling tools for a massing (src/model/massing.js), in the 3D view's toolbar and each plan
+// view's. A plan view lends the tools a context (register): its own projection, target under the
+// pointer and preview layer, so the same tools work over a plan, where a zone's box is its footprint. One tool is on at
 // a time; Esc, or its button again, goes back to selecting. While one is on, a click does that tool's
 // work and the view's own selecting and handles wait.
 //
@@ -11,12 +13,12 @@
 //    corners, a cut through that corner along either face meeting there or at 45° between them, Space
 //    stepping through them; over its roof, a cut along the zone's own x or y through the pointer, Space
 //    switching. Click to cut the zone in two (the new part takes the zone's settings); the tool stays on.
-//  - Split face: over a face, a vertical seam through the pointer (to the nearest 50 mm, its distances
+//  - Split wall: over a face, a vertical seam through the pointer (to the nearest 50 mm, its distances
 //    to the face's ends shown). Click to split the face in two, each keeping the windows wholly on it.
 //  - Merge zones: click zones to pick them, the first outlined orange (its settings are kept), the
 //    others in glass; a second click lets one go; Enter merges them, the walls between going. With Keep
 //    seams on, the faces and floor and roof pieces that met stay pieces; off, they become one.
-//  - Merge faces: click faces of one zone running in line (or pieces of its roof or floor) to pick
+//  - Merge walls: click faces of one zone running in line (or pieces of its roof or floor) to pick
 //    them; Enter makes them one, the seams between them going.
 //  - Remove seam: over a zone, the seam nearest the pointer (up a wall, or across its roof) outlined
 //    orange; click to take it out.
@@ -46,12 +48,26 @@ export class ModelTools {
     this.svg.setAttribute('class', 'mhandles');
     view.container.appendChild(this.svg);
     this.dir = 0; // which cut at a corner, stepped by Space
+    this.contexts = new Set(); // plan views lending their own drawing: { el, svg, P, px, targetAt }
+    this.ctx = null; // the one the pointer is over, or null for the 3D view
   }
+  register(ctx) { this.contexts.add(ctx); return () => { this.contexts.delete(ctx); if (this.ctx === ctx) this.ctx = null; }; }
+  // the context under the pointer: a plan view's, or the 3D view's (null)
+  ctxAt(e) { for (const c of this.contexts) if (c.el.isConnected && c.el.contains(e.target)) return c; return null; }
+  get out() { return this.ctx?.svg || this.svg; }
+  // the pointer on the sheet it is over
+  px(e) {
+    if (this.ctx) return this.ctx.px(e);
+    const r = this.view.renderer.domElement.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  }
+  tgt(e) { return this.ctx ? this.ctx.targetAt(e) : this.targetAt(e); }
 
   get active() { return !!this.tool; }
 
-  // A model point (the plan's own coordinates and a height) on the sheet.
-  P = (p) => {
+  // A model point (the plan's own coordinates and a height) on the sheet: the plan view's, or the 3D view's.
+  P = (p) => (this.ctx ? this.ctx.P(p) : this.P3(p));
+  P3 = (p) => {
     const m = this.massing(), o = this.view.origin, [x, y] = turnPlan([p[0], p[1]], m?.rot || 0);
     const s = this.view.sections.screen(new THREE.Vector3(x - o[0], y - o[1], p[2] - o[2]));
     return [s.x, s.y];
@@ -65,13 +81,17 @@ export class ModelTools {
     this.picked = [];
     document.body.classList.add(dragged ? 'placedrag' : 'placing');
     const el = this.view.renderer.domElement;
-    const move = (e) => { this.last = e; if (this.pushing) this.dragPush(e); else this.preview(e); };
+    const move = (e) => {
+      this.last = e;
+      if (this.pushing) { this.dragPush(e); return; }
+      const c = this.ctxAt(e);
+      if (c !== this.ctx) { this.out.innerHTML = ''; this.ctx = c; }
+      this.preview(e);
+    };
     const down = (e) => {
       if (e.button !== 0 || this.dragged) return;
       e.stopImmediatePropagation();
-      if (this.tool === 'push') { this.pressPush(e); return; }
-      if (this.tool === 'merge' || this.tool === 'mergefaces') { this.pick(e); return; }
-      this.commit(e);
+      this.press(e);
     };
     const up = (e) => {
       if (this.pushing) { this.releasePush(e); return; }
@@ -96,19 +116,29 @@ export class ModelTools {
     this.onTool(tool);
   }
 
+  // A press over the 3D view or a plan view: the tool's work there.
+  press(e) {
+    this.ctx = this.ctxAt(e);
+    this.last = e;
+    if (this.tool === 'push') { this.pressPush(e); return; }
+    if (this.tool === 'merge' || this.tool === 'mergefaces') { this.pick(e); return; }
+    this.commit(e);
+  }
+
   stop() {
     if (!this.tool) return;
     this.off?.();
     this.tool = null; this.plan = null;
     document.body.classList.remove('placedrag', 'placing');
     this.svg.innerHTML = '';
+    for (const c of this.contexts) c.svg.innerHTML = '';
     this.onTool(null);
     this.view.render();
   }
 
   // What the tool would do here: { what, mutate, draw } or null.
   planAt(e) {
-    const m = this.massing(), t = m && this.targetAt(e);
+    const m = this.massing(), t = m && this.tgt(e);
     if (!t) return null;
     if (this.tool === 'add') return this.addAt(m, t);
     if (this.tool === 'face') return this.faceAt(m, t);
@@ -138,7 +168,7 @@ export class ModelTools {
   }
 
   splitAt(m, t, e) {
-    const i = t.zone, [z0, z1] = zoneLevels(m, i), r = this.view.renderer.domElement.getBoundingClientRect(), px = [e.clientX - r.left, e.clientY - r.top];
+    const i = t.zone, [z0, z1] = zoneLevels(m, i), px = this.px(e);
     // a re-entrant corner near the pointer (its edge up the walls, or its point on the roof) takes the
     // cut: along either face meeting there or at 45°, the one the pointer leans toward (Space steps
     // through them), running from the corner only as far as the first face it meets
@@ -228,7 +258,7 @@ export class ModelTools {
     if (!splitFace(trial, i, k, u)) return null;
     const p = [A[0] + U[0] * u, A[1] + U[1] * u], a = this.P([...p, z0]), b = this.P([...p, z1]);
     return {
-      what: 'face split',
+      what: 'wall split',
       mutate: (x) => splitFace(x, i, k, u),
       draw: () => this.face(m, i, k, true) + line(a[0], a[1], b[0], b[1], { stroke: 'var(--glass)', w: 2.2 }) + this.note(p, z1, `${Math.round(u * 1000)} | ${Math.round((len - u) * 1000)} mm`),
     };
@@ -242,12 +272,11 @@ export class ModelTools {
   pressPush(e) {
     const m = this.massing(), plan = this.planAt(e);
     if (!plan?.target) return;
-    const { zone: i, face: k } = plan.target, fr = zoneFrame(m, i), f = fr.faces[k], at = [...f.at], n = f.normal;
-    // the face's normal on the sheet: pixels per metre, in the model's axes (the building turned)
-    const P = (p) => { const o = this.view.origin, q = this.view.sections.screen(new THREE.Vector3(p[0] - o[0], p[1] - o[1], p[2] - o[2])); return [q.x, q.y]; };
-    const a = P(at), b = P([at[0] + n[0], at[1] + n[1], at[2]]);
-    this.pushing = { i, k, x0: e.clientX, y0: e.clientY, dir: [b[0] - a[0], b[1] - a[1]], d: 0, moved: false };
-    this.view.renderer.domElement.setPointerCapture?.(e.pointerId);
+    const { zone: i, face: k } = plan.target, { A, U, n } = faceAxes(m, i, k), len = faceLength(m, i, k), [z0, z1] = zoneLevels(m, i);
+    // the face's normal on the sheet: pixels per metre (the plan's own axes, drawn turned with the building)
+    const mid = [A[0] + U[0] * len / 2, A[1] + U[1] * len / 2], zm = (z0 + z1) / 2, a = this.P([...mid, zm]), b = this.P([mid[0] + n[0], mid[1] + n[1], zm]);
+    this.pushing = { i, k, x0: e.clientX, y0: e.clientY, dir: [b[0] - a[0], b[1] - a[1]], d: 0, moved: false, el: this.ctx?.el || this.view.renderer.domElement };
+    this.pushing.el.setPointerCapture?.(e.pointerId);
   }
   dragPush(e) {
     const p = this.pushing, dx = e.clientX - p.x0, dy = e.clientY - p.y0;
@@ -257,14 +286,14 @@ export class ModelTools {
     p.d = Math.round(((dx * p.dir[0] + dy * p.dir[1]) / l2) / step) * step;
     const trial = structuredClone(m), taken = extrudeFace(trial, p.i, p.k, p.d), ok = Math.abs(taken) > 1e-6, [z0, z1] = zoneLevels(m, p.i);
     p.ok = ok; p.d = taken; // as far as it may go
-    this.svg.innerHTML = (ok ? this.box(trial.zones[p.i].plate, z0, z1) : this.face(m, p.i, p.k)) + this.note(m.zones[p.i].plate[p.k], z1, `${p.d > 0 ? '+' : ''}${Math.round(p.d * 1000)} mm`);
+    this.out.innerHTML = (ok ? this.box(trial.zones[p.i].plate, z0, z1) : this.face(m, p.i, p.k)) + this.note(m.zones[p.i].plate[p.k], z1, `${p.d > 0 ? '+' : ''}${Math.round(p.d * 1000)} mm`);
   }
   releasePush(e) {
     const p = this.pushing;
     this.pushing = null;
-    this.view.renderer.domElement.releasePointerCapture?.(e.pointerId);
+    p.el.releasePointerCapture?.(e.pointerId);
     if (!p.moved) {
-      askNumber(this.view.container, e, 'push out (+) or in (−), mm', (x) => this.onChange((m) => extrudeFace(m, p.i, p.k, x / 1000), 'face pushed or pulled'), true);
+      askNumber(this.ctx?.el || this.view.container, e, 'push out (+) or in (−), mm', (x) => this.onChange((m) => extrudeFace(m, p.i, p.k, x / 1000), 'face pushed or pulled'), true);
       return;
     }
     if (p.ok && p.d) this.onChange((m) => extrudeFace(m, p.i, p.k, p.d), `face ${p.d > 0 ? 'pushed out' : 'pulled in'} ${Math.round(Math.abs(p.d) * 1000)} mm`);
@@ -328,7 +357,7 @@ export class ModelTools {
     if (this.tool === 'merge') {
       this.onChange((x) => { const r = mergeZones(x, list, this.keepSeams()); if (typeof r === 'string') { why = r; return false; } return r; }, `${list.length} zones merged`);
     } else if ('face' in list[0]) {
-      this.onChange((x) => { if (!mergeFaces(x, list[0].zone, list.map((y) => y.face))) { why = 'Only faces in line, one after another, can be merged.'; return false; } }, `${list.length} faces merged`);
+      this.onChange((x) => { if (!mergeFaces(x, list[0].zone, list.map((y) => y.face))) { why = 'Only faces in line, one after another, can be merged.'; return false; } }, `${list.length} walls merged`);
     } else {
       this.onChange((x) => { if (!mergeCells(x, list[0].zone, list.map((y) => y.cell))) { why = 'Only pieces that meet can be merged.'; return false; } }, `${list.length} roof or floor pieces merged`);
     }
@@ -338,9 +367,10 @@ export class ModelTools {
 
   // Why something could not be done, shown beside the pointer for a moment.
   flashMessage(text) {
-    const r = this.view.renderer.domElement.getBoundingClientRect(), e = this.last;
+    const e = this.last;
     if (!e) return;
-    this.svg.innerHTML = label(e.clientX - r.left, e.clientY - r.top - 16, text, { size: 9.5, fill: 'var(--bad, #C0442B)' });
+    const [x, y] = this.px(e);
+    this.out.innerHTML = label(x, y - 16, text, { size: 9.5, fill: 'var(--bad, #C0442B)' });
     clearTimeout(this.flashTimer);
     this.flashTimer = setTimeout(() => { if (this.last && this.tool) this.preview(this.last); }, 2200);
   }
@@ -348,7 +378,7 @@ export class ModelTools {
   // The seam of the zone under the pointer nearest it: up a wall (a corner between two faces in line),
   // or across its roof (where two of its pieces meet).
   seamAt(m, t, e) {
-    const i = t.zone, [z0, z1] = zoneLevels(m, i), r = this.view.renderer.domElement.getBoundingClientRect(), px = [e.clientX - r.left, e.clientY - r.top];
+    const i = t.zone, [z0, z1] = zoneLevels(m, i), px = this.px(e);
     const { walls, cells } = zoneSeams(m, i), P = m.zones[i].plate, near = [];
     const dist = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1, u = Math.max(0, Math.min(1, ((px[0] - a[0]) * dx + (px[1] - a[1]) * dy) / l2)); return Math.hypot(px[0] - a[0] - u * dx, px[1] - a[1] - u * dy); };
     for (const v of walls) { const a = this.P([...P[v], z0]), b = this.P([...P[v], z1]); near.push({ d: dist(a, b), a, b, wall: v }); }
@@ -371,6 +401,7 @@ export class ModelTools {
 
   preview(e) {
     if (!this.tool) return;
+    if (this.ctx) { this.plan = this.planAt(e); this.ctx.svg.innerHTML = this.plan ? this.plan.draw() : ''; return; }
     const canvas = this.view.renderer.domElement, cr = canvas.getBoundingClientRect(), kr = this.view.container.getBoundingClientRect();
     Object.assign(this.svg.style, { left: `${cr.left - kr.left}px`, top: `${cr.top - kr.top}px`, width: `${cr.width}px`, height: `${cr.height}px` });
     this.plan = this.planAt(e);
@@ -387,5 +418,7 @@ export class ModelTools {
   }
 
   // Redrawn with the view (the camera moves under a preview).
-  beforeRender() { if (this.tool && this.last && this.plan && !this.pushing) this.svg.innerHTML = this.plan.draw(); }
+  beforeRender() { if (this.tool && this.last && this.plan && !this.pushing && !this.ctx) this.svg.innerHTML = this.plan.draw(); }
+  // a plan view zoomed or panned under a preview: drawn again there
+  redrawIn(ctx) { if (this.tool && this.ctx === ctx && this.plan && !this.pushing) ctx.svg.innerHTML = this.plan.draw(); }
 }

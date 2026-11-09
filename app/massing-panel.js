@@ -82,6 +82,13 @@ export function massingPanel(box, { get, change, changeViews, onOpenView = () =>
     return h;
   }
 
+  // a plan's name: its level's, numbered where that is taken
+  const suggestName = (m) => {
+    const base = `${m.levels[make.level]?.name || levelName(make.level)} plan`, taken = new Set((m.views || []).map((v) => v.name));
+    let name = base;
+    for (let k = 2; taken.has(name); k++) name = `${base} ${k}`;
+    return name;
+  };
   // ---------- Views ----------
   function viewsTab(m) {
     const views = m.views || [];
@@ -102,8 +109,8 @@ export function massingPanel(box, { get, change, changeViews, onOpenView = () =>
     make.level = Math.min(make.level, m.levels.length - 1);
     h += '<div class="msub" title="A plan view of a level, cut at a height above it. It owns its cut: Cut 3D here, on its bar, adds a clipping plane linked to it.">Create plan at level</div><div class="poprow">'
       + `<select class="popsel" data-act="make-level" title="The level to cut above">${lvOpts(m, make.level)}</select> + ${num('make-cut', 'cut', make.cut, 'Cut height above the level (m)', -Infinity)} m `
-      + `<input class="libname short" data-act="make-name" value="${esc(make.name)}" placeholder="${lvName(m, make.level)} plan" title="Its name (Tab takes the suggestion)"> `
-      + '<button type="button" class="pbtn" data-act="make-plan" title="Make the plan view and open it">Create</button></div>';
+      + `<input class="libname short" data-act="make-name" value="${esc(make.name)}" placeholder="${esc(suggestName(m))}" title="Its name (Tab takes the suggestion)"> `
+      + '<button type="button" class="pbtn" data-act="make-plan" title="Make the plan view: show it with Open, or pick it from the name of a plan view">Create</button></div>';
     return h;
   }
 
@@ -258,12 +265,11 @@ export function massingPanel(box, { get, change, changeViews, onOpenView = () =>
   function views(b) {
     const m = get(), act = b.dataset.act;
     if (act === 'make-plan') {
-      const L = make.level, name = make.name.trim() || `${m.levels[L]?.name || levelName(L)} plan`;
+      const L = make.level, name = make.name.trim() || suggestName(m);
       let made = null;
       changeViews((x) => { x.views ||= []; made = { id: Math.max(0, ...x.views.map((v) => v.id + 1)), kind: 'plan', name, level: L, cut: make.cut }; x.views.push(made); }, `plan view ${name} created`);
       make.name = '';
       render();
-      if (made) onOpenView(made.id);
       return;
     }
     const id = viewId(b);

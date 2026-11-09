@@ -341,7 +341,8 @@ footer[hidden]{display:none}
 .massing .pbtn.danger{color:#C0442B; border-color:#e3b3a8}
 
 /* ---------- the views in rows (the view-layout skill), filling the window ---------- */
-.views>.vrow{display:flex; align-items:stretch; background:#fff; flex:1 1 0; min-height:0}
+main#results>.views{overflow-y:auto; overflow-x:hidden}
+.views>.vrow{display:flex; align-items:stretch; background:#fff; flex:none; min-height:0}
 .vrow>.view{flex:1 1 0; min-width:220px; min-height:0}
 .vdiv{flex:0 0 7px; position:relative; background:#fff; cursor:col-resize}
 .hdiv{flex:0 0 7px; position:relative; background:#fff; cursor:row-resize}
@@ -388,3 +389,9 @@ body.moving, body.moving *{cursor:grabbing !important; user-select:none}
 .view.flash{animation:vflash .9s}
 @keyframes vflash{0%{box-shadow:inset 0 0 0 2px var(--glass)}100%{box-shadow:inset 0 0 0 2px transparent}}
 #view3d .vbarrow{padding-right:104px}
+
+.vhost.draw2d>svg.planov{pointer-events:none}
+.vhost.draw2d.panning{cursor:grabbing}
+.vhost.draw2d{cursor:default}
+.vtools{margin-top:5px}
+.vtools[hidden]{display:none}

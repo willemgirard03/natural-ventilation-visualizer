@@ -15,6 +15,8 @@
 //    turn beside the arc, each typed over (a face's length moves the face after it).
 // With one surface selected: its own grip, and a grip on each of its edges that moves the face beyond
 // that edge: a wall's top edge is the roof, its bottom the floor, its sides the faces either side.
+// A wall's own grip moves it for every zone sharing it (one grows as the other shrinks); with the whole
+// zone selected, its grips move its own faces alone, so a shared wall becomes two.
 //
 // A face selected (a wall, or a window of it) shows its windows' array as a dotted bracket over their
 // heads, its number and spacing typed over (the facade-windows skill); not while a window is isolated.
@@ -29,7 +31,7 @@
 import * as THREE from 'three';
 import { askNumber } from './sections.js';
 import { AXIS, CLICK_PX, gripMark, gripAt, cursorFor, dragLength, dragAngle, angleOf, dragOnPlane, screenDir, dim, label, line, head, path, poly, circle, arrayBracket } from './handles.js';
-import { isSeam, slideSeam, moveZone, turnPlan, bayExtents, setArraySpan, zoneFrame, pushFace, moveStorey, turnZone, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows, faceLength, zoneHeight, faceBearing, compassWord } from '../src/model/massing.js';
+import { isSeam, slideSeam, moveZone, turnPlan, bayExtents, setArraySpan, zoneFrame, pushFace, pushWall, moveStorey, turnZone, unitLayout, unitOf, windowHeights, setCount, setSpacing, spreadSide, dragPitch, sideWindows, faceLength, zoneHeight, faceBearing, compassWord } from '../src/model/massing.js';
 
 // A face named for the way it looks ('south face'), or the roof or floor.
 const faceName = (m, i, f) => (f === 'roof' || f === 'floor' ? f : `${{ N: 'north', NE: 'north-east', E: 'east', SE: 'south-east', S: 'south', SW: 'south-west', W: 'west', NW: 'north-west' }[compassWord(faceBearing(m, i, f))]} face`);
@@ -317,7 +319,9 @@ export class MassingEditor {
   // The massing as it would be with a handle moved by x (m; [a, b] m for a free move; degrees for a turn).
   apply(m, key, x) {
     const i = this.target.zone;
-    if (key.kind === 'face') pushFace(m, i, key.face, x);
+    // a wall selected moves for every zone sharing it; a zone's own grips move its face alone, leaving a
+    // wall it shared standing for the other zone
+    if (key.kind === 'face') { if (Number.isInteger(key.face) && key.face === this.target.face) pushWall(m, i, key.face, x); else pushFace(m, i, key.face, x); }
     else if (key.kind === 'span') {
       // an end of the array's bays dragged along its face, the other end held
       const f = this.target.face, [a, b] = bayExtents(m.zones[i].faces[f], faceLength(m, i, f));

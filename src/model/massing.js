@@ -1048,8 +1048,9 @@ export function floatingZones(m) {
 // asked for, scaled back (to a millimetre) until zone i fits - so a move stops where the zone would
 // collide, cross itself or come away from the building. Returns the change made.
 function limited(m, i, x, act) {
+  const ids = Array.isArray(i) ? i : [i];
   const scale = (t) => (Array.isArray(x) ? x.map((v) => v * t) : x * t);
-  const tryAt = (t) => { const trial = structuredClone(m); return act(trial, scale(t)) !== false && zoneFits(trial, i) ? trial : null; };
+  const tryAt = (t) => { const trial = structuredClone(m); return act(trial, scale(t)) !== false && ids.every((j) => zoneFits(trial, j)) ? trial : null; };
   let best = tryAt(1), bt = 1;
   if (!best) {
     let lo = 0, hi = 1;
@@ -1066,6 +1067,35 @@ function limited(m, i, x, act) {
 }
 // The pushed face, as far as it may go. Returns the distance taken.
 export function extrudeFace(m, i, k, d) { return limited(m, i, d, (x, v) => extrudeRaw(x, i, k, v)); }
+
+// The faces of other zones that share face k of zone i: in line with it, facing the other way, along
+// some of its length, on levels it stands on too. [[zone, face], ...]
+export function sharingFaces(m, i, k) {
+  const P = m.zones[i].plate, a = P[k], b = P[(k + 1) % P.length], L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+  const U = [(b[0] - a[0]) / L, (b[1] - a[1]) / L], off = (p) => (p[0] - a[0]) * U[1] - (p[1] - a[1]) * U[0], along = (p) => (p[0] - a[0]) * U[0] + (p[1] - a[1]) * U[1];
+  const [z0, z1] = levelsOf(m, m.zones[i]), out = [];
+  m.zones.forEach((y, j) => {
+    if (j === i) return;
+    const [y0, y1] = levelsOf(m, y);
+    if (Math.min(z1, y1) - Math.max(z0, y0) < 1e-6) return;
+    y.plate.forEach((c, q) => {
+      const d = y.plate[(q + 1) % y.plate.length];
+      if (Math.abs(off(c)) > 1e-6 || Math.abs(off(d)) > 1e-6) return;
+      const s0 = along(c), s1 = along(d);
+      if (s1 >= s0) return; // running the same way: not facing it
+      if (Math.min(L, s0) - Math.max(0, s1) > 1e-6) out.push([j, q]);
+    });
+  });
+  return out;
+}
+// A wall moved square to itself by d (out of zone i), with every zone sharing it: the wall between two
+// zones moves for both, one growing as the other shrinks. As far as they all may go; returns the
+// distance taken.
+export function pushWall(m, i, k, d) {
+  const share = sharingFaces(m, i, k);
+  if (!share.length) return extrudeFace(m, i, k, d);
+  return limited(m, [i, ...share.map(([j]) => j)], d, (x, v) => extrudeRaw(x, i, k, v) !== false && share.every(([j, q]) => extrudeRaw(x, j, q, -v) !== false));
+}
 
 // A seam (corner v of zone i, between two faces in line) slid along them by du m: one face longer, the
 // other shorter, as far as each stays EDGE_MIN long. Returns the distance taken.

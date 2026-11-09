@@ -290,6 +290,31 @@ test('a zone deleted leaves its levels; levels are put in, copied, swapped and t
   assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
 });
 
+test('a shared wall moves for both zones; pushed from one zone it leaves the other', async () => {
+  const { pushWall, sharingFaces, splitZone, extrudeFace, polyArea } = await import('../src/model/massing.js');
+  const m = massing0();
+  // the ground zone split across x: two zones sharing a wall
+  const P = m.zones[0].plate, xs = P.map((p) => p[0]), mid = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const ys = P.map((p) => p[1]), cy = (Math.min(...ys) + Math.max(...ys)) / 2, j = splitZone(m, 0, [mid, cy], [mid, cy + 1], { within: true });
+  assert.ok(j > 0);
+  const k = m.zones[0].plate.findIndex((p, q, A) => Math.abs(p[0] - mid) < 1e-6 && Math.abs(A[(q + 1) % A.length][0] - mid) < 1e-6);
+  assert.ok(k >= 0);
+  const share = sharingFaces(m, 0, k);
+  assert.equal(share.length, 1);
+  assert.equal(share[0][0], j);
+  const area = (z) => Math.abs(polyArea(z.plate));
+  const a0 = area(m.zones[0]), b0 = area(m.zones[j]), total = a0 + b0;
+  const w = structuredClone(m);
+  assert.ok(Math.abs(pushWall(w, 0, k, 1)) > 0.99);
+  assert.ok(Math.abs(area(w.zones[0]) + area(w.zones[j]) - total) < 1e-6, 'one grows as the other shrinks');
+  assert.ok(area(w.zones[0]) > a0);
+  // the zone alone pulled back from the shared wall: a gap, the other zone as it was
+  const g = structuredClone(m);
+  extrudeFace(g, 0, k, -1);
+  assert.ok(Math.abs(area(g.zones[j]) - b0) < 1e-6);
+  assert.ok(area(g.zones[0]) < a0);
+});
+
 test('level names and plan views travel with their storey; numbered names renumber', async () => {
   const { insertStorey, swapStoreys, removeStorey } = await import('../src/model/massing.js');
   const m = massing0(); // levels 1-3, zones on storeys 0 and 1

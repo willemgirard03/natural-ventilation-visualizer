@@ -36,6 +36,7 @@ import {
 import { PRESETS, SIZES } from '../src/model/windows.js';
 import { massingPanel } from './massing-panel.js';
 import { workspace } from './workspace.js';
+import { PlanEdit } from './planedit.js';
 import { MassingEditor } from './massedit.js';
 import { ModelTools } from './modeltools.js';
 
@@ -223,7 +224,7 @@ const tools = new ModelTools(view, {
   onAdded: (j) => { const z = massingGeometry(massing)[j]; if (z && model.zones[z.name]) view.select(z.name); },
   keepSeams: () => $('keep-seams').checked,
   onTool: (tool) => {
-    for (const b of document.querySelectorAll('#model-tools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
+    for (const b of document.querySelectorAll('.mtools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
     $('keep-seams-l').hidden = tool !== 'merge';
     if (tool) { winEdit.stop(); view.select(null); hover.clear(); }
   },
@@ -985,6 +986,7 @@ function showInfo(found) {
   const mt = massing && massingTarget(found);
   if (mt) massEdit.start(mt); else massEdit.stop();
   if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
+  queueMicrotask(() => ws.selection());
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
   if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; popShut = null; view.clicked = false; return; }
   const { kind, item } = found, key = `${kind}:${item.name}`;
@@ -1131,7 +1133,7 @@ function planeRows(p) {
   const suggest = p.kind === 'plan' ? `Plan at ${fmt(p.o.z + (view.origin?.[2] || 0), 2)} m` : `Section ${namedViews().filter((v) => v.kind === 'section').length + 1}`;
   return [
     ...made.map((v) => `<span class="popkv"><span class="tipped" title="A ${v.kind} view made from this plane, linked to it: moving either moves the other">View</span><button type="button" class="pbtn" data-plview-open="${v.id}" title="Show it">${esc(v.name)}</button></span>`),
-    `<div class="poprow"><input class="popname" data-plview-name placeholder="${esc(suggest)}" title="The view's name (Tab takes the suggestion)"><button type="button" class="pbtn" data-plview title="A ${kindWord} view of this cut, named, opened beside the 3D view and linked to this plane">Create ${kindWord} view</button></div>`,
+    `<div class="poprow"><input class="popname" data-plview-name placeholder="${esc(suggest)}" title="The view's name (Tab takes the suggestion)"><button type="button" class="pbtn" data-plview title="A ${kindWord} view of this cut, named and linked to this plane: show it from its name here, or pick it in a plan or section view">Create ${kindWord} view</button></div>`,
     `<label class="chk" title="Switch the plane's cut off without removing it: the building, the air and the particles show whole; switch it on again to cut as before"><input type="checkbox" data-air="on"${p.off ? '' : ' checked'}> Cut on</label>`,
     `<span class="popkv"><span class="tipped" title="Colour the cut where it passes through rooms: the air's temperature, speed or CO2. Point at the cut to read the values there.">Cut colour</span><select class="popsel" data-air="field">${opt(fields, a.field)}</select></span>`,
     `<label class="chk" title="Particles moving with the air within this plane, trailing, as in a 2D section: their own, apart from the 3D particles"><input type="checkbox" data-air="particles"${a.particles ? ' checked' : ''}> Particles in the cut</label>`,
@@ -2297,6 +2299,15 @@ const ws = workspace({
   levels: () => massing?.levels || null,
   planeOf: (id) => planeById(namedViews().find((v) => v.id === id)?.plane),
   onCut3d: cut3d,
+  // a plan edited as the 3D view is: its zones, walls and windows picked and pushed, the tools at work
+  editorFor: (d) => new PlanEdit(d, {
+    view, tools, massing: () => massing, selected: () => selected,
+    select: (name) => { view.select(name); ws.selection(); },
+    massingTarget: (name) => { const f = view.find(name); return f && massing ? massingTarget(f) : null; },
+    change: massingChange,
+  }),
+  hasTools: () => !!massing,
+  toolsHTML: `<span class="seg mini">${[...$('model-tools').querySelectorAll('[data-tool]')].filter((b) => b.dataset.tool !== 'add').map((b) => b.outerHTML).join('')}</span>`,
   onTake: (rec) => {
     undoStack.push({ undo: () => ws.put(rec), redo: () => ws.take(rec.el), what: 'view removed', view: true });
     if (undoStack.length > 100) undoStack.shift();
@@ -2304,6 +2315,13 @@ const ws = workspace({
   },
 });
 // the building drawn again (a new model, an edit, walls drawn otherwise): the plans and sections cut again
+ws.setTools(tools);
+// the modelling tools' buttons on a plan view's bar: as the 3D view's
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('.vtools [data-tool]');
+  if (!b || !massing) return;
+  if (tools.tool === b.dataset.tool) tools.stop(); else tools.start(b.dataset.tool);
+});
 for (const k of ['setModel', 'setWalls']) { const f = view[k].bind(view); view[k] = (...a) => { const r = f(...a); ws.redraw(); return r; }; }
 function openView(id) { ws.open(id); }
 // The named views changed: the workspace's lists, and each plan linked to a plane moves its plane.
@@ -2364,7 +2382,7 @@ function viewFromPlane(p, name) {
     x.views.push(made);
   }, `${p.kind} view ${name} created`);
   void host;
-  if (made) { ws.open(made.id); showInfo(current()); }
+  if (made) showInfo(current());
 }
 function massingChange(mutate, what) {
   if (!massing) return false;

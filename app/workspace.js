@@ -7,7 +7,12 @@
 // tab or from a clipping plane's pop-up), picked from its name in the bar. It owns its cut: a plan is
 // a level and a height above it (or, made from a plane, an elevation of its own); a section, the frame
 // of the plane it came from. While linked to a clipping plane (Cut 3D here, or made from one) the two
-// follow each other. The wheel zooms about the pointer, a drag pans, a double click fits.
+// follow each other. The wheel zooms about the pointer; a right (or Shift + right, or middle) drag
+// pans; a double click fits. A plan is edited as the 3D view is (planedit.js): its zones, walls and
+// windows picked and pushed, and the modelling tools at work on it.
+//
+// The rows scroll: one row fills the space; with more, each takes most of it, and a row's lower margin
+// dragged gives it a height of its own (a double click gives back the default).
 
 import * as THREE from 'three';
 import { createLayout, viewShell, settle, RECENTRE, FS_IN, FS_OUT } from './views.js';
@@ -25,7 +30,9 @@ const fmt = (x, d = 2) => String(+Number(x).toFixed(d));
 //   planeOf(id)        the clipping plane linked to a named view, if it still stands
 //   onCut3d(id)        Cut 3D here: a plane made for the named view, or the linked one picked
 //   onTake(record)     a view taken off the page: keep the record so Undo can put it back
-export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3d, onTake }) {
+//   editorFor(drawing) a plan's editor (planedit.js), or null; toolsHTML: the modelling tools' buttons
+//   hasTools()         whether the tools apply (a massing is open)
+export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3d, onTake, editorFor = () => null, toolsHTML = '', hasTools = () => false }) {
   const kinds = { ...KIND_LABEL };
   const drawings = new Set();
   let version = 0; // bumped when the geometry or a cut changes: the drawings cut again
@@ -47,7 +54,13 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     make: (type, saved) => (type === '3d' ? { el: view3dEl } : new Drawing(type, saved?.pin ?? firstOf(type))),
     onChange: changed, onResize: sizeRows,
   });
-  function sizeRows() { for (const r of host.querySelectorAll(':scope > .vrow')) r.style.flex = r.dataset.h ? `0 0 ${r.dataset.h}px` : ''; }
+  // each row its height: its own where dragged; else all the space for a single row, most of it for each of several
+  function sizeRows() {
+    const rows = [...host.querySelectorAll(':scope > .vrow')], H = host.clientHeight;
+    if (!H) return;
+    for (const r of rows) r.style.height = `${r.dataset.h ? +r.dataset.h : rows.length === 1 ? Math.max(300, H - 14) : Math.max(300, Math.round(H * 0.62))}px`;
+  }
+  addEventListener('resize', sizeRows);
   function changed() {
     sizeRows();
     if (host.contains(view3dEl)) delete kinds['3d']; else kinds['3d'] = KIND_LABEL['3d'];
@@ -64,7 +77,11 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     onTake?.(layout.take(el));
   });
 
-  const firstOf = (type) => views().find((v) => v.kind === type)?.id ?? null;
+  // the first view of a kind not shown already (else the first of it)
+  const firstOf = (type) => {
+    const shown = new Set([...drawings].filter((d) => d.el.isConnected).map((d) => d.pin)), of = views().filter((v) => v.kind === type);
+    return (of.find((v) => !shown.has(v.id)) || of[0])?.id ?? null;
+  };
 
   // ---------- a plan or section view ----------
   class Drawing {
@@ -73,11 +90,16 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
         controls: '<button type="button" class="minibtn" data-cut3d>Cut 3D here</button>'
           + `<button type="button" class="minibtn vb iconbtn" data-fit title="Fit the drawing in the view">${RECENTRE}</button>`,
         info: type === 'plan'
-          ? ['Plan', '<p>The building cut across at a height above a level, looking down. What the cut passes through is hatched; floors and walls below it, down to the level, are dotted.</p><p>Pick another plan or a section from the name. Wheel: zoom; drag: pan; double click: fit.</p>']
-          : ['Section', '<p>The building cut by a clipping plane, seen from the side the plane removes. What the cut passes through is hatched (floors and roofs solid); what lies beyond is dotted, finer further away. The levels are marked.</p><p>Pick another section or a plan from the name. Wheel: zoom; drag: pan; double click: fit.</p>'],
+          ? ['Plan', '<p>The building cut across at a height above a level, looking down. What the cut passes through is hatched; floors and walls below it, down to the level, are dotted.</p><p>Point at a room, a wall or a window and click to select it, as in 3D. A selected zone has a grip on each wall: dragged, the wall moves for this zone alone (a wall it shares becomes two). A selected wall has one grip: dragged, it moves for every zone sharing it. The modelling tools work here too.</p><p>Wheel: zoom; right drag (or middle): pan; double click on nothing: fit.</p>']
+          : ['Section', '<p>The building cut by a clipping plane, seen from the side the plane removes. What the cut passes through is hatched (floors and roofs solid); what lies beyond is dotted, finer further away. The levels are marked.</p><p>Wheel: zoom; right drag (or middle): pan; double click: fit.</p>'],
       });
-      Object.assign(this, shell, { pin, cam: null, geo: null, at: -1 });
+      Object.assign(this, shell, { pin, cam: null, geo: null, at: -1, key: '' });
       this.el.dataset.pin = pin ?? '';
+      // the modelling tools, on a second row of the bar (plans only)
+      this.bar.insertAdjacentHTML('beforeend', `<div class="vbarrow vtools mtools">${toolsHTML}</div>`);
+      // over the drawing: the editor's layer (hover, selection, grips) and the tools' previews
+      this.host.insertAdjacentHTML('beforeend', '<svg class="planov" xmlns="http://www.w3.org/2000/svg"></svg><svg class="planov" xmlns="http://www.w3.org/2000/svg"></svg>');
+      [this.ov, this.tv] = this.host.querySelectorAll('svg.planov');
       this.sel = this.el.querySelector('.vtype');
       this.sel.title = 'Show another plan or section here';
       this.sel.addEventListener('change', () => { this.show(Number(this.sel.value)); });
@@ -86,6 +108,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       this.el.querySelector('[data-vfull]').addEventListener('click', () => setFull(this.el, !this.el.classList.contains('full')));
       this.host.classList.add('draw2d');
       this.wire();
+      this.setEditor();
       new ResizeObserver(() => this.paint()).observe(this.host);
       drawings.add(this);
       this.options();
@@ -96,8 +119,20 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       this.pin = id; this.el.dataset.pin = id ?? ''; this.cam = null; this.at = -1;
       const v = this.item;
       if (v) this.el.dataset.type = this.type = v.kind;
+      this.setEditor();
       this.options(); this.paint();
     }
+    // a plan is edited; a section only looked at
+    setEditor() {
+      const want = this.type === 'plan';
+      if (want && !this.editor) this.editor = editorFor(this);
+      if (!want && this.editor) { this.editor.dispose(); this.editor = null; this.ov.innerHTML = ''; this.tv.innerHTML = ''; }
+      this.el.querySelector('.vtools').hidden = !(want && hasTools());
+    }
+    // plan coordinates (m) to the drawing's pixels and back
+    toPx(u, v) { const c = this.cam, w = this.host.clientWidth, h = this.host.clientHeight; return [w / 2 + (u - c.cx) * c.s, h / 2 - (v - c.cy) * c.s]; }
+    fromPx(x, y) { const c = this.cam, w = this.host.clientWidth, h = this.host.clientHeight; return [(x - w / 2) / c.s + c.cx, -(y - h / 2) / c.s + c.cy]; }
+    frameNow() { return this.frame(); }
     // the bar's name: every plan and section by name
     options() {
       const list = views(), group = (kind, label) => {
@@ -106,6 +141,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       };
       this.sel.innerHTML = group('plan', 'Plans') + group('section', 'Sections') || `<option>${KIND_LABEL[this.type]}</option>`;
       if (!this.item) this.sel.insertAdjacentHTML('afterbegin', `<option selected disabled>${KIND_LABEL[this.type]}: none</option>`);
+      this.el.querySelector('.vtools').hidden = !(this.type === 'plan' && hasTools());
       this.bar3d();
     }
     bar3d() {
@@ -149,7 +185,8 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       this.foot.className = 'vtitle tblock';
       if (!v) {
         const none = !views().some((x) => x.kind === this.type);
-        this.host.querySelector('svg')?.remove();
+        this.host.querySelector('svg.dwg')?.remove();
+        this.ov.innerHTML = ''; this.tv.innerHTML = '';
         this.empty(none ? (this.type === 'plan' ? 'No plan views yet: create one in the Building window\'s Views tab (Create plan at level), or from a plan clipping plane\'s pop-up.' : 'No section views yet: create one from a section clipping plane\'s pop-up.') : 'Pick a view from the name in the bar.');
         this.foot.innerHTML = '';
         return;
@@ -161,9 +198,12 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       if (!this.cam) {
         if (b) { const bw = Math.max(1, b[2] - b[0]), bh = Math.max(1, b[3] - b[1]); this.cam = { cx: (b[0] + b[2]) / 2, cy: (b[1] + b[3]) / 2, s: Math.min((w - 48) / bw, (h - 48) / bh) }; } else this.cam = { cx: 0, cy: 0, s: 20 };
       }
-      const svg = drawSVG(this.geo, { w, h, ...this.cam }, this.marks);
-      const old = this.host.querySelector('svg');
-      if (old) old.outerHTML = svg; else this.host.insertAdjacentHTML('beforeend', svg);
+      const svg = drawSVG(this.geo, { w, h, ...this.cam }, this.marks).replace('<svg ', '<svg class="dwg" ');
+      const old = this.host.querySelector('svg.dwg');
+      if (old) old.outerHTML = svg; else this.ov.insertAdjacentHTML('beforebegin', svg);
+      for (const o of [this.ov, this.tv]) { o.setAttribute('width', w); o.setAttribute('height', h); }
+      this.editor?.paint();
+      this.editor && tools()?.redrawIn(this.editor.ctx);
       settle(this);
       const lv = levels(), p = planeOf(v.id);
       const where = v.kind === 'plan'
@@ -189,15 +229,23 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
         this.cam = { s, cx: mx - (mx - c.cx) * c.s / s, cy: my - (my - c.cy) * c.s / s };
         this.paint();
       }, { passive: false });
+      h.addEventListener('contextmenu', (e) => e.preventDefault());
       h.addEventListener('pointerdown', (e) => {
-        if (e.button > 1 || !this.cam || e.target.closest('.vfloat')) return;
+        if (!this.cam || e.target.closest('.vfloat, input')) return;
+        if (e.button === 0) { this.editor?.down(e); return; }
+        if (e.button !== 1 && e.button !== 2) return;
+        e.preventDefault();
         const x0 = e.clientX, y0 = e.clientY, c0 = { ...this.cam };
         h.setPointerCapture(e.pointerId);
+        h.classList.add('panning');
         const move = (m) => { this.cam = { ...c0, cx: c0.cx - (m.clientX - x0) / c0.s, cy: c0.cy + (m.clientY - y0) / c0.s }; this.paint(); };
-        const up = () => { h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', up); };
+        const up = () => { h.classList.remove('panning'); h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', up); };
         h.addEventListener('pointermove', move); h.addEventListener('pointerup', up);
       });
-      h.addEventListener('dblclick', () => { this.cam = null; this.paint(); });
+      h.addEventListener('pointermove', (e) => { if (!h.classList.contains('panning')) this.editor?.move(e); });
+      h.addEventListener('pointerup', (e) => { if (e.button === 0) this.editor?.up(e); });
+      h.addEventListener('pointerleave', () => this.editor?.leave());
+      h.addEventListener('dblclick', (e) => { if (!this.editor?.pickAt(e) && !tools()?.tool) { this.cam = null; this.paint(); } });
     }
   }
 
@@ -236,6 +284,8 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     if (e.key === 'Escape' && f) { e.stopImmediatePropagation(); setFull(f.el, false); }
   });
 
+  const tools = () => toolsRef;
+  let toolsRef = null;
   let queued = false;
   const repaint = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; for (const d of drawings) d.paint(); }); };
   return {
@@ -256,7 +306,11 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     // the list of named views changed: each view's name list, and a deleted one's view shows none
     listChanged() { for (const d of drawings) { if (d.pin !== null && !d.item) d.show(firstOf(d.type)); else d.options(); } repaint(); },
     // the building or a cut changed: every drawing cut again
-    redraw() { version++; for (const d of drawings) d.bar3d(); repaint(); },
+    redraw() { version++; for (const d of drawings) { d.bar3d(); d.setEditor(); } repaint(); },
+    // the selection changed: drawn again over each plan
+    selection() { for (const d of drawings) d.editor?.paint(); },
+    setTools(t) { toolsRef = t; },
+    drawings: () => [...drawings],
     put: (rec) => layout.put(rec), take: (el) => layout.take(el),
     layout,
   };
