@@ -114,33 +114,33 @@ body.hasfull{overflow:hidden}
 /* the picked item's details, floating over the view */
 .pick-info{position:absolute; left:10px; top:10px; z-index:6; width:max-content; max-width:min(330px, calc(100% - 20px)); max-height:calc(100% - 20px); overflow:auto; padding:5px 8px 7px; border-radius:5px; background:var(--panel); border:1px solid var(--rule); box-shadow:0 3px 10px rgba(0,0,0,.13); font-size:11.5px; line-height:1.45; color:var(--ink2)}
 /* the selection's pop-up, as the Solar Shading Explorer's: a header to drag it by, fold and close */
-.pick-info .pophd{display:flex; align-items:center; justify-content:space-between; gap:10px; font-weight:600; color:var(--ink); cursor:move; user-select:none; margin:-1px -4px 3px 0}
-.pick-info .popbtns{display:inline-flex; gap:2px}
-.pick-info .popbtns button{border:0; background:none; color:var(--ink3); font-size:13px; line-height:1; padding:1px 4px; margin:0; cursor:pointer; border-radius:3px}
-.pick-info .popbtns button:hover{background:var(--rule2); color:var(--ink)}
-.pick-info .popsec{margin-top:5px; padding-top:4px; border-top:1px solid var(--rule2); color:var(--ink3); font-weight:600}
-.pick-info .popnum{width:5.2em; font:inherit; padding:0 4px; border:1px solid var(--rule); border-radius:2px; background:var(--panel); text-align:right}
-.pick-info .popnum:focus,.pick-info .popname:focus{outline:none; border-color:var(--glass)}
-.pick-info .popnum:disabled{background:none; border-color:transparent}
-.pick-info .popsel{font:inherit; font-size:11px; max-width:13em; padding:0 2px}
-.pick-info .popsel.wide{max-width:100%; width:100%}
-.pick-info .popname{font:inherit; width:12em; padding:0 4px; border:1px solid var(--rule); border-radius:2px}
-.pick-info .popkv{display:grid; grid-template-columns:8.5em auto; align-items:center; gap:6px}
-.pick-info .popv{white-space:nowrap}
-.pick-info .poprow{display:flex; flex-wrap:wrap; gap:4px 10px; align-items:center}
-.pick-info .poplayer{display:flex; gap:4px; align-items:center}
-.pick-info .poplayer .lnum{font-family:var(--mono); color:var(--ink3); width:1.2em}
-.pick-info .pbtn{font:inherit; font-size:11px; padding:1px 7px; line-height:1.5; margin:0; border:1px solid var(--rule); border-radius:3px; background:var(--panel); color:var(--ink2); cursor:pointer}
-.pick-info .pbtn:hover{border-color:var(--glass); color:var(--ink)}
-.pick-info .pbtn.on{border-color:var(--glass); background:var(--glass); color:#fff}
-.pick-info .pbtn.more{border:0; background:none; padding:0; color:var(--glass)}
-.pick-info .pbtn.x{border:0; color:var(--ink3); padding:0 4px}
-.pick-info .pbtn.x:hover{color:#C0442B}
-.pick-info .chk{display:inline-flex; gap:4px; align-items:center; cursor:pointer}
-.pick-info .popday svg rect{fill:var(--glassfill); stroke:none}
-.pick-info .popday svg rect.now{fill:var(--glass)}
-.pick-info .popday svg text{font-size:8px; fill:var(--ink3); font-family:var(--mono)}
-.pick-info .popmsg{margin:2px 0 4px}
+.pick-info .pophd,.lvpop .pophd,.zset .pophd{display:flex; align-items:center; justify-content:space-between; gap:10px; font-weight:600; color:var(--ink); cursor:move; user-select:none; margin:-1px -4px 3px 0}
+.pick-info .popbtns,.lvpop .popbtns,.zset .popbtns{display:inline-flex; gap:2px}
+.pick-info .popbtns button,.lvpop .popbtns button,.zset .popbtns button{border:0; background:none; color:var(--ink3); font-size:13px; line-height:1; padding:1px 4px; margin:0; cursor:pointer; border-radius:3px}
+.pick-info .popbtns button:hover,.lvpop .popbtns button:hover,.zset .popbtns button:hover{background:var(--rule2); color:var(--ink)}
+.pick-info .popsec,.lvpop .popsec,.zset .popsec{margin-top:5px; padding-top:4px; border-top:1px solid var(--rule2); color:var(--ink3); font-weight:600}
+.pick-info .popnum,.lvpop .popnum,.zset .popnum{width:5.2em; font:inherit; padding:0 4px; border:1px solid var(--rule); border-radius:2px; background:var(--panel); text-align:right}
+.pick-info .popnum:focus,.pick-info .popname:focus,.lvpop .popnum:focus,.lvpop .popname:focus,.zset .popnum:focus,.zset .popname:focus{outline:none; border-color:var(--glass)}
+.pick-info .popnum:disabled,.lvpop .popnum:disabled,.zset .popnum:disabled{background:none; border-color:transparent}
+.pick-info .popsel,.lvpop .popsel,.zset .popsel{font:inherit; font-size:11px; max-width:13em; padding:0 2px}
+.pick-info .popsel.wide,.lvpop .popsel.wide,.zset .popsel.wide{max-width:100%; width:100%}
+.pick-info .popname,.lvpop .popname,.zset .popname{font:inherit; width:12em; padding:0 4px; border:1px solid var(--rule); border-radius:2px}
+.pick-info .popkv,.lvpop .popkv,.zset .popkv{display:grid; grid-template-columns:8.5em auto; align-items:center; gap:6px}
+.pick-info .popv,.lvpop .popv,.zset .popv{white-space:nowrap}
+.pick-info .poprow,.lvpop .poprow,.zset .poprow{display:flex; flex-wrap:wrap; gap:4px 10px; align-items:center}
+.pick-info .poplayer,.lvpop .poplayer,.zset .poplayer{display:flex; gap:4px; align-items:center}
+.pick-info .poplayer .lnum,.lvpop .poplayer .lnum,.zset .poplayer .lnum{font-family:var(--mono); color:var(--ink3); width:1.2em}
+.pick-info .pbtn,.lvpop .pbtn,.zset .pbtn{font:inherit; font-size:11px; padding:1px 7px; line-height:1.5; margin:0; border:1px solid var(--rule); border-radius:3px; background:var(--panel); color:var(--ink2); cursor:pointer}
+.pick-info .pbtn:hover,.lvpop .pbtn:hover,.zset .pbtn:hover{border-color:var(--glass); color:var(--ink)}
+.pick-info .pbtn.on,.lvpop .pbtn.on,.zset .pbtn.on{border-color:var(--glass); background:var(--glass); color:#fff}
+.pick-info .pbtn.more,.lvpop .pbtn.more,.zset .pbtn.more{border:0; background:none; padding:0; color:var(--glass)}
+.pick-info .pbtn.x,.lvpop .pbtn.x,.zset .pbtn.x{border:0; color:var(--ink3); padding:0 4px}
+.pick-info .pbtn.x:hover,.lvpop .pbtn.x:hover,.zset .pbtn.x:hover{color:#C0442B}
+.pick-info .chk,.lvpop .chk,.zset .chk{display:inline-flex; gap:4px; align-items:center; cursor:pointer}
+.pick-info .popday svg rect,.lvpop .popday svg rect,.zset .popday svg rect{fill:var(--glassfill); stroke:none}
+.pick-info .popday svg rect.now,.lvpop .popday svg rect.now,.zset .popday svg rect.now{fill:var(--glass)}
+.pick-info .popday svg text,.lvpop .popday svg text,.zset .popday svg text{font-size:8px; fill:var(--ink3); font-family:var(--mono)}
+.pick-info .popmsg,.lvpop .popmsg,.zset .popmsg{margin:2px 0 4px}
 /* zone labels over the 3D view, and a window's figures while it is edited */
 .zlabels,.winfigs{position:absolute; inset:0; pointer-events:none; overflow:hidden; z-index:4}
 /* a zone's tag, as the Solar Shading Explorer labels its drawings: mono text on a small square backing */
@@ -149,11 +149,11 @@ body.hasfull{overflow:hidden}
 .ztag.on{color:var(--ink); box-shadow:inset 0 -2px 0 #F2A900}
 .wfig{position:absolute; left:0; top:0; pointer-events:auto; font:500 10.5px/1.3 var(--mono); color:var(--ink); background:rgba(253,253,252,.92); border:1px solid #F2A900; border-radius:2px; padding:0 4px; cursor:text; white-space:nowrap; margin:0}
 .wfig.bad{border-color:#D93025; color:#D93025; cursor:default; font-family:var(--sans)}
-.pick-info b{font-weight:600; color:var(--ink)}
-.pick-info div + div{margin-top:3px}
-.pick-info button{margin-top:4px}
-.pick-info select{font-size:11.5px; padding:1px 4px}
-.pick-info input[type=range]{width:120px}
+.pick-info b,.lvpop b,.zset b{font-weight:600; color:var(--ink)}
+.pick-info div + div,.lvpop div + div,.zset div + div{margin-top:3px}
+.pick-info button,.lvpop button,.zset button{margin-top:4px}
+.pick-info select,.lvpop select,.zset select{font-size:11.5px; padding:1px 4px}
+.pick-info input[type=range],.lvpop input[type=range],.zset input[type=range]{width:120px}
 
 /* ---------- model details, folded away under the view ---------- */
 .refs{border-bottom:1px solid var(--rule)}
@@ -280,8 +280,8 @@ svg.asm .side{font:500 9px var(--mono); fill:var(--ink3)}
 /* the values of the air at the point of a cut pointed at */
 .probetag{position:absolute; left:0; top:0; z-index:5; pointer-events:none; font:500 10.5px/1.35 var(--mono); color:var(--ink2); background:rgba(253,253,252,.94); padding:1px 5px; white-space:nowrap}
 .probetag b{color:var(--ink); font-weight:600}
-.pick-info input[type=range]{width:90px; vertical-align:middle}
-.pick-info output{font-family:var(--mono); color:var(--ink3)}
+.pick-info input[type=range],.lvpop input[type=range],.zset input[type=range]{width:90px; vertical-align:middle}
+.pick-info output,.lvpop output,.zset output{font-family:var(--mono); color:var(--ink3)}
 
 /* window keyframes in the Play day menu */
 .kflist{display:grid; gap:2px; margin:2px 0 4px; max-width:22em; white-space:normal}
@@ -412,3 +412,30 @@ main#results>.views .view>.v3dbar{position:relative; top:auto}
 .ribttl{font:600 11px var(--sans); color:var(--ink3); text-transform:uppercase; letter-spacing:.05em}
 body.bartucked .calcbar>.ribbon{display:none}
 .calcbar .airrow{gap:6px 12px}
+
+/* the levels: markers over the 3D view, the level's pop-up */
+.lvmarks{position:absolute; pointer-events:none; overflow:visible; z-index:4}
+.lvmarks .lvmark{pointer-events:auto; cursor:ns-resize}
+.lvmarks text{font:9.5px var(--mono); paint-order:stroke; stroke:var(--panel); stroke-width:3px; stroke-linejoin:round}
+.lvmarks .lvname{font:600 10.5px var(--sans)}
+.lvmarks .lvfig{pointer-events:auto; cursor:text; text-decoration:underline dotted}
+.lvpop{position:fixed; z-index:45; width:max-content; max-width:260px; padding:5px 8px 7px; border-radius:5px; background:var(--panel); border:1px solid var(--rule); box-shadow:0 3px 10px rgba(0,0,0,.13); font-size:11.5px; line-height:1.45; color:var(--ink2)}
+.lvpop[hidden]{display:none}
+.lvpop .msub{font-weight:600; color:var(--ink3); margin:6px 0 2px; border-top:1px solid var(--rule2); padding-top:4px}
+.lvpop .libname.short{font:inherit; width:10em; padding:0 4px; border:1px solid var(--rule); border-radius:2px}
+.lvpop .stgrid{display:grid; gap:3px; margin:2px 0 6px}
+.lvpop .strow{display:grid; grid-template-columns:18px 22px 22px; align-items:center; gap:3px; color:var(--glass)}
+.lvpop .pbtn.arw{padding:0; color:var(--glass); font-size:9px; height:18px}
+.lvpop .pbtn:disabled{opacity:.35; cursor:default}
+.lvpop .stico{display:block}
+.lvpop .pbtn.danger{color:#C0442B; border-color:#e3b3a8}
+.lvpop div + div{margin-top:3px}
+/* the View tab's list of views */
+.vblist{min-width:420px}
+.vblist .layrow{display:flex; gap:6px; align-items:center; flex-wrap:wrap}
+.vblist .vbkind{font:500 10px var(--mono); color:var(--ink3); width:4.5em}
+.vblist .libname{font:inherit; width:11em; padding:0 4px; border:1px solid var(--rule); border-radius:2px}
+#view-make .popnum{width:4em; font:inherit; padding:0 4px; border:1px solid var(--rule); border-radius:2px; text-align:right}
+#view-make .popname{font:inherit; width:10em; padding:0 4px; border:1px solid var(--rule); border-radius:2px}
+.zset{font-size:11.5px}
+.zset div + div{margin-top:3px}

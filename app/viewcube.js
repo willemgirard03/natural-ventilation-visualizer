@@ -95,12 +95,12 @@ export class ViewCube {
     el.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || !onRing(e)) return;
       turning = { x: e.clientX, x0: e.clientX, moved: false };
-      el.setPointerCapture(e.pointerId);
+      try { el.setPointerCapture(e.pointerId); } catch { /* a pointer the browser no longer tracks */ }
       e.preventDefault();
     });
     el.addEventListener('pointerup', (e) => {
       if (!turning) return;
-      el.releasePointerCapture(e.pointerId);
+      try { el.releasePointerCapture(e.pointerId); } catch { /* already let go */ }
       this.justTurned = turning.moved;
       turning = null;
     });

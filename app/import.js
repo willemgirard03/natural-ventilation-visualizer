@@ -37,6 +37,8 @@ import { PRESETS, SIZES } from '../src/model/windows.js';
 import { massingPanel } from './massing-panel.js';
 import { workspace } from './workspace.js';
 import { PlanEdit } from './planedit.js';
+import { LevelEdits, LevelMarks3D } from './levels.js';
+import { viewsBar } from './viewsbar.js';
 import { MassingEditor } from './massedit.js';
 import { ModelTools } from './modeltools.js';
 
@@ -203,7 +205,8 @@ const sky = new SkyDome(view, {
     if (!applyEdit((tx) => { tx.get('Building', name).north_axis = deg; }, `north axis set to ${deg}°`, { geometry: true })) updateSky();
   },
 });
-view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); tools.beforeRender(); };
+let levelMarks = null; // the levels' markers in 3D, made with the views below
+view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); tools.beforeRender(); levelMarks?.draw(); };
 // The modelling tools (app/modeltools.js): Add zone and Split zone, in the view's bar for a massing.
 const tools = new ModelTools(view, {
   massing: () => massing,
@@ -945,7 +948,7 @@ const load = (file) => loadText(file.name, () => file.text());
 
 async function loadText(name, read) {
   $('status').textContent = `Reading ${name}…`;
-  massing = null; $('massing').hidden = true; $('mass-open').hidden = true; massEdit.stop(); tools.stop(); $('model-tools').hidden = true;
+  massing = null; $('massing').hidden = true; $('mass-open').hidden = false; massEdit.stop(); tools.stop(); $('model-tools').hidden = true;
   try {
     const epjson = JSON.parse(await read());
     model = importEpJSON(epjson, { fileName: name });
@@ -982,6 +985,8 @@ function showInfo(found) {
   // a window of a massing: the Massing window turns to its zone and face
   const at = massing && found?.kind === 'window' && massingWindow(massing, found.item.name);
   if (at && !$('massing').hidden) massingUI.show(at.zone, at.face);
+  else if (found?.kind === 'zone' && !$('massing').hidden) massingUI.showName(found.item.name);
+  if (found && levelEdits.selected !== null) levelEdits.select(null);
   // a massing's zone or surface: its handles
   const mt = massing && massingTarget(found);
   if (mt) massEdit.start(mt); else massEdit.stop();
@@ -2086,6 +2091,7 @@ function fillDetails(m) {
 
 function render(m) {
   looseViews = { views: [] };
+  queueMicrotask(() => { vbar.render(); levelEdits.select(null); });
   fillDetails(m);
   winEdit.stop();
   undoStack.length = 0; redoStack.length = 0; modelEdited = false; axisCache = null; schedCache.clear();
@@ -2205,8 +2211,14 @@ $('edited').addEventListener('click', undo);
 // layers, a material's figures, names. Tab in a name box takes its suggestion.
 const assemblyOf = (t) => t.closest('[data-c]')?.dataset.c;
 function onChange(e) {
-  const t = e.target, zone = selected && model?.zones[selected] ? selected : null;
+  const named = e.target.closest?.('[data-zone-name]')?.dataset.zoneName;
+  const t = e.target, zone = named && model?.zones[named] ? named : selected && model?.zones[selected] ? selected : null;
   if (!model) return;
+  if (t.dataset.zcons && zone) {
+    const list = Object.values(model.surfaces).filter((x) => x.zone === zone && x.csType === t.dataset.zcons);
+    applyEdit((tx, m) => { for (const x of list) setSurfaceConstruction(tx, m, x.name, t.value); }, `${zone} ${t.dataset.zcons} assembly ${t.value}`);
+    return;
+  }
   if (t.dataset.zset && zone) {
     const v = t.tagName === 'SELECT' ? t.value : Number(String(t.value).replace(',', '.')) * Number(t.dataset.scale || 1);
     if (t.tagName !== 'SELECT' && !(Number.isFinite(v) && v >= 0)) { showInfo(current()); return; }
@@ -2265,12 +2277,13 @@ function onClick(e) {
   else if (act === 'mat-new') applyEdit((tx) => newMaterial(tx, $('lib-kind').value, 'New material'), 'new material');
   else if (act === 'mat-del') applyEdit((tx) => removeMaterial(tx, b.dataset.v), `material ${b.dataset.v} removed`);
 }
+$('massing').addEventListener('change', onChange);
 for (const id of ['info', 'library']) {
   $(id).addEventListener('change', onChange);
   $(id).addEventListener('keydown', onKey);
   $(id).addEventListener('click', onClick);
 }
-function refreshPanels() { showInfo(current()); renderLibrary(); }
+function refreshPanels() { showInfo(current()); renderLibrary(); massingUI.render(); }
 
 // ---------- massing ----------
 // A building modelled from scratch: zones standing on levels, each face with a window array
@@ -2278,9 +2291,33 @@ function refreshPanels() { showInfo(current()); renderLibrary(); }
 // geometry as one undoable edit, keeping the assemblies, loads and settings changed since.
 let massing = null;
 const massingUI = massingPanel($('massing'), {
-  get: () => massing, change: massingChange, changeViews: viewsChange,
-  onOpenView: (id) => openView(id),
+  get: () => massing, model: () => model, change: massingChange,
+  zoneExtra: (name) => zoneExtraRows(name),
+  onPick: (name) => { if (model?.zones[name] && selected !== name) view.select(name); },
 });
+// A zone's settings in the Zones window: its space use and ventilation (as its pop-up), and its
+// assemblies by surface class (ClimateStudio's construction template), each class set for all the
+// zone's surfaces of it at once.
+function zoneExtraRows(name) {
+  const z = model?.zones[name];
+  if (!z) return '';
+  const rows = [...zoneRows(z), ...zoneConstructionRows(name)];
+  return rows.map((r) => (r.startsWith('<div') ? r : `<div>${r}</div>`)).join('');
+}
+const CLASS_TIPS = { Facade: 'Walls to the outside', Partition: 'Walls between zones', Roof: 'Roofs to the outside', Slab: 'Floors and ceilings between zones', 'External Floor': 'Floors over the outside', 'Ground Slab': 'Floors on the ground', 'Ground Wall': 'Walls against the ground' };
+function zoneConstructionRows(name) {
+  const by = new Map();
+  for (const s of Object.values(model.surfaces)) if (s.zone === name) { if (!by.has(s.csType)) by.set(s.csType, []); by.get(s.csType).push(s); }
+  if (!by.size) return [];
+  const ep = model.epjson, names = Object.keys(ep.Construction || {}).filter((n) => !n.endsWith('_FLIPPED') && !constructionProperties(ep, n)?.glazing).sort();
+  const rows = [popSec('Construction', 'The assembly of each class of the zone\'s surfaces: picked here, it goes to every surface of the class in this zone (and the other side of those it shares)')];
+  for (const [cls, list] of by) {
+    const now = new Set(list.map((s) => baseConstruction(s.construction))), one = now.size === 1 ? [...now][0] : null;
+    const opts = (one ? '' : '<option selected disabled>mixed</option>') + names.map((n) => `<option${n === one ? ' selected' : ''}>${esc(n)}</option>`).join('');
+    rows.push(`<span class="popkv"><span class="tipped" title="${esc(CLASS_TIPS[cls] || cls)}: ${list.length} surface${list.length > 1 ? 's' : ''}">${esc(cls)}</span><select class="popsel wide" data-zcons="${esc(cls)}">${opts}</select></span>`);
+  }
+  return rows;
+}
 // The plan and section views changed (made, renamed, re-cut, deleted): undone like the clipping planes,
 // touching only the views, not the model.
 function viewsChange(mutate, what) {
@@ -2324,6 +2361,17 @@ const ws = workspace({
 });
 // the building drawn again (a new model, an edit, walls drawn otherwise): the plans and sections cut again
 ws.setTools(tools);
+// Levels in the views (levels.js): markers in 3D and in sections, a pop-up for the level picked.
+const levelEdits = new LevelEdits({
+  massing: () => massing, change: massingChange,
+  onSelect: (L) => { if (L !== null && (selected || view.sections.selected)) { view.sections.select(null); view.select(null); } levelMarks.draw(); ws.redraw(); },
+});
+levelMarks = new LevelMarks3D(view, levelEdits, () => massing);
+ws.setLevels(levelEdits);
+$('show-levels').addEventListener('change', () => { levelMarks.on = $('show-levels').checked; levelMarks.draw(); });
+// the View tab: Plan at level, and the views made
+const vbar = viewsBar($('view-make'), { views: namedViews, levels: () => massing?.levels || null, changeViews: viewsChange, onOpen: (id) => ws.open(id) });
+vbar.render();
 // the modelling tools' buttons on a plan view's bar: as the 3D view's
 document.addEventListener('click', (e) => {
   const b = e.target.closest('.vtools [data-tool]');
@@ -2342,6 +2390,7 @@ function viewsChanged() {
   if (moved) { view.sections.changed(); if (view.sections.selected) showInfo(current()); }
   ws.listChanged();
   ws.redraw();
+  vbar.render();
 }
 // a plan's cut as a model elevation
 const planZ = (v) => (Number.isInteger(v.level) && massing?.levels[v.level] ? massing.levels[v.level].z + v.cut : v.elev);
@@ -2403,6 +2452,7 @@ function massingChange(mutate, what) {
   e.redo = () => { r(); massing = structuredClone(after); queueMicrotask(() => { massingUI.render(); reselect(target); }); };
   massingUI.render();
   reselect(target);
+  levelEdits.render(); vbar.render();
   return true;
 }
 // The massing rewritten renumbers its surfaces: the face that was selected, found again by its zone
@@ -2467,6 +2517,7 @@ $('new-massing').addEventListener('click', () => {
   $('model-tools').hidden = false;
   $('massing').hidden = false;
   massingUI.reset(); massingUI.render();
+  vbar.render();
   ribbon('model');
 });
 $('mass-open').addEventListener('click', () => { $('massing').hidden = !$('massing').hidden; massingUI.render(); });

@@ -122,11 +122,12 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       this.setEditor();
       this.options(); this.paint();
     }
-    // a plan is edited; a section only looked at
+    // a plan is edited as the 3D view is; a section's levels are picked, dragged and typed over
     setEditor() {
-      const want = this.type === 'plan';
-      if (want && !this.editor) this.editor = editorFor(this);
-      if (!want && this.editor) { this.editor.dispose(); this.editor = null; this.ov.innerHTML = ''; this.tv.innerHTML = ''; }
+      const want = this.type === 'plan' ? 'plan' : levelsRef ? 'section' : null;
+      if (this.editor && this.editor.kind !== want) { this.editor.dispose(); this.editor = null; this.ov.innerHTML = ''; this.tv.innerHTML = ''; }
+      if (want === 'plan' && !this.editor) { this.editor = editorFor(this); if (this.editor) this.editor.kind = 'plan'; }
+      if (want === 'section' && !this.editor) this.editor = new SectionLevels(this);
       const vt = this.el.querySelector('.vtools'); if (vt) vt.hidden = !(want && hasTools());
     }
     // plan coordinates (m) to the drawing's pixels and back
@@ -198,7 +199,12 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       if (!this.cam) {
         if (b) { const bw = Math.max(1, b[2] - b[0]), bh = Math.max(1, b[3] - b[1]); this.cam = { cx: (b[0] + b[2]) / 2, cy: (b[1] + b[3]) / 2, s: Math.min((w - 48) / bw, (h - 48) / bh) }; } else this.cam = { cx: 0, cy: 0, s: 20 };
       }
-      const svg = drawSVG(this.geo, { w, h, ...this.cam }, this.marks).replace('<svg ', '<svg class="dwg" ');
+      let marks = this.marks;
+      if (marks?.levels) {
+        const dl = this.dragLevel, sgn = Math.sign(this.geo.frame.v.z) || 1;
+        marks = { ...marks, sel: levelsRef?.selected ?? null, levels: marks.levels.map((x) => (dl && x[3] === dl.L ? [x[0] + dl.dz * sgn, x[1], `${dl.dz > 0 ? '+' : ''}${Math.round(dl.dz * 1000)} mm`, x[3], null] : x)) };
+      }
+      const svg = drawSVG(this.geo, { w, h, ...this.cam }, marks).replace('<svg ', '<svg class="dwg" ');
       const old = this.host.querySelector('svg.dwg');
       if (old) old.outerHTML = svg; else this.ov.insertAdjacentHTML('beforebegin', svg);
       for (const o of [this.ov, this.tv]) { o.setAttribute('width', w); o.setAttribute('height', h); }
@@ -249,6 +255,60 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     }
   }
 
+  // A section's levels: a line pressed is picked (its pop-up opens), dragged it moves; its figure (or
+  // the storey height between two levels) clicked is typed over.
+  class SectionLevels {
+    constructor(d) { this.d = d; this.kind = 'section'; }
+    near(e) {
+      const d = this.d, r = d.host.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+      for (const [v, name, fig, L, hgt] of d.marks?.levels || []) {
+        const Y = d.toPx(0, v)[1];
+        if (Math.abs(y - Y) < 6) return { L, fig: x > 6 + (name.length + 1) * 5 && x < 6 + (name.length + 1 + fig.length) * 5.4 + 6 };
+        if (hgt && x < 6 + hgt.length * 5.4 + 6) {
+          const next = d.marks.levels.find((m) => m[3] === L + 1);
+          if (next && Math.abs(y - (Y + d.toPx(0, next[0])[1]) / 2) < 7) return { L, height: true };
+        }
+      }
+      return null;
+    }
+    move(e) {
+      const g = this.drag;
+      if (g) {
+        if (!g.moved && Math.abs(e.clientY - g.y0) < 3) return;
+        g.moved = true;
+        const step = e.shiftKey ? 0.01 : 0.05;
+        this.d.dragLevel = { L: g.L, dz: Math.round(((g.y0 - e.clientY) / this.d.cam.s) / step) * step };
+        this.d.paint();
+        return;
+      }
+      const n = this.near(e);
+      this.d.host.style.cursor = n ? (n.fig || n.height ? 'text' : 'ns-resize') : '';
+    }
+    down(e) {
+      const n = this.near(e);
+      if (!n || !levelsRef) return;
+      if (n.height) { levelsRef.ask(e, n.L, 'h'); return; }
+      if (n.fig && n.L > 0) { levelsRef.ask(e, n.L, 'z'); return; }
+      this.drag = { L: n.L, y0: e.clientY, moved: false };
+      this.d.host.setPointerCapture?.(e.pointerId);
+    }
+    up(e) {
+      const g = this.drag;
+      if (!g) return;
+      this.drag = null;
+      this.d.host.releasePointerCapture?.(e.pointerId);
+      const dl = this.d.dragLevel;
+      this.d.dragLevel = null;
+      if (g.moved && dl && g.L > 0) levelsRef.move(g.L, dl.dz);
+      else levelsRef.select(g.L, [e.clientX, e.clientY]);
+      this.d.paint();
+    }
+    leave() {}
+    paint() {}
+    pickAt() { return null; }
+    dispose() {}
+  }
+
   // the zones a plan cuts, named at the middle of their floor
   function zoneLabels(f, depth) {
     const o3 = view.origin || [0, 0, 0], best = new Map();
@@ -270,7 +330,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
   function levelMarks(g) {
     const lv = levels(), f = g.frame, o3 = view.origin || [0, 0, 0];
     if (!lv || Math.abs(f.v.z) < 0.99) return [];
-    return lv.map((l) => [(l.z - o3[2] - f.o.z) * Math.sign(f.v.z), l.name, `${fmt(l.z)} m`]);
+    return lv.map((l, L) => [(l.z - o3[2] - f.o.z) * Math.sign(f.v.z), l.name, `${fmt(l.z)} m`, L, lv[L + 1] ? `↕ ${fmt(lv[L + 1].z - l.z)} m` : null]);
   }
 
   // ---------- full screen ----------
@@ -286,6 +346,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
 
   const tools = () => toolsRef;
   let toolsRef = null;
+  let levelsRef = null; // the level edits (levels.js), once a massing's levels are shown
   let queued = false;
   const repaint = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; for (const d of drawings) d.paint(); }); };
   return {
@@ -310,6 +371,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     // the selection changed: drawn again over each plan
     selection() { for (const d of drawings) d.editor?.paint(); },
     setTools(t) { toolsRef = t; },
+    setLevels(l) { levelsRef = l; for (const d of drawings) d.setEditor(); },
     drawings: () => [...drawings],
     put: (rec) => layout.put(rec), take: (el) => layout.take(el),
     layout,
