@@ -1,7 +1,8 @@
 // A view cube in the 3D view's top right corner, as in Revit: it turns with the camera, and a click on
 // one of its faces, edges or corners turns the camera to look from that side (6 faces, 12 edges,
 // 8 corners). The faces are named after the model's axes (front looks north, along +y); a ring
-// under the cube marks true north, which can differ from the model's y axis.
+// under the cube marks true north, which can differ from the model's y axis. Dragged sideways, the ring
+// turns the view about the upright through what it looks at.
 
 import * as THREE from 'three';
 
@@ -73,9 +74,40 @@ export class ViewCube {
         return v > EDGE ? 1 : v < -EDGE ? -1 : 0;
       });
     };
-    el.addEventListener('pointermove', (e) => this.showHover(region(e)));
-    el.addEventListener('pointerleave', () => this.showHover(null));
+    const onRing = (e) => {
+      const r = el.getBoundingClientRect();
+      ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.camera);
+      return ray.intersectObject(this.ringHit, false).length > 0 && !ray.intersectObject(this.box, false).length;
+    };
+    let turning = null;
+    el.addEventListener('pointermove', (e) => {
+      if (turning) {
+        const dx = e.clientX - turning.x;
+        turning.x = e.clientX;
+        turning.moved ||= Math.abs(e.clientX - turning.x0) > 2;
+        this.turn(-dx * 0.012);
+        return;
+      }
+      const ring = onRing(e);
+      el.style.cursor = ring ? 'ew-resize' : '';
+      this.showHover(ring ? null : region(e));
+    });
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || !onRing(e)) return;
+      turning = { x: e.clientX, x0: e.clientX, moved: false };
+      el.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    el.addEventListener('pointerup', (e) => {
+      if (!turning) return;
+      el.releasePointerCapture(e.pointerId);
+      this.justTurned = turning.moved;
+      turning = null;
+    });
+    el.addEventListener('pointerleave', () => { if (!turning) this.showHover(null); });
     el.addEventListener('click', (e) => {
+      if (this.justTurned) { this.justTurned = false; return; }
+      if (onRing(e)) return;
       const d = region(e);
       if (d) this.onPick(new THREE.Vector3(...d).normalize());
     });
@@ -102,6 +134,10 @@ export class ViewCube {
     // The compass ring under the cube, with true north marked.
     const ring = new THREE.Mesh(new THREE.RingGeometry(1.55, 1.75, 64), new THREE.MeshBasicMaterial({ color: colors.line, side: THREE.DoubleSide }));
     ring.position.z = -1.05;
+    // a wider band, unseen, to take the pointer on the ring
+    this.ringHit = new THREE.Mesh(new THREE.RingGeometry(1.35, 1.95, 48), new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }));
+    this.ringHit.position.z = -1.05;
+    this.cube.add(this.ringHit);
     this.north = new THREE.Group();
     const tip = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.42, 3), new THREE.MeshBasicMaterial({ color: this.accent }));
     tip.position.set(0, 1.86, -1.05); // a cone points along +y
@@ -121,8 +157,19 @@ export class ViewCube {
         uv.setXY(i, u + 0.5, v + 0.5);
       }
     };
-    rotate(0, 3); rotate(1, 1); rotate(5, 2); // +x, -x, top and bottom; checked by eye in the view
+    // each side's text turned upright (z up), the top's towards +y; checked by eye from each side
+    rotate(0, 1); rotate(1, 3); rotate(2, 2); rotate(5, 2);
     uv.needsUpdate = true;
+  }
+
+  // The view turned by `angle` (radians) about the upright through its target.
+  turn(angle) {
+    const v = this.view, t = v.controls.target, up = new THREE.Vector3(0, 0, 1);
+    v.camera.position.sub(t).applyAxisAngle(up, angle).add(t);
+    v.camera.up.applyAxisAngle(up, angle);
+    v.camera.lookAt(t);
+    v.controls.update?.();
+    v.render();
   }
 
   // True north, in degrees clockwise from the model's +y axis (EnergyPlus's north axis is the reverse).

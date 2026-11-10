@@ -96,7 +96,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       Object.assign(this, shell, { pin, cam: null, geo: null, at: -1, key: '' });
       this.el.dataset.pin = pin ?? '';
       // the modelling tools, on a second row of the bar (plans only)
-      this.bar.insertAdjacentHTML('beforeend', `<div class="vbarrow vtools mtools">${toolsHTML}</div>`);
+      if (toolsHTML) this.bar.insertAdjacentHTML('beforeend', `<div class="vbarrow vtools mtools">${toolsHTML}</div>`);
       // over the drawing: the editor's layer (hover, selection, grips) and the tools' previews
       this.host.insertAdjacentHTML('beforeend', '<svg class="planov" xmlns="http://www.w3.org/2000/svg"></svg><svg class="planov" xmlns="http://www.w3.org/2000/svg"></svg>');
       [this.ov, this.tv] = this.host.querySelectorAll('svg.planov');
@@ -127,7 +127,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       const want = this.type === 'plan';
       if (want && !this.editor) this.editor = editorFor(this);
       if (!want && this.editor) { this.editor.dispose(); this.editor = null; this.ov.innerHTML = ''; this.tv.innerHTML = ''; }
-      this.el.querySelector('.vtools').hidden = !(want && hasTools());
+      const vt = this.el.querySelector('.vtools'); if (vt) vt.hidden = !(want && hasTools());
     }
     // plan coordinates (m) to the drawing's pixels and back
     toPx(u, v) { const c = this.cam, w = this.host.clientWidth, h = this.host.clientHeight; return [w / 2 + (u - c.cx) * c.s, h / 2 - (v - c.cy) * c.s]; }
@@ -141,7 +141,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       };
       this.sel.innerHTML = group('plan', 'Plans') + group('section', 'Sections') || `<option>${KIND_LABEL[this.type]}</option>`;
       if (!this.item) this.sel.insertAdjacentHTML('afterbegin', `<option selected disabled>${KIND_LABEL[this.type]}: none</option>`);
-      this.el.querySelector('.vtools').hidden = !(this.type === 'plan' && hasTools());
+      const vt = this.el.querySelector('.vtools'); if (vt) vt.hidden = !(this.type === 'plan' && hasTools());
       this.bar3d();
     }
     bar3d() {

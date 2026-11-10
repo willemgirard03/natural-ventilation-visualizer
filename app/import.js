@@ -2004,6 +2004,15 @@ for (const id of ['play-from', 'play-to']) $(id).addEventListener('input', playS
 playSpan();
 
 // The settings bar folds to one line; the view takes the height left under it.
+// The top menu's tabs: one panel at a time; the one last used comes back.
+function ribbon(k) {
+  for (const b of document.querySelectorAll('.ribtabs [data-rib]')) b.setAttribute('aria-selected', String(b.dataset.rib === k));
+  for (const p of document.querySelectorAll('.calcbar .ribbon')) p.hidden = p.dataset.panel !== k;
+  document.body.classList.remove('bartucked');
+  try { localStorage.setItem('natvent-ribbon', k); } catch { /* not kept */ }
+}
+for (const b of document.querySelectorAll('.ribtabs [data-rib]')) b.addEventListener('click', () => ribbon(b.dataset.rib));
+try { const k = localStorage.getItem('natvent-ribbon'); if (k && document.querySelector(`.ribtabs [data-rib="${k}"]`)) ribbon(k); } catch { /* not kept */ }
 $('tuck').addEventListener('click', () => {
   const on = document.body.classList.toggle('bartucked');
   $('tuck').textContent = on ? '▾' : '▴';
@@ -2307,7 +2316,6 @@ const ws = workspace({
     change: massingChange,
   }),
   hasTools: () => !!massing,
-  toolsHTML: `<span class="seg mini">${[...$('model-tools').querySelectorAll('[data-tool]')].filter((b) => b.dataset.tool !== 'add').map((b) => b.outerHTML).join('')}</span>`,
   onTake: (rec) => {
     undoStack.push({ undo: () => ws.put(rec), redo: () => ws.take(rec.el), what: 'view removed', view: true });
     if (undoStack.length > 100) undoStack.shift();
@@ -2459,6 +2467,7 @@ $('new-massing').addEventListener('click', () => {
   $('model-tools').hidden = false;
   $('massing').hidden = false;
   massingUI.reset(); massingUI.render();
+  ribbon('model');
 });
 $('mass-open').addEventListener('click', () => { $('massing').hidden = !$('massing').hidden; massingUI.render(); });
 
