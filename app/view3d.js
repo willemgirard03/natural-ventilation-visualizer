@@ -922,13 +922,15 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
   // Half the diagonal of the zones' footprint (m), for drawings placed around the building.
   footprintRadius() {
     const b = bounds(this.surfaces.flatMap((s) => s.vertices));
-    return Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1]) / 2;
+    const r = Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1]) / 2;
+    return Number.isFinite(r) && r > 0 ? r : 8; // nothing modelled yet: a small building's
   }
 
   // The zones' footprint radius (as above) and height (m), for the sky's size.
   extent() {
     const b = bounds(this.surfaces.flatMap((s) => s.vertices));
-    return { radius: this.footprintRadius(), height: b.max[2] - b.min[2] };
+    const h = b.max[2] - b.min[2];
+    return { radius: this.footprintRadius(), height: Number.isFinite(h) && h > 0 ? h : 3.5 };
   }
 
   // Something drawn on the ground around the building (the wind rose); null removes it.
@@ -1162,7 +1164,8 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
   // Points the camera at a set of polygons (the whole building by default), from the south-west.
   // The whole building also takes in what is drawn on the ground around it (the wind rose).
   frame(polys = this.surfaces, from = new THREE.Vector3(-0.55, -1, 0.75)) {
-    const b = bounds(polys.flatMap((p) => p.vertices));
+    let b = bounds(polys.flatMap((p) => p.vertices));
+    if (!Number.isFinite(b.min[0])) b = { min: [-8, -8, 0], max: [8, 8, 3.5] }; // nothing modelled yet
     const centre = new THREE.Vector3(...[0, 1, 2].map((i) => (b.min[i] + b.max[i]) / 2 - this.origin[i]));
     let radius = Math.max(1, Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2);
     if (polys === this.surfaces && this.overlay) {
