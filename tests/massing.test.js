@@ -315,6 +315,37 @@ test('a shared wall moves for both zones; pushed from one zone it leaves the oth
   assert.ok(area(g.zones[0]) < a0);
 });
 
+test('walls drawn: they split the zones they cross, close rooms into zones, else stand free', async () => {
+  const { addWall, freeWalls, wallFor, wallLine, planarFaces, insertStorey, polyArea } = await import('../src/model/massing.js');
+  // the faces of a square with a line across it: two rooms
+  const faces = planarFaces([[[0, 0], [4, 0]], [[4, 0], [4, 4]], [[4, 4], [0, 4]], [[0, 4], [0, 0]], [[2, 0], [2, 4]]]);
+  assert.equal(faces.length, 2);
+  const m = massing0(); // ground zone -10..10 x -5..5, storey 0..1
+  const n0 = m.zones.length;
+  // three walls against the building's south face close a 4 x 3 m room
+  for (const [a, b] of [[[-2, -5], [-2, -8]], [[-2, -8], [2, -8]], [[2, -8], [2, -5]]]) addWall(m, { a, b, base: 0, top: 1, line: 'exterior', side: -1 });
+  assert.equal(m.zones.length, n0 + 1);
+  const z = m.zones[n0];
+  assert.ok(z.generic);
+  assert.ok(Math.abs(Math.abs(polyArea(z.plate)) - 12) < 1e-6);
+  const k = z.plate.findIndex((p, q, P) => Math.abs(p[1] + 8) < 1e-6 && Math.abs(P[(q + 1) % P.length][1] + 8) < 1e-6);
+  assert.ok(wallFor(m, n0, k));
+  assert.ok(['exterior', 'interior'].includes(wallLine(m, n0, k)));
+  // a wall across the ground zone, face to face, splits it
+  const before = m.zones.length;
+  addWall(m, { a: [0, -5], b: [0, 5], base: 0, top: 1 });
+  assert.equal(m.zones.length, before + 1);
+  // a wall closing nothing stands free
+  addWall(m, { a: [15, 0], b: [18, 0], base: 0, top: 1 });
+  assert.equal(freeWalls(m).filter((w) => w.a[0] >= 15).length, 1);
+  // the model writes and reads back without errors
+  const model = importEpJSON(massingEpJSON(m));
+  assert.deepEqual(model.checks.filter((c) => c.level === 'error'), []);
+  // a storey put in under them lifts the walls with their zones
+  insertStorey(m, 0, 'below');
+  assert.ok(m.walls.every((w) => w.base === 1 && w.top === 2));
+});
+
 test('level names and plan views travel with their storey; numbered names renumber', async () => {
   const { insertStorey, swapStoreys, removeStorey } = await import('../src/model/massing.js');
   const m = massing0(); // levels 1-3, zones on storeys 0 and 1

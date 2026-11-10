@@ -31,7 +31,7 @@ import { WindowEditor } from './winedit.js';
 import {
   massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
-  setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch,
+  setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch, wallLine, freeWalls,
 } from '../src/model/massing.js';
 import { PRESETS, SIZES } from '../src/model/windows.js';
 import { massingPanel } from './massing-panel.js';
@@ -226,9 +226,11 @@ const tools = new ModelTools(view, {
   onChange: (mutate, what) => massingChange(mutate, what),
   onAdded: (j) => { const z = massingGeometry(massing)[j]; if (z && model.zones[z.name]) view.select(z.name); },
   keepSeams: () => $('keep-seams').checked,
+  wallProps: () => ({ asm: $('wall-asm').value, base: Number($('wall-base').value), top: Number($('wall-top').value), line: $('wall-line').value, chain: $('wall-chain').checked }),
   onTool: (tool) => {
     for (const b of document.querySelectorAll('.mtools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
     $('keep-seams-l').hidden = tool !== 'merge';
+    wallTab(tool === 'wall');
     if (tool) { winEdit.stop(); view.select(null); hover.clear(); }
   },
 });
@@ -982,7 +984,7 @@ fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
 let popKey = null, popMin = false, layersOpen = false, popPinned = false, popShut = null; // popShut: the selection whose pop-up was closed
 function showInfo(found) {
   const box = $('info');
-  // a window of a massing: the Massing window turns to its zone and face
+  // a window of a massing: the Zones window turns to its zone and face
   const at = massing && found?.kind === 'window' && massingWindow(massing, found.item.name);
   if (at && !$('massing').hidden) massingUI.show(at.zone, at.face);
   else if (found?.kind === 'zone' && !$('massing').hidden) massingUI.showName(found.item.name);
@@ -1420,7 +1422,7 @@ function zoneLevelRows(item) {
   const z = massing.zones[i], opts = (now, from, to) => massing.levels.map((lv, L) => (L >= from && L <= to ? `<option value="${L}"${L === now ? ' selected' : ''}>${esc(lv.name || levelName(L))}</option>` : '')).join('');
   return [`<div class="poprow"><span class="tipped" title="The level this zone stands on and the level its roof reaches. Its roof and floor handles move these levels, and with them every zone on them.">Levels</span>`
     + `<select class="popsel" data-zlevel="base" data-zone="${i}" title="Base level">${opts(z.base, 0, z.top - 1)}</select> to <select class="popsel" data-zlevel="top" data-zone="${i}" title="Top level">${opts(z.top, z.base + 1, massing.levels.length - 1)}</select>`
-    + (massing.zones.length > 1 ? `<button type="button" class="quiet" data-zdelete="${i}" title="Delete this zone (Delete). Its levels stay, empty or not; a storey is taken out from the Levels tab. A zone left held up by nothing is hatched grey.">Delete zone</button>` : '') + '</div>'];
+    + (massing.zones.length > 1 ? `<button type="button" class="quiet" data-zdelete="${i}" title="Delete this zone (Delete). Its levels stay, empty or not; a storey is taken out from its level's pop-up (click the level's marker). A zone left held up by nothing is hatched grey.">Delete zone</button>` : '') + '</div>'];
 }
 $('info').addEventListener('click', (e) => { const b = e.target.closest('[data-zdelete]'); if (b && massing) removeZone(Number(b.dataset.zdelete)); });
 $('info').addEventListener('change', (e) => {
@@ -2378,7 +2380,57 @@ document.addEventListener('click', (e) => {
   if (!b || !massing) return;
   if (tools.tool === b.dataset.tool) tools.stop(); else tools.start(b.dataset.tool);
 });
-for (const k of ['setModel', 'setWalls']) { const f = view[k].bind(view); view[k] = (...a) => { const r = f(...a); ws.redraw(); return r; }; }
+// the building drawn again (a new model, an edit, walls drawn otherwise): each drawn wall's location
+// line, the walls standing free, and the plans and sections cut again
+let surfaceLines = new Map();
+view.surfaceLine = (name) => surfaceLines.get(name) || null;
+for (const k of ['setModel', 'setWalls']) {
+  const f = view[k].bind(view);
+  view[k] = (...a) => {
+    surfaceLines = new Map();
+    if (massing?.walls?.length) for (const z of massingGeometry(massing)) for (const s of z.surfaces) if (s.type === 'Wall') { const l = wallLine(massing, z.zone, s.face); if (l) surfaceLines.set(s.name, l); }
+    const r = f(...a);
+    view.setFreeWalls(freeWallSolids());
+    ws.redraw();
+    return r;
+  };
+}
+// the drawn walls standing free, in model coordinates, at their assembly's thickness
+function freeWallSolids() {
+  if (!massing?.walls?.length || !model) return [];
+  const ep = model.epjson, thick = (n) => { const c = ep.Construction?.[n]; if (!c) return 0.2; let t = 0; for (const [k, v] of Object.entries(c)) if (k !== 'name' && ep.Material?.[v]?.thickness) t += ep.Material[v].thickness; return t || 0.2; };
+  return freeWalls(massing).map((w) => {
+    const t = thick(w.asm), side = w.side || 1, off = w.line === 'exterior' ? -side * t / 2 : w.line === 'interior' ? side * t / 2 : 0;
+    const [a, b] = [w.a, w.b].map((p) => turnPlan(p, massing.rot || 0));
+    return { a, b, z0: massing.levels[w.base].z, z1: massing.levels[w.top].z, t, off };
+  });
+}
+// The Place wall tab: shown while Draw wall is on, its lists filled from the model.
+let ribBefore = 'model';
+function wallTab(on) {
+  const tab = document.querySelector('.ribtabs [data-rib="wall"]');
+  if (on) {
+    const ep = model.epjson, cur = $('wall-asm').value || 'Generic Exterior Wall';
+    const walls = Object.keys(ep.Construction || {}).filter((n) => !n.endsWith('_FLIPPED') && !constructionProperties(ep, n)?.glazing && !/slab|floor|roof/i.test(n)).sort();
+    $('wall-asm').innerHTML = walls.map((n) => `<option${n === cur ? ' selected' : ''}>${esc(n)}</option>`).join('');
+    const lv = massing.levels, b = Math.min(Number($('wall-base').value) || 0, lv.length - 2);
+    $('wall-base').innerHTML = lv.slice(0, -1).map((l, L) => `<option value="${L}"${L === b ? ' selected' : ''}>${esc(l.name)}</option>`).join('');
+    fillTop();
+    ribBefore = document.querySelector('.ribtabs [aria-selected=true]')?.dataset.rib || 'model';
+    if (ribBefore === 'wall') ribBefore = 'model';
+    tab.hidden = false;
+    ribbon('wall');
+  } else if (!tab.hidden) {
+    tab.hidden = true;
+    ribbon(ribBefore);
+  }
+}
+function fillTop() {
+  const lv = massing.levels, b = Number($('wall-base').value), t = Math.max(Number($('wall-top').value) || 0, b + 1);
+  $('wall-top').innerHTML = lv.map((l, L) => (L > b ? `<option value="${L}"${L === Math.min(t, lv.length - 1) ? ' selected' : ''}>${esc(l.name)}</option>` : '')).join('');
+}
+$('wall-base').addEventListener('change', fillTop);
+$('wall-done').addEventListener('click', () => tools.stop());
 function openView(id) { ws.open(id); }
 // The named views changed: the workspace's lists, and each plan linked to a plane moves its plane.
 function viewsChanged() {

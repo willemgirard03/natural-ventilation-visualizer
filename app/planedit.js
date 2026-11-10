@@ -31,6 +31,7 @@ export class PlanEdit {
       P: (p) => this.P(p),
       px: (e) => this.px(e),
       targetAt: (e) => this.targetAt(e),
+      pointAt: (e) => this.toMassing(e),
     };
     this.unregister = api.tools.register(this.ctx);
   }

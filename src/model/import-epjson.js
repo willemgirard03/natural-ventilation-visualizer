@@ -289,6 +289,17 @@ export function importEpJSON(epjson, { fileName = null } = {}) {
   const shading = objects(epjson, 'Shading:Building:Detailed').concat(objects(epjson, 'Shading:Site:Detailed'))
     .map(([name, s]) => ({ name, vertices: verticesOf(s) }));
 
+  // Assemblies of a placeholder material (the generic ones drawn walls take): named, so they get set.
+  const placeholder = new Set(Object.keys(epjson.Material || {}).filter((n) => /^Unspecified/.test(n)));
+  if (placeholder.size) {
+    const asms = new Set();
+    for (const s of Object.values(surfaces)) {
+      const c = epjson.Construction?.[s.construction];
+      if (c && Object.entries(c).some(([k, v]) => k !== 'name' && placeholder.has(v))) asms.add(s.construction.replace(/_FLIPPED$/, ''));
+    }
+    for (const a of asms) check('warning', 'assembly-unspecified', `Assembly ${a} is of an unspecified material, its figures placeholders: set its layers in Materials & assemblies.`, Object.values(surfaces).filter((s) => s.construction.replace(/_FLIPPED$/, '') === a).map((s) => s.name));
+  }
+
   const version = Object.values(epjson.Version || {})[0]?.version_identifier || null;
   const timestep = Object.values(epjson.Timestep || {})[0]?.number_of_timesteps_per_hour ?? null;
   return {

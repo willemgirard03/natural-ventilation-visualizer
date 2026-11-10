@@ -188,11 +188,15 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
         const none = !views().some((x) => x.kind === this.type);
         this.host.querySelector('svg.dwg')?.remove();
         this.ov.innerHTML = ''; this.tv.innerHTML = '';
-        this.empty(none ? (this.type === 'plan' ? 'No plan views yet: create one in the Building window\'s Views tab (Create plan at level), or from a plan clipping plane\'s pop-up.' : 'No section views yet: create one from a section clipping plane\'s pop-up.') : 'Pick a view from the name in the bar.');
+        this.empty(none ? (this.type === 'plan' ? 'No plan views yet: create one from the View tab (Plan at level), or from a plan clipping plane\'s pop-up.' : 'No section views yet: create one from a section clipping plane\'s pop-up.') : 'Pick a view from the name in the bar.');
         this.foot.innerHTML = '';
         return;
       }
       this.empty(null);
+      // the model rebuilt about another origin: a plan's camera kept on the same place
+      const o3 = view.origin || [0, 0, 0];
+      if (this.cam && this.o3 && v.kind === 'plan' && (o3[0] !== this.o3[0] || o3[1] !== this.o3[1])) { this.cam.cx -= o3[0] - this.o3[0]; this.cam.cy -= o3[1] - this.o3[1]; }
+      this.o3 = [...o3];
       this.cut();
       if (!this.geo) return;
       const b = this.geo.box;

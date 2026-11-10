@@ -441,6 +441,8 @@ export class View3D {
     // grows outwards from its zone, a ceiling (the other side of a floor) into its zone. So a slab
     // between storeys, an exposed floor and a ground floor all hang from the floor level and meet.
     const lineOf = (s) => {
+      const own = this.surfaceLine?.(s.name); // a drawn wall's own location line
+      if (own) return own;
       const nz = unitNormal(s.vertices)[2];
       if (Math.abs(nz) > 0.9 && (nz < 0 || s.boundary === 'Surface')) return nz < 0 ? 'interior' : 'exterior';
       return s.boundary === 'Surface' ? 'centre' : this.walls;
@@ -549,6 +551,38 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       cam.updateProjectionMatrix();
       L.target.updateMatrixWorld();
     }
+    this.render();
+  }
+
+  // Walls standing free (drawn, closing nothing): solids of their thickness from z0 to z1 along a -> b
+  // (model coordinates), the drawn line at `off` across them (from -t/2 on its right to t/2 on its left).
+  // They are cut by the planes, and by plans and sections, as the other solids are. [{ a, b, z0, z1, t, off }]
+  setFreeWalls(list = []) {
+    if (this.freeMesh) { this.group.remove(this.freeMesh, this.freeEdges); this.freeMesh.geometry.dispose(); this.freeEdges.geometry.dispose(); this.freeMesh = this.freeEdges = null; }
+    this.solids = (this.solids || []).filter((t) => !t.free);
+    if (!list.length || !this.group) { this.render(); return; }
+    const o = this.origin || [0, 0, 0], all = [];
+    for (const w of list) {
+      const dx = w.b[0] - w.a[0], dy = w.b[1] - w.a[1], l = Math.hypot(dx, dy) || 1, n = [-dy / l, dx / l];
+      const s0 = w.off - w.t / 2, s1 = w.off + w.t / 2;
+      const P = (p, s, z) => [p[0] + n[0] * s - o[0], p[1] + n[1] * s - o[1], z - o[2]];
+      const c = [P(w.a, s0, w.z0), P(w.b, s0, w.z0), P(w.b, s1, w.z0), P(w.a, s1, w.z0), P(w.a, s0, w.z1), P(w.b, s0, w.z1), P(w.b, s1, w.z1), P(w.a, s1, w.z1)];
+      const quads = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+      const tris = [];
+      for (const [a, b, cc, d] of quads) tris.push(...c[a], ...c[b], ...c[cc], ...c[a], ...c[cc], ...c[d]);
+      const arr = new Float32Array(tris);
+      arr.free = true;
+      this.solids.push(arr);
+      all.push(...tris);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(all, 3));
+    g.computeVertexNormals();
+    this.freeMesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Partition || '#C9C2B6', side: THREE.DoubleSide, clippingPlanes: this.clipping }));
+    this.freeMesh.userData = { kind: 'freewall' };
+    this.freeEdges = new THREE.LineSegments(new THREE.EdgesGeometry(g, 25), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
+    this.group.add(this.freeMesh, this.freeEdges);
+    this.caps?.update();
     this.render();
   }
 

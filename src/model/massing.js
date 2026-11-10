@@ -340,6 +340,23 @@ export const MASSING_ASSEMBLIES = {
   exposed: ['Massing Exposed Floor', ['Insulation board 150mm', 'Concrete 250mm', 'Screed 60mm']],
   partition: ['Massing Interior Wall', ['Gypsum board 13mm', 'Mineral wool 120mm', 'Gypsum board 13mm']],
 };
+// Generic assemblies, one for each kind of surface, of a single unspecified material at a default
+// thickness: what drawn walls, and the zones they enclose, take until their assemblies are set (the
+// model checks name them). The material's figures are placeholders: conductivity giving a middling
+// RSI for its kind (W/m·K), density and specific heat of a medium-weight build.
+const UNSPECIFIED = {
+  'Unspecified wall 300mm': [0.3, 0.1, 1000, 1000], 'Unspecified partition 150mm': [0.15, 0.3, 1000, 1000],
+  'Unspecified roof 300mm': [0.3, 0.06, 1000, 1000], 'Unspecified floor 300mm': [0.3, 0.3, 1000, 1000],
+  'Unspecified ground slab 300mm': [0.3, 0.15, 1000, 1000], 'Unspecified exposed floor 300mm': [0.3, 0.1, 1000, 1000],
+};
+export const GENERIC_ASSEMBLIES = {
+  facade: ['Generic Exterior Wall', ['Unspecified wall 300mm']],
+  roof: ['Generic Roof', ['Unspecified roof 300mm']],
+  slab: ['Generic Floor', ['Unspecified floor 300mm']],
+  ground: ['Generic Ground Slab', ['Unspecified ground slab 300mm']],
+  exposed: ['Generic Exposed Floor', ['Unspecified exposed floor 300mm']],
+  partition: ['Generic Interior Wall', ['Unspecified partition 150mm']],
+};
 const MASSING_ASSEMBLIES_SLAB_T = MASSING_ASSEMBLIES.slab[1].reduce((t, n) => t + MATERIALS[n][0], 0);
 export const MASSING_GLAZING = ['Massing Double Glazing', { u_factor: 1.4, solar_heat_gain_coefficient: 0.4, visible_transmittance: 0.6 }];
 
@@ -453,27 +470,35 @@ export function massingEpJSON(m, { weather = null, runPeriod = null, ep: from = 
   for (const [n, p] of Object.entries(PROFILES)) weeklySchedule(ep, n, p);
 
   // materials and assemblies, each with its _FLIPPED twin
-  for (const [n, [t, k, rho, c]] of Object.entries(MATERIALS)) {
+  for (const [n, [t, k, rho, c]] of Object.entries({ ...MATERIALS, ...UNSPECIFIED })) {
     ep.Material[n] = { roughness: 'MediumRough', thickness: t, conductivity: k, density: rho, specific_heat: c, thermal_absorptance: 0.9, solar_absorptance: 0.7, visible_absorptance: 0.7 };
   }
   const construction = (name, layers) => {
     ep.Construction[name] = Object.fromEntries(layers.map((l, i) => [LAYER_FIELDS[i], l]));
     ep.Construction[`${name}_FLIPPED`] = Object.fromEntries([...layers].reverse().map((l, i) => [LAYER_FIELDS[i], l]));
   };
-  for (const [name, layers] of Object.values(MASSING_ASSEMBLIES)) construction(name, layers);
+  for (const [name, layers] of [...Object.values(MASSING_ASSEMBLIES), ...Object.values(GENERIC_ASSEMBLIES)]) construction(name, layers);
+  // drawn walls' own assemblies, where they name one the model has (from ep, carried over)
+  for (const w of m.walls || []) if (w.asm && !ep.Construction[w.asm] && from?.Construction?.[w.asm]) ep.Construction[w.asm] = structuredClone(from.Construction[w.asm]);
   ep['WindowMaterial:SimpleGlazingSystem'][MASSING_GLAZING[0]] = { ...MASSING_GLAZING[1] };
   construction(MASSING_GLAZING[0], [MASSING_GLAZING[0]]);
 
-  const asm = (kind) => MASSING_ASSEMBLIES[kind][0];
+  // a zone enclosed by drawn walls takes the generic assemblies; a wall on a drawn wall, that wall's
+  const asmOf = (zone) => (kind) => ((m.zones[zone.zone]?.generic ? GENERIC_ASSEMBLIES : MASSING_ASSEMBLIES)[kind][0]);
   for (const zone of zones) {
+    const asm0 = asmOf(zone);
+    const asm = (kind, s) => {
+      if (s?.type === 'Wall' && (kind === 'facade' || kind === 'partition')) { const w = wallFor(m, zone.zone, s.face); if (w?.asm && ep.Construction[w.asm]) return w.asm; }
+      return asm0(kind);
+    };
     const Z = zone.name, floorArea = zone.area;
     ep.Zone[Z] = { direction_of_relative_north: 0, x_origin: 0, y_origin: 0, z_origin: 0, type: 1, multiplier: 1, floor_area: floorArea, volume: floorArea * (zone.z1 - zone.z0), zone_inside_convection_algorithm: 'TARP', zone_outside_convection_algorithm: 'DOE-2' };
     for (const s of zone.surfaces) {
       const o = { surface_type: s.type, zone_name: Z, number_of_vertices: s.vertices.length, vertices: vertexList(s.vertices) };
       if (s.kind === 'ground') Object.assign(o, { construction_name: asm('ground'), outside_boundary_condition: 'Ground', sun_exposure: 'NoSun', wind_exposure: 'NoWind', view_factor_to_ground: 0 });
-      else if (s.kind === 'inter') Object.assign(o, { construction_name: asm('partition'), outside_boundary_condition: 'Surface', outside_boundary_condition_object: s.partner, sun_exposure: 'NoSun', wind_exposure: 'NoWind', view_factor_to_ground: 0 });
+      else if (s.kind === 'inter') Object.assign(o, { construction_name: asm('partition', s), outside_boundary_condition: 'Surface', outside_boundary_condition_object: s.partner, sun_exposure: 'NoSun', wind_exposure: 'NoWind', view_factor_to_ground: 0 });
       else if (s.kind === 'slab') Object.assign(o, { construction_name: s.type === 'Floor' ? `${asm('slab')}_FLIPPED` : asm('slab'), outside_boundary_condition: 'Surface', outside_boundary_condition_object: s.partner, sun_exposure: 'NoSun', wind_exposure: 'NoWind', view_factor_to_ground: 0 });
-      else Object.assign(o, { construction_name: asm(s.kind), outside_boundary_condition: 'Outdoors', sun_exposure: 'SunExposed', wind_exposure: 'WindExposed', view_factor_to_ground: 'Autocalculate' });
+      else Object.assign(o, { construction_name: asm(s.kind, s), outside_boundary_condition: 'Outdoors', sun_exposure: 'SunExposed', wind_exposure: 'WindExposed', view_factor_to_ground: 'Autocalculate' });
       ep['BuildingSurface:Detailed'][s.name] = o;
     }
     let operable = 0, heights = 0;
@@ -1149,10 +1174,11 @@ export function insertStorey(m, s, where = 'above', copy = false) {
   names.splice(nAt, 0, levelName(nAt));
   m.levels.splice(at + 1, 0, { name: '', z: 0 });
   m.levels.forEach((lv, L) => { lv.name = names[L]; if (L > 0) lv.z = +(m.levels[L - 1].z + H[L - 1]).toFixed(6); });
-  for (const z of m.zones) { if (z.base >= at) z.base++; if (z.top > at) z.top++; }
+  for (const z of [...m.zones, ...(m.walls || [])]) { if (z.base >= at) z.base++; if (z.top > at) z.top++; }
   for (const v of planViews(m)) if (v.level >= nAt) v.level++;
   renumber(m);
   if (copy) for (const z of own) m.zones.push({ ...structuredClone(z), id: nextZoneId(m), name: null, base: at, top: at + 1, copyFrom: zoneName(m, m.zones.indexOf(z)) });
+  if (copy) for (const w of (m.walls || []).filter((x) => x.base === src + (src >= at ? 1 : 0) && x.top === src + 1 + (src >= at ? 1 : 0))) m.walls.push({ ...structuredClone(w), id: nextWallId(m), base: at, top: at + 1 });
   return at;
 }
 // Storey s and the one above it trade places, each taking its zones; their heights travel with them.
@@ -1161,7 +1187,7 @@ export function swapStoreys(m, s) {
   if (s < 0 || s + 2 >= m.levels.length) return false;
   if (m.zones.some((z) => (z.base <= s && z.top > s + 1) || (z.base < s + 1 && z.top > s + 1 && !(z.base === s && z.top === s + 1)) || (z.base <= s + 1 && z.top > s + 2))) return false;
   const h0 = heightOf(m, s), h1 = heightOf(m, s + 1);
-  for (const z of m.zones) {
+  for (const z of [...m.zones, ...(m.walls || [])]) {
     if (z.base === s && z.top === s + 1) { z.base = s + 1; z.top = s + 2; } else if (z.base === s + 1 && z.top === s + 2) { z.base = s; z.top = s + 1; }
   }
   m.levels[s + 1].z = +(m.levels[s].z + h1).toFixed(6);
@@ -1177,7 +1203,8 @@ export function removeStorey(m, s) {
   if (m.levels.length <= 2 || s < 0 || s + 1 >= m.levels.length) return false;
   const h = heightOf(m, s);
   m.zones = m.zones.filter((z) => !(z.base === s && z.top === s + 1));
-  for (const z of m.zones) { if (z.base > s) z.base--; if (z.top > s) z.top--; }
+  if (m.walls) m.walls = m.walls.filter((w) => !(w.base === s && w.top === s + 1));
+  for (const z of [...m.zones, ...(m.walls || [])]) { if (z.base > s) z.base--; if (z.top > s) z.top--; }
   // level s now carries the storey that stood on level s + 1, with its name; the removed storey's plans go
   if (s + 2 < m.levels.length) m.levels[s].name = m.levels[s + 1].name;
   if (m.views) m.views = m.views.filter((v) => !(v.kind === 'plan' && v.level === s && s + 2 < m.levels.length));
@@ -1382,4 +1409,187 @@ export function turnZone(m, i, deg) {
     if (z.cells) z.cells = z.cells.map(turn);
     z.rot = from + d;
   });
+}
+
+
+// ---------- walls drawn in plan (the Draw wall tool) ----------
+// A wall is a line in plan from a to b (the plate's coordinates) standing from a base level to a top
+// level, with an assembly and a location line: where the drawn line sits in the wall's thickness
+// ('centre', or the 'exterior' or 'interior' finish face, the exterior lying on the side `side` of the
+// line: +1 its left looking from a to b, -1 its right). The location line is for drawing only; the
+// thermal model takes the drawn line.
+//  - A wall run across a zone, from face to face, splits it there (as Split zone).
+//  - Walls (with the zones' own edges) that close a space on their levels make it a zone: its floor and
+//    roof are made as any zone's, shared with zones above and below where they meet them.
+//  - A wall that closes nothing stands free: drawn, not a surface of any zone.
+export const WALL_LINES = [['centre', 'Centreline'], ['exterior', 'Exterior finish'], ['interior', 'Interior finish']];
+export const nextWallId = (m) => (m.walls || []).reduce((a, w) => Math.max(a, w.id + 1), 0);
+const TOL = 1e-3;
+const sub2 = (a, b) => [a[0] - b[0], a[1] - b[1]];
+const cross2 = (a, b) => a[0] * b[1] - a[1] * b[0];
+const dot2 = (a, b) => a[0] * b[0] + a[1] * b[1];
+const len2 = (a) => Math.hypot(a[0], a[1]);
+// where p falls along a -> b (0 at a, 1 at b) and how far off the line it is
+const along = (p, a, b) => { const d = sub2(b, a), l = len2(d) || 1; return [dot2(sub2(p, a), d) / (l * l), cross2(d, sub2(p, a)) / l]; };
+const levelsOverlap = (m, x, y) => Math.min(m.levels[x.top].z, m.levels[y.top].z) - Math.max(m.levels[x.base].z, m.levels[y.base].z) > 1e-6;
+
+// The drawn wall a zone's face lies on (in line with it and covering most of it), or null.
+export function wallFor(m, i, k) {
+  const z = m.zones[i], P = z?.plate;
+  if (!P || !m.walls?.length) return null;
+  const a = P[k], b = P[(k + 1) % P.length], L = len2(sub2(b, a));
+  let best = null, cover = 0;
+  for (const w of m.walls) {
+    if (!levelsOverlap(m, w, z)) continue;
+    const [ta, oa] = along(w.a, a, b), [tb, ob] = along(w.b, a, b);
+    if (Math.abs(oa) > 0.01 || Math.abs(ob) > 0.01) continue;
+    const c = (Math.min(1, Math.max(ta, tb)) - Math.max(0, Math.min(ta, tb))) * L;
+    if (c > cover + 1e-6) { cover = c; best = w; }
+  }
+  return cover > 0.5 * L ? best : null;
+}
+// Where the surface on face k of zone i sits in its wall's thickness, from the drawn wall's location
+// line ('centre', 'exterior': at its exterior finish, 'interior'), or null for the view's own setting.
+export function wallLine(m, i, k) {
+  const w = wallFor(m, i, k);
+  if (!w || !w.line) return null;
+  if (w.line === 'centre') return 'centre';
+  const P = m.zones[i].plate, a = P[k], b = P[(k + 1) % P.length], d = sub2(b, a);
+  // the face's outward side (the plate runs counterclockwise: outward is its right), seen along the wall
+  const out = [d[1], -d[0]], wd = sub2(w.b, w.a), left = [-wd[1], wd[0]];
+  const outIsExterior = Math.sign(dot2(out, left)) === Math.sign(w.side || 1);
+  if (w.line === 'exterior') return outIsExterior ? 'exterior' : 'interior';
+  return outIsExterior ? 'interior' : 'exterior';
+}
+// The parts of drawn walls on no zone's face: they stand free. [{ ...wall, a, b }]
+export function freeWalls(m) {
+  const out = [];
+  for (const w of m.walls || []) {
+    let spans = [[0, 1]];
+    for (const z of m.zones) {
+      if (!levelsOverlap(m, w, z)) continue;
+      z.plate.forEach((p, k) => {
+        const q = z.plate[(k + 1) % z.plate.length], [ta, oa] = along(p, w.a, w.b), [tb, ob] = along(q, w.a, w.b);
+        if (Math.abs(oa) > 0.01 || Math.abs(ob) > 0.01) return;
+        const lo = Math.min(ta, tb), hi = Math.max(ta, tb);
+        spans = spans.flatMap(([s0, s1]) => [[s0, Math.min(s1, lo)], [Math.max(s0, hi), s1]]).filter(([s0, s1]) => s1 - s0 > 1e-4);
+      });
+    }
+    const at = (t) => [w.a[0] + (w.b[0] - w.a[0]) * t, w.a[1] + (w.b[1] - w.a[1]) * t], L = len2(sub2(w.b, w.a));
+    for (const [s0, s1] of spans) if ((s1 - s0) * L > 0.05) out.push({ ...w, a: at(s0), b: at(s1) });
+  }
+  return out;
+}
+
+// A wall added: it splits the zones it runs across, and closes any space it encloses into a zone.
+// Returns { id, split, made } (the zones split, and the new zones' indices).
+export function addWall(m, { a, b, base, top, asm = GENERIC_ASSEMBLIES.facade[0], line = 'centre', side = 1 }) {
+  if (len2(sub2(b, a)) < 0.05 || top <= base) return null;
+  m.walls ||= [];
+  const w = { id: nextWallId(m), a: a.map(R6), b: b.map(R6), base, top, asm, line, side };
+  m.walls.push(w);
+  const split = splitByWall(m, w), made = enclose(m, base, top);
+  return { id: w.id, split, made };
+}
+
+// The zones on the wall's levels it runs right across (between two of its faces) cut along it.
+function splitByWall(m, w) {
+  let n = 0;
+  const D = sub2(w.b, w.a), L = len2(D), dir = [D[0] / L, D[1] / L];
+  for (let i = 0; i < m.zones.length; i++) {
+    const z = m.zones[i];
+    if (!levelsOverlap(m, w, z)) continue;
+    // where the wall crosses the zone's edges, along it
+    const ts = [];
+    z.plate.forEach((p, k) => {
+      const q = z.plate[(k + 1) % z.plate.length], e = sub2(q, p), den = cross2(D, e);
+      if (Math.abs(den) < 1e-12) return;
+      const t = cross2(sub2(p, w.a), e) / den, u = cross2(sub2(p, w.a), D) / den;
+      if (u >= -1e-9 && u <= 1 + 1e-9 && t >= -TOL / L && t <= 1 + TOL / L) ts.push(Math.min(1, Math.max(0, t)));
+    });
+    ts.sort((x, y) => x - y);
+    // each run between two crossings that lies inside the zone is a cut across it
+    for (let j = 0; j + 1 < ts.length; j++) {
+      const t0 = ts[j], t1 = ts[j + 1];
+      if ((t1 - t0) * L < EDGE_MIN) continue;
+      const mid = [w.a[0] + D[0] * (t0 + t1) / 2, w.a[1] + D[1] * (t0 + t1) / 2];
+      if (!insidePlate(z.plate, mid)) continue;
+      if (splitZone(m, i, mid, [mid[0] + dir[0], mid[1] + dir[1]], { within: true }) >= 0) { n++; break; }
+    }
+  }
+  return n;
+}
+const insidePlate = (P, p) => { let c = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) if ((P[i][1] > p[1]) !== (P[j][1] > p[1]) && p[0] < (P[j][0] - P[i][0]) * (p[1] - P[i][1]) / (P[j][1] - P[i][1]) + P[i][0]) c = !c; return c; };
+
+// The spaces closed by the walls on levels base..top (with the edges of the zones standing on just
+// those levels), less what zones there already hold, made zones of their own. Returns their indices.
+export function enclose(m, base, top) {
+  const segs = [];
+  for (const w of m.walls || []) if (w.base === base && w.top === top) segs.push([w.a, w.b]);
+  if (!segs.length) return [];
+  for (const z of m.zones) if (z.base === base && z.top === top) z.plate.forEach((p, k) => segs.push([p, z.plate[(k + 1) % z.plate.length]]));
+  const made = [];
+  for (const face of planarFaces(segs)) {
+    const others = m.zones.filter((z) => levelsOverlap(m, { base, top }, z)).map((z) => z.plate);
+    for (const P of subtract(face, others)) {
+      if (Math.abs(polyArea(P)) < 0.5 || !simpleOutline(P)) continue;
+      m.zones.push({ id: nextZoneId(m), name: null, base, top, rot: 0, plate: P, faces: P.map(() => null), generic: true });
+      made.push(m.zones.length - 1);
+    }
+  }
+  return made;
+}
+
+// The bounded faces of the plane cut up by segments (each counterclockwise, without holes): segments
+// split where they cross or touch, loose ends pruned, and each face traced keeping it on the left.
+export function planarFaces(segs) {
+  const key = (p) => `${Math.round(p[0] * 1000)},${Math.round(p[1] * 1000)}`;
+  // every segment split at every crossing and touching point
+  const cuts = segs.map(() => [0, 1]);
+  for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {
+    const [a, b] = segs[i], [c, d] = segs[j], r = sub2(b, a), s2 = sub2(d, c), den = cross2(r, s2);
+    if (Math.abs(den) < 1e-12) { // in line: each one's ends on the other cut it
+      if (Math.abs(cross2(r, sub2(c, a))) > 1e-6 * (len2(r) || 1)) continue;
+      for (const p of [c, d]) { const t = dot2(sub2(p, a), r) / dot2(r, r); if (t > 1e-9 && t < 1 - 1e-9) cuts[i].push(t); }
+      for (const p of [a, b]) { const t = dot2(sub2(p, c), s2) / dot2(s2, s2); if (t > 1e-9 && t < 1 - 1e-9) cuts[j].push(t); }
+      continue;
+    }
+    const t = cross2(sub2(c, a), s2) / den, u = cross2(sub2(c, a), r) / den, e = 1e-9;
+    if (t < -e || t > 1 + e || u < -e || u > 1 + e) continue;
+    cuts[i].push(Math.min(1, Math.max(0, t))); cuts[j].push(Math.min(1, Math.max(0, u)));
+  }
+  const pts = new Map(), adj = new Map();
+  const node = (p) => { const k = key(p); if (!pts.has(k)) { pts.set(k, [Math.round(p[0] * 1000) / 1000, Math.round(p[1] * 1000) / 1000]); adj.set(k, new Set()); } return k; };
+  segs.forEach(([a, b], i) => {
+    const ts = [...new Set(cuts[i].map((t) => Math.round(t * 1e9) / 1e9))].sort((x, y) => x - y);
+    for (let q = 0; q + 1 < ts.length; q++) {
+      const p = [a[0] + (b[0] - a[0]) * ts[q], a[1] + (b[1] - a[1]) * ts[q]], r = [a[0] + (b[0] - a[0]) * ts[q + 1], a[1] + (b[1] - a[1]) * ts[q + 1]];
+      const u = node(p), v = node(r);
+      if (u !== v) { adj.get(u).add(v); adj.get(v).add(u); }
+    }
+  });
+  // loose ends pruned, again and again
+  for (let again = true; again;) {
+    again = false;
+    for (const [k, n] of adj) if (n.size < 2) { for (const o of n) adj.get(o)?.delete(k); adj.delete(k); again = true; }
+  }
+  // each node's neighbours by angle
+  const order = new Map();
+  for (const [k, n] of adj) { const p = pts.get(k); order.set(k, [...n].sort((x, y) => { const px = pts.get(x), py = pts.get(y); return Math.atan2(px[1] - p[1], px[0] - p[0]) - Math.atan2(py[1] - p[1], py[0] - p[0]); })); }
+  const used = new Set(), faces = [];
+  for (const [u, n] of adj) for (const v of n) {
+    if (used.has(`${u}>${v}`)) continue;
+    const loop = [];
+    let a = u, b = v;
+    for (let guard = 0; guard < 10000; guard++) {
+      used.add(`${a}>${b}`);
+      loop.push(pts.get(a));
+      // at b, the next edge turning most to the left of the way back (the face kept on the left)
+      const around = order.get(b), back = around.indexOf(a), c = around[(back - 1 + around.length) % around.length];
+      a = b; b = c;
+      if (a === u && b === v) break;
+    }
+    if (loop.length >= 3 && polyArea(loop) > 1e-6) faces.push(loop);
+  }
+  return faces;
 }
