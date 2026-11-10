@@ -6,6 +6,10 @@
 //    zone alone, so a wall it shared with another zone becomes two. A wall selected: one grip; dragged,
 //    the wall moves for every zone sharing it, one growing as the other shrinks. 50 mm steps (100 mm
 //    with Shift); a click on a grip types how far.
+//  - A massing's window, or wall with windows, selected: its array bracketed outside the wall. A grip at
+//    each end of the bracket sets the array's length (the other end held; a click types it); its number
+//    and spacing slide with a drag along them (a click types them over); a selected window dragged
+//    along its wall sets the spacing, as in 3D.
 //  - A drawn wall standing free (it closes no zone) is picked as the others; selected, a grip at each
 //    end, dragged to move that end, snapping as Draw wall does.
 //  - The modelling tools work here too: the plan lends them its own projection, the zone and face
@@ -14,7 +18,7 @@
 
 import { cutSolid, chain } from './caps.js';
 import { gripMark, label, line, poly, inside, segDist, CLICK_PX } from './handles.js';
-import { zoneLevels, turnPlan, faceAxes, faceLength, pushFace, pushWall, moveWallEnd, unitLayout } from '../src/model/massing.js';
+import { zoneLevels, turnPlan, faceAxes, faceLength, pushFace, pushWall, moveWallEnd, unitLayout, bayExtents, setArraySpan, setCount, setSpacing, spreadSide, dragPitch } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
 
 const NEAR_PX = 6; // a wall's or window's line this close is under the pointer (drawn thin)
@@ -34,6 +38,8 @@ export class PlanEdit {
       px: (e) => this.px(e),
       targetAt: (e) => this.targetAt(e),
       pointAt: (e) => this.toMassing(e),
+      // the level this plan is cut above (walls drawn here stand on it)
+      level: () => { const v = this.d.item; return v?.kind === 'plan' && Number.isInteger(v.level) ? v.level : null; },
     };
     this.unregister = api.tools.register(this.ctx);
   }
@@ -156,7 +162,9 @@ export class PlanEdit {
     if (selPick) g += this.outline(selPick, { stroke: 'var(--glass)', w: 1.5 });
     if (this.hover && this.hover.name !== sel && !this.api.tools.tool) g += this.outline(this.hover, { stroke: 'var(--glass)', w: 2.6, dash: '6 4' });
     this.grips = [];
-    if (!this.api.tools.tool) g += this.arrayFor(sel) + (this.drag ? this.dragDraw() : this.gripsFor(sel));
+    if (!this.drag) this.figs = null;
+    const arrDrag = this.drag && (this.drag.span !== undefined || this.drag.fig || this.drag.pitch);
+    if (!this.api.tools.tool) g += arrDrag ? this.dragDraw() : this.arrayFor(sel) + (this.drag ? this.dragDraw() : this.gripsFor(sel));
     ov.innerHTML = g;
   }
   find(name) {
@@ -177,8 +185,8 @@ export class PlanEdit {
   }
   // A massing's window, or wall with windows, selected: its array bracketed outside the wall, as in 3D -
   // a dotted line over the bays, a tick at each bay's edge (longer at the ends), their number and spacing.
-  arrayFor(sel) {
-    const m = this.api.massing(), t = m && sel && this.api.massingTarget(sel);
+  arrayFor(sel, m = this.api.massing(), grips = true) {
+    const t = m && sel && this.api.massingTarget(sel);
     if (!t || !Number.isInteger(t.face) || !this.zonesHere(m).includes(t.zone)) return '';
     const g = m.zones[t.zone].faces[t.face], len = faceLength(m, t.zone, t.face), lay = g && unitLayout(g, len);
     if (!lay?.n) return '';
@@ -189,7 +197,17 @@ export class PlanEdit {
     let out = line(pts[0][0], pts[0][1], pts[lay.n][0], pts[lay.n][1], { stroke: col, w: 1.2, dash: '2 3' });
     pts.forEach((p, j) => { const k = j === 0 || j === lay.n ? 6 : 3.5; out += line(p[0] - tn[0] * k, p[1] - tn[1] * k, p[0] + tn[0] * k, p[1] + tn[1] * k, { stroke: col }); });
     const q = at(lay.first + (lay.n / 2 - 0.5) * lay.pitch), lp = [q[0] + tn[0] * 14, q[1] + tn[1] * 14 + 3];
-    out += label(lp[0], lp[1], `${lay.n} window${lay.n === 1 ? '' : 's'}${lay.n > 1 ? ` @ ${Math.round(lay.pitch * 1000)} mm` : ''}`, { size: 9, fill: col });
+    out += label(lp[0] - 3, lp[1], `${lay.n} window${lay.n === 1 ? '' : 's'}`, { size: 9, fill: col, anchor: 'end', edit: 'a.count' });
+    if (lay.n > 1) out += label(lp[0] + 3, lp[1], `@ ${Math.round(lay.pitch * 1000)} mm`, { size: 9, fill: col, anchor: 'start', edit: 'a.spacing' });
+    if (!grips) return out;
+    // the bracket's ends: grips that set the array's length; the figures: slid or typed
+    const dir = [pts[lay.n][0] - pts[0][0], pts[lay.n][1] - pts[0][1]], dl2 = Math.hypot(...dir) || 1, ud = [dir[0] / dl2, dir[1] / dl2];
+    const pxm = Math.hypot(at(1)[0] - at(0)[0], at(1)[1] - at(0)[1]) || 1; // px per metre along the face
+    [0, lay.n].forEach((j, end) => {
+      this.grips.push({ p: pts[j], dir: [ud[0] * pxm, ud[1] * pxm], span: end, zone: t.zone, face: t.face });
+      out += gripMark(pts[j][0], pts[j][1], 4.5);
+    });
+    this.figs = { zone: t.zone, face: t.face, n: lay.n, pitch: lay.pitch, ud };
     return out;
   }
   // the grips of a massing's selected zone (each wall) or wall (its own)
@@ -216,10 +234,34 @@ export class PlanEdit {
     return g;
   }
   gripAt(e) { const [x, y] = this.px(e); return (this.grips || []).find((g) => Math.hypot(g.p[0] - x, g.p[1] - y) < 9) || null; }
+  // the array's number or spacing under the pointer: { key, el }
+  figAt(e) {
+    if (!this.figs) return null;
+    for (const el of this.d.ov.querySelectorAll('rect[data-edit]')) {
+      const r = el.getBoundingClientRect();
+      if (e.clientX >= r.left - 2 && e.clientX <= r.right + 2 && e.clientY >= r.top - 2 && e.clientY <= r.bottom + 2) return { key: el.dataset.edit, el: el.nextElementSibling || el };
+    }
+    return null;
+  }
+  // the array as a drag would leave it (on a copy of the massing)
+  arrayDraft(m, r) {
+    const i = r.zone, f = r.face, g = m.zones[i].faces[f];
+    if (!g) return;
+    if (r.span !== undefined) { const [a, b] = bayExtents(g, faceLength(m, i, f)); setArraySpan(m, i, f, r.span ? a : a + r.d, r.span ? b + r.d : b); }
+    else if (r.fig === 'a.count') setCount(g, Math.max(1, r.n0 + r.steps));
+    else if (r.fig === 'a.spacing') setSpacing(g, Math.max(0.3, r.p0 + r.steps * 0.1));
+    else if (r.pitch) dragPitch(m, i, f, r.index, r.u);
+    spreadSide(m, i, f);
+  }
   // the zones as they will be, while a grip is dragged
   dragDraw() {
     const r = this.drag, m = this.api.massing();
     if (!r || !m) return '';
+    if (r.span !== undefined || r.fig || r.pitch) {
+      const trial = structuredClone(m);
+      if (r.moved) this.arrayDraft(trial, r);
+      return this.arrayFor(this.api.selected(), trial, false);
+    }
     if (r.end) {
       const w = m.walls?.find((x) => x.id === r.wall);
       if (!w) return '';
@@ -244,6 +286,13 @@ export class PlanEdit {
       const r = this.drag, dx = e.clientX - r.x0, dy = e.clientY - r.y0;
       if (!r.moved && Math.hypot(dx, dy) < CLICK_PX) return;
       r.moved = true;
+      if (r.fig) { const along = dx * this.figs.ud[0] + dy * this.figs.ud[1]; r.steps = Math.round(along / 12); this.paint(); return; }
+      if (r.pitch) {
+        const m = this.api.massing(), { A, U } = faceAxes(m, r.zone, r.face), len = faceLength(m, r.zone, r.face), q = this.toMassing(e);
+        r.u = (q[0] - A[0] - U[0] * len / 2) * U[0] + (q[1] - A[1] - U[1] * len / 2) * U[1];
+        this.paint();
+        return;
+      }
       if (r.end) {
         const m = this.api.massing(), w = m?.walls?.find((x) => x.id === r.wall);
         if (w) { const s = this.api.tools.snapEnd(this.ctx, e, m, this.toMassing(e), w, r.end === 'a' ? w.b : w.a); r.p = s.p; r.kind = s.kind; }
@@ -257,7 +306,9 @@ export class PlanEdit {
     }
     if (this.api.tools.tool) return;
     const g = this.gripAt(e), h = g ? null : this.pickAt(e);
-    this.d.host.style.cursor = g ? (g.end ? 'move' : Math.abs(g.dir[0]) > Math.abs(g.dir[1]) ? 'ew-resize' : 'ns-resize') : h ? 'pointer' : '';
+    const fg = !g && this.figAt(e);
+    if (fg) { this.d.host.style.cursor = 'ew-resize'; return; }
+    this.d.host.style.cursor = g ? (g.end || g.span !== undefined ? 'move' : Math.abs(g.dir[0]) > Math.abs(g.dir[1]) ? 'ew-resize' : 'ns-resize') : h ? 'pointer' : '';
     if ((h?.name || null) !== (this.hover?.name || null)) { this.hover = h; this.paint(); }
   }
   leave() { if (this.hover) { this.hover = null; this.paint(); } }
@@ -266,6 +317,21 @@ export class PlanEdit {
     const g = this.gripAt(e);
     if (g) {
       this.drag = { ...g, x0: e.clientX, y0: e.clientY, d: 0, moved: false };
+      this.d.host.setPointerCapture?.(e.pointerId);
+      return;
+    }
+    // the array's number or spacing: slid along the bracket, or clicked to type
+    const fg = this.figAt(e);
+    if (fg) {
+      const f = this.figs;
+      this.drag = { fig: fg.key, el: fg.el, zone: f.zone, face: f.face, n0: f.n, p0: f.pitch, steps: 0, x0: e.clientX, y0: e.clientY, moved: false };
+      this.d.host.setPointerCapture?.(e.pointerId);
+      return;
+    }
+    // the selected window pressed again: dragged along its wall, it sets the spacing
+    const sel = this.api.selected(), h = sel && this.pickAt(e), t = h?.kind === 'window' && h.name === sel && this.api.massingTarget(sel);
+    if (t && Number.isInteger(t.window)) {
+      this.drag = { pitch: true, zone: t.zone, face: t.face, index: t.window, u: 0, x0: e.clientX, y0: e.clientY, moved: false };
       this.d.host.setPointerCapture?.(e.pointerId);
       return;
     }
@@ -278,6 +344,18 @@ export class PlanEdit {
       this.d.host.releasePointerCapture?.(e.pointerId);
       if (r.end) {
         if (r.p) this.api.change((m) => { moveWallEnd(m, r.wall, r.end, r.p); }, 'wall end moved');
+        this.paint();
+        return;
+      }
+      if (r.span !== undefined || r.fig || r.pitch) {
+        const m0 = this.api.massing(), i = r.zone, f = r.face, g0 = m0.zones[i].faces[f];
+        if (r.moved) this.api.change((m) => this.arrayDraft(m, r), r.pitch ? 'windows set out by dragging' : r.fig === 'a.count' ? 'window count set' : r.fig === 'a.spacing' ? 'window spacing set' : 'window array length set');
+        else if (r.fig === 'a.count') askNumber(this.d.host, { clientX: e.clientX, clientY: e.clientY, target: r.el }, `windows, now ${r.n0}`, (x) => this.api.change((m) => { setCount(m.zones[i].faces[f], x); spreadSide(m, i, f); }, `${Math.round(x)} windows`));
+        else if (r.fig === 'a.spacing') askNumber(this.d.host, { clientX: e.clientX, clientY: e.clientY, target: r.el }, `spacing mm, now ${Math.round(r.p0 * 1000)}`, (x) => this.api.change((m) => { setSpacing(m.zones[i].faces[f], x / 1000); spreadSide(m, i, f); }, `windows at ${Math.round(x)} mm`));
+        else if (r.span !== undefined && g0) {
+          const [a, b] = bayExtents(g0, faceLength(m0, i, f));
+          askNumber(this.d.host, e, `array length mm, now ${Math.round((b - a) * 1000)}`, (x) => this.api.change((m) => { setArraySpan(m, i, f, r.span ? a : b - x / 1000, r.span ? a + x / 1000 : b); spreadSide(m, i, f); }, 'window array length set'));
+        }
         this.paint();
         return;
       }

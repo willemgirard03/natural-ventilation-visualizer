@@ -459,3 +459,16 @@ test('drawn walls go with the faces they stand on; a zone face takes a location 
   deleteWall(m, f.id);
   assert.equal(freeWalls(m).length, 0);
 });
+
+test('walls closing spaces inside a zone divide it: each space a zone', async () => {
+  const { addWall, polyArea } = await import('../src/model/massing.js');
+  const m = massing0();
+  // the ground floor (20 x 10) divided by a wall from its south face to a point inside, then on to its west face
+  addWall(m, { a: [0, -5], b: [0, 0], base: 0, top: 1 });
+  assert.equal(m.zones.length, 2); // a wall ending inside divides nothing
+  addWall(m, { a: [0, 0], b: [-10, 0], base: 0, top: 1 });
+  const ground = m.zones.filter((z) => z.base === 0);
+  assert.equal(ground.length, 2);
+  near(ground.reduce((t, z) => t + Math.abs(polyArea(z.plate)), 0), 200, 1e-6);
+  near(Math.min(...ground.map((z) => Math.abs(polyArea(z.plate)))), 50, 1e-6);
+});

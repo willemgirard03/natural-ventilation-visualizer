@@ -101,6 +101,9 @@ function hull2(pts) {
 // coplanar pieces (two storeys' walls, a wall split around a slab) and is not drawn - unless the two
 // sides are different surfaces of the same zone: a seam made on purpose (a face split in two), kept.
 // tris: flat xyz; zoneOf(t), surfaceOf(t): triangle t's zone and surface.
+// the model checks that find a fault in where or which way surfaces stand: painted in the view
+const GEOMETRY_CHECKS = new Set(['surface-upside-down', 'interzone-not-opposite', 'interzone-not-reciprocal', 'interzone-partner-missing', 'zone-surface-reversed', 'zone-not-closed', 'zone-negative-volume', 'window-off-plane', 'surface-zone-missing']);
+
 function dropSeams(edges, tris, zoneOf = () => 0, surfaceOf = () => 0) {
   const planes = new Map(), v = (a, i) => new THREE.Vector3(a[i], a[i + 1], a[i + 2]);
   const f3 = (x) => { const s = x.toFixed(3); return s === '-0.000' ? '0.000' : s; };
@@ -495,7 +498,8 @@ export class View3D {
     // Centre on the zones, not the shading, which can reach hundreds of metres into the site.
     const b = bounds(this.surfaces.flatMap((s) => s.vertices));
     this.origin = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, b.min[2]];
-    this.zRange = [b.min[2], b.max[2]];
+    if (!this.origin.every(Number.isFinite)) this.origin = [0, 0, 0]; // nothing modelled yet (a blank massing)
+    this.zRange = Number.isFinite(b.min[2]) ? [b.min[2], b.max[2]] : [0, 0];
 
     // Surfaces, drawn in their colour on the side they face (out of the zone) and darker behind.
     // Paired interzone surfaces sit on top of each other facing opposite ways, so each side shows one.
@@ -818,10 +822,12 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     if (this.colorBy === 'co2') this.setColorBy('co2');
   }
 
-  // Surfaces named by a model check: red on both sides, with an arrow the way EnergyPlus takes as outward.
+  // Surfaces named by a check of their geometry: red on both sides, with an arrow the way EnergyPlus takes
+  // as outward (from the order of their corners), as such faults are found by which way surfaces face.
+  // Checks of their settings (an assembly unspecified, say) are listed, not painted.
   problemLayer() {
     const layer = new THREE.Group();
-    const flagged = new Set(this.model.checks.flatMap((c) => c.objects).filter((n) => this.model.surfaces[n]));
+    const flagged = new Set(this.model.checks.filter((c) => GEOMETRY_CHECKS.has(c.code)).flatMap((c) => c.objects).filter((n) => this.model.surfaces[n]));
     this.problems = [...flagged].map((n) => this.model.surfaces[n]);
     if (!this.problems.length) return layer;
     const mat = new THREE.MeshBasicMaterial({ color: PROBLEM, side: THREE.DoubleSide, transparent: true, opacity: 0.75, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });

@@ -30,7 +30,7 @@ import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 import { WallEnds3D } from './wallends.js';
 import {
-  massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
+  massing0, massingBlank, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
   setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch, wallLine, freeWalls,
   WALL_LINES, setFaceLine, flipWall, deleteWall,
@@ -229,6 +229,7 @@ const tools = new ModelTools(view, {
   onAdded: (j) => { const z = massingGeometry(massing)[j]; if (z && model.zones[z.name]) view.select(z.name); },
   keepSeams: () => $('keep-seams').checked,
   wallThickness: (asm) => asmThickness(asm),
+  onWallLevels: (b, t) => { if (Number($('wall-base').value) === b && Number($('wall-top').value) === t) return; $('wall-base').value = String(b); fillTop(); $('wall-top').value = String(t); },
   wallProps: () => ({ asm: $('wall-asm').value, base: Number($('wall-base').value), top: Number($('wall-top').value), line: $('wall-line').value, chain: $('wall-chain').checked }),
   onTool: (tool) => {
     for (const b of document.querySelectorAll('.mtools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
@@ -1644,7 +1645,7 @@ function legend() {
     if ($('show-air').checked) items.push(particleKey($('air-color').value, 'Particles'));
     for (const c of cutColours) items.push(particleKey(c, 'In the cuts'));
   }
-  if (view.problems.length) items.push(chip(PROBLEM, 'Named by a model check', 'The arrow shows the way EnergyPlus takes as outward, from the order of the corner points.'));
+  if (view.problems.length) items.push(chip(PROBLEM, 'Geometry fault', 'A surface a model check finds standing wrong: facing the wrong way, not closing its zone, out of line with its partner. Red on both sides; its arrow points the way EnergyPlus takes as its outside, from the order of its corner points. The checks are listed under Model details.'));
   $('legend').innerHTML = items.join('');
 }
 
@@ -2469,6 +2470,7 @@ const vbar = viewsBar($('view-make'), {
   views: namedViews, levels: () => massing?.levels || null, changeViews: viewsChange, onOpen: (id) => ws.open(id),
   planes: () => view.sections.planes.filter((p) => !p.forChecks).map((p) => ({ id: p.id, kind: p.kind, name: p.name })),
   fromPlane: (id) => { const p = planeById(id); if (p) viewFromPlane(p, planeViewName(p)); },
+  onCreated: (id) => ws.swapIn(id),
 });
 vbar.render();
 // the modelling tools' buttons on a plan view's bar: as the 3D view's
@@ -2625,14 +2627,24 @@ function viewFromPlane(p, name) {
     x.views.push(made);
   }, `${p.kind} view ${name} created`);
   void host;
-  if (made) showInfo(current());
+  if (made) { showInfo(current()); ws.swapIn(made.id); }
 }
 function massingChange(mutate, what) {
   if (!massing) return false;
   const before = structuredClone(massing);
   mutate(massing);
   const after = structuredClone(massing);
-  if (!applyEdit((tx) => applyMassing(tx, massing, { weather }), what, { geometry: true })) { massing = before; massingUI.render(); return false; }
+  if (!applyEdit((tx) => applyMassing(tx, massing, { weather }), what, { geometry: true })) {
+    if (JSON.stringify(before) === JSON.stringify(after)) { massing = before; massingUI.render(); return false; }
+    // the massing changed, the model not (a wall standing free, a location line): an undo step of its
+    // own, and the walls drawn again
+    const keep = selected, redraw = () => { view.setWalls(wallMode()); massingUI.render(); levelEdits.render(); if (keep && view.find(keep)) view.select(keep); else showInfo(current()); };
+    undoStack.push({ undo: () => { massing = structuredClone(before); redraw(); }, redo: () => { massing = structuredClone(after); redraw(); }, what, view: true });
+    if (undoStack.length > 100) undoStack.shift();
+    redoStack.length = 0;
+    redraw();
+    return true;
+  }
   const e = undoStack[undoStack.length - 1], u = e.undo, r = e.redo, target = massEdit.target;
   e.undo = () => { u(); massing = structuredClone(before); queueMicrotask(() => { massingUI.render(); reselect(target); }); };
   e.redo = () => { r(); massing = structuredClone(after); queueMicrotask(() => { massingUI.render(); reselect(target); }); };
@@ -2692,9 +2704,20 @@ function faceMiddle(name) {
   const M = turnPlan([(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], massing.rot || 0);
   return M[0] * f.right[0] + M[1] * f.right[1];
 }
-$('new-massing').addEventListener('click', () => {
-  if (model && !confirm('Start a new massing in place of the model open now? Export it first to keep it.')) return;
-  massing = massing0();
+// New massing: the starting massing, or a blank one opened in the plan of Level 1 with Draw wall on,
+// for its footprint to be drawn.
+$('new-massing').addEventListener('click', () => newMassing(massing0()));
+$('new-blank').addEventListener('click', () => {
+  const m = massingBlank();
+  m.views = [{ id: 0, kind: 'plan', name: `${m.levels[0].name} plan`, level: 0, cut: 1.2 }];
+  if (!newMassing(m)) return;
+  ws.swapIn(0);
+  tools.start('wall');
+});
+function newMassing(m) {
+  if (model && !confirm('Start a new massing in place of the model open now? Export it first to keep it.')) return false;
+  $('new-dd').open = false;
+  massing = m;
   model = importEpJSON(massingEpJSON(massing, { weather }), { fileName: 'Massing.epJSON' });
   $('status').textContent = '';
   document.title = 'Massing · Natural Ventilation Visualizer';
@@ -2705,8 +2728,10 @@ $('new-massing').addEventListener('click', () => {
   $('massing').hidden = true;
   massingUI.reset(); massingUI.render();
   vbar.render();
+  ws.listChanged();
   ribbon('model');
-});
+  return true;
+}
 $('mass-open').addEventListener('click', () => { $('massing').hidden = !$('massing').hidden; massingUI.render(); });
 
 // ---------- the Materials and assemblies window ----------

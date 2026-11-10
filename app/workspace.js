@@ -11,6 +11,11 @@
 // pans; a double click fits. A plan is edited as the 3D view is (planedit.js): its zones, walls and
 // windows picked and pushed, and the modelling tools at work on it.
 //
+// Every view's name is a menu of what it can show: the building in 3D, and every plan and section.
+// Picked, the view shows it in place; what is shown elsewhere trades places with it. The 3D view is one
+// view: off the page it waits, kept, for its name to be picked again. A plan or section made takes the
+// 3D view's place (swapIn).
+//
 // The rows scroll: one row fills the space; with more, each takes most of it, and a row's lower margin
 // dragged gives it a height of its own (a double click gives back the default).
 
@@ -39,6 +44,48 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
   const target = document.createElement('div');
   target.className = 'droptarget'; target.hidden = true;
   document.body.appendChild(target);
+  // the 3D view off the page waits here, kept in the document (its pop-ups and lists are looked up there)
+  const park = document.createElement('div');
+  park.className = 'vpark'; park.hidden = true;
+  document.body.appendChild(park);
+  // the 3D view's name: a menu of what it can show, as every view's
+  const t3 = view3dEl.querySelector('.vtitle');
+  const sel3d = document.createElement('select');
+  sel3d.className = 'vtype'; sel3d.title = 'Show a plan or section here';
+  t3.replaceWith(sel3d);
+  sel3d.addEventListener('change', () => { const id = Number(sel3d.value); sel3d.value = '3d'; if (Number.isFinite(id)) showIn(view3dEl, id); });
+  const menuOf = (pin) => {
+    const list = views(), group = (kind, label) => {
+      const of = list.filter((v) => v.kind === kind);
+      return of.length ? `<optgroup label="${label}">${of.map((v) => `<option value="${v.id}"${v.id === pin ? ' selected' : ''}>${esc(v.name)}</option>`).join('')}</optgroup>` : '';
+    };
+    return `<option value="3d"${pin === '3d' ? ' selected' : ''}>${KIND_LABEL['3d']}</option>` + group('plan', 'Plans') + group('section', 'Sections');
+  };
+  const fill3d = () => { sel3d.innerHTML = menuOf('3d'); };
+  fill3d();
+  // a view's element and another's trade places (and widths)
+  const trade = (a, b) => {
+    const ph = document.createElement('div'), ga = a.style.flexGrow, gb = b.style.flexGrow;
+    a.replaceWith(ph); b.replaceWith(a); ph.replaceWith(b);
+    a.style.flexGrow = gb; b.style.flexGrow = ga;
+  };
+  // the view in element el shows the named view id ('3d': the building in 3D): one shown elsewhere
+  // trades places with it; else it is made here, in el's place
+  function showIn(el, id) {
+    if (id === '3d') {
+      if (el === view3dEl) return;
+      if (host.contains(view3dEl)) trade(el, view3dEl);
+      else { view3dEl.style.flexGrow = el.style.flexGrow; el.replaceWith(view3dEl); }
+    } else {
+      const v = views().find((x) => x.id === id);
+      if (!v) return;
+      const at = [...drawings].find((d) => d.pin === id && d.el.isConnected);
+      if (at) { if (at.el !== el) trade(el, at.el); }
+      else if (el === view3dEl) { const d = new Drawing(v.kind, id); d.el.style.flexGrow = el.style.flexGrow; el.replaceWith(d.el); }
+      else { [...drawings].find((d) => d.el === el)?.show(id); }
+    }
+    layout.margins(); changed(); repaint(); view.resize();
+  }
 
   // the 3D view's bar takes the layout's grip and –
   const bar3d = view3dEl.querySelector('.vbarrow');
@@ -63,7 +110,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
   addEventListener('resize', sizeRows);
   function changed() {
     sizeRows();
-    if (host.contains(view3dEl)) delete kinds['3d']; else kinds['3d'] = KIND_LABEL['3d'];
+    if (host.contains(view3dEl)) delete kinds['3d']; else { kinds['3d'] = KIND_LABEL['3d']; park.appendChild(view3dEl); }
     for (const d of drawings) if (!d.el.isConnected) drawings.delete(d);
   }
   layout.build(true);
@@ -103,7 +150,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       [this.ov, this.tv] = this.host.querySelectorAll('svg.planov');
       this.sel = this.el.querySelector('.vtype');
       this.sel.title = 'Show another plan or section here';
-      this.sel.addEventListener('change', () => { this.show(Number(this.sel.value)); });
+      this.sel.addEventListener('change', () => { const v = this.sel.value; if (v === '3d') showIn(this.el, '3d'); else showIn(this.el, Number(v)); });
       this.el.querySelector('[data-cut3d]').addEventListener('click', () => { if (this.pin !== null) onCut3d(this.pin); this.bar3d(); });
       this.el.querySelector('[data-fit]').addEventListener('click', () => { this.cam = null; this.paint(); });
       this.el.querySelector('[data-vfull]').addEventListener('click', () => setFull(this.el, !this.el.classList.contains('full')));
@@ -151,8 +198,9 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
         const of = list.filter((v) => v.kind === kind);
         return of.length ? `<optgroup label="${label}">${of.map((v) => `<option value="${v.id}"${v.id === this.pin ? ' selected' : ''}>${esc(v.name)}</option>`).join('')}</optgroup>` : '';
       };
-      this.sel.innerHTML = group('plan', 'Plans') + group('section', 'Sections') || `<option>${KIND_LABEL[this.type]}</option>`;
-      if (!this.item) this.sel.insertAdjacentHTML('afterbegin', `<option selected disabled>${KIND_LABEL[this.type]}: none</option>`);
+      void group;
+      this.sel.innerHTML = menuOf(this.pin);
+      if (!this.item) this.sel.insertAdjacentHTML('beforeend', `<option selected disabled>${KIND_LABEL[this.type]}: none</option>`);
       const vt = this.el.querySelector('.vtools'); if (vt) vt.hidden = !(this.type === 'plan' && hasTools());
       this.bar3d();
     }
@@ -366,6 +414,11 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
   let queued = false;
   const repaint = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; for (const d of drawings) d.paint(); }); };
   return {
+    // A named view just made: shown in the 3D view's place (the 3D view kept, to pick from any view's
+    // name); with the 3D view off the page, opened as open() does.
+    swapIn(id) {
+      if (host.contains(view3dEl) && !view3dEl.classList.contains('full')) showIn(view3dEl, id); else this.open(id);
+    },
     // A named view shown: brought forward where it already is, else put beside the 3D view (or in a
     // row of its own under it, where its row is full).
     open(id) {
@@ -381,7 +434,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       repaint();
     },
     // the list of named views changed: each view's name list, and a deleted one's view shows none
-    listChanged() { for (const d of drawings) { if (d.pin !== null && !d.item) d.show(firstOf(d.type)); else d.options(); } repaint(); },
+    listChanged() { fill3d(); for (const d of drawings) { if (d.pin !== null && !d.item) d.show(firstOf(d.type)); else d.options(); } repaint(); },
     // the building or a cut changed: every drawing cut again
     redraw() { version++; for (const d of drawings) { d.bar3d(); d.setEditor(); } repaint(); },
     // the selection changed: drawn again over each plan

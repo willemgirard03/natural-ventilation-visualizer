@@ -49,8 +49,9 @@ export class ModelTools {
   // keepSeams() -> whether Merge zones keeps the seams; onMessage(text) says why a merge is refused.
   // wallProps() -> { asm, base, top, line, chain } for Draw wall.
   // wallThickness(asm) -> the assembly's thickness (m), for the wall drawn.
-  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {}, wallProps = () => ({}), wallThickness = () => 0.2 }) {
-    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage, wallProps, wallThickness });
+  // onWallLevels(base, top): a wall begun in a plan takes its level; the Place wall tab shows it.
+  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {}, wallProps = () => ({}), wallThickness = () => 0.2, onWallLevels = () => {} }) {
+    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage, wallProps, wallThickness, onWallLevels });
     this.picked = [];
     this.tool = null;
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -109,6 +110,15 @@ export class ModelTools {
     };
     const key = (e) => {
       if (e.target.closest?.('input, select, textarea')) return;
+      // Draw wall, after its start: a length typed (mm) holds the wall to it, the pointer giving its way
+      if (this.tool === 'wall' && this.wall?.start && (/^[0-9.,]$/.test(e.key) || (e.key === 'Backspace' && this.wall.typed))) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        this.wall.typed = e.key === 'Backspace' ? this.wall.typed.slice(0, -1) : (this.wall.typed || '') + (e.key === ',' ? '.' : e.key);
+        if (this.last) this.preview(this.last);
+        return;
+      }
+      if (e.key === 'Escape' && this.tool === 'wall' && this.wall?.typed) { e.stopImmediatePropagation(); this.wall.typed = ''; if (this.last) this.preview(this.last); return; }
+      if (e.key === 'Enter' && this.tool === 'wall' && this.wall?.typed && this.last) { e.preventDefault(); e.stopImmediatePropagation(); this.wallClick(this.last); return; }
       if (e.key === 'Escape') { e.stopImmediatePropagation(); this.stop(); }
       if (e.key === 'Enter' && (this.tool === 'merge' || this.tool === 'mergefaces')) { e.preventDefault(); e.stopImmediatePropagation(); this.mergePicked(); }
       if (e.key === 'Enter' && this.tool === 'wall') { e.preventDefault(); e.stopImmediatePropagation(); this.stop(); }
@@ -267,14 +277,25 @@ export class ModelTools {
   faceAt(m, t) {
     if (!Number.isInteger(t.face)) return null;
     const i = t.zone, k = t.face, [z0, z1] = zoneLevels(m, i), { A, U } = faceAxes(m, i, k), len = faceLength(m, i, k);
-    const u = Math.round(((t.point[0] - A[0]) * U[0] + (t.point[1] - A[1]) * U[1]) / SNAP) * SNAP;
+    const raw = (t.point[0] - A[0]) * U[0] + (t.point[1] - A[1]) * U[1];
+    let u = Math.round(raw / SNAP) * SNAP, joint = false;
+    // where another wall meets this one (another zone's corner, or a drawn wall's end, on its line),
+    // close to the pointer: the seam goes there
+    const a0 = this.P([A[0], A[1], z0]), a1 = this.P([A[0] + U[0], A[1] + U[1], z0]), pxm = Math.hypot(a1[0] - a0[0], a1[1] - a0[1]) || 1;
+    const on = (p) => { const r = [p[0] - A[0], p[1] - A[1]], off = r[0] * U[1] - r[1] * U[0], s = r[0] * U[0] + r[1] * U[1]; return Math.abs(off) < 0.02 && s > 0.05 && s < len - 0.05 ? s : null; };
+    const over = (b, tp) => Math.min(m.levels[tp].z, z1) - Math.max(m.levels[b].z, z0) > 1e-6;
+    const cands = [];
+    m.zones.forEach((zz, j) => { if (j !== i && over(zz.base, zz.top)) for (const p of zz.plate) { const s = on(p); if (s !== null) cands.push(s); } });
+    for (const w of m.walls || []) if (over(w.base, w.top)) for (const p of [w.a, w.b]) { const s = on(p); if (s !== null) cands.push(s); }
+    const near = cands.map((s) => [s, Math.abs(s - raw) * pxm]).filter(([, d]) => d < 12).sort((x, y) => x[1] - y[1])[0];
+    if (near) { u = near[0]; joint = true; }
     const trial = structuredClone(m);
     if (!splitFace(trial, i, k, u)) return null;
     const p = [A[0] + U[0] * u, A[1] + U[1] * u], a = this.P([...p, z0]), b = this.P([...p, z1]);
     return {
       what: 'wall split',
       mutate: (x) => splitFace(x, i, k, u),
-      draw: () => this.face(m, i, k, true) + line(a[0], a[1], b[0], b[1], { stroke: 'var(--glass)', w: 2.2 }) + this.note(p, z1, `${Math.round(u * 1000)} | ${Math.round((len - u) * 1000)} mm`),
+      draw: () => this.face(m, i, k, true) + line(a[0], a[1], b[0], b[1], { stroke: 'var(--glass)', w: 2.2 }) + (joint ? this.snapMark(a, 'end') : '') + this.note(p, z1, `${Math.round(u * 1000)} | ${Math.round((len - u) * 1000)} mm${joint ? ' · where a wall meets it' : ''}`),
     };
   }
 
@@ -390,12 +411,24 @@ export class ModelTools {
     if (kind === 'on' || kind === 'cross') return line(x - 5, y - 5, x + 5, y + 5, o) + line(x - 5, y + 5, x + 5, y - 5, o);
     return '';
   }
+  // The wall's settings: the Place wall tab's, but drawn in a plan, from that plan's level to the next.
+  wprops() {
+    const pr = { ...this.wallProps() }, m = this.massing(), L = this.ctx?.level?.();
+    if (m && Number.isInteger(L) && m.levels[L + 1]) { pr.base = L; pr.top = L + 1; }
+    return pr;
+  }
   wallAt(e) {
-    const m = this.massing(), pr = this.wallProps();
+    const m = this.massing(), pr = this.wprops();
     if (!m || !m.levels[pr.base] || !m.levels[pr.top]) return null;
     const z0 = m.levels[pr.base].z, z1 = m.levels[pr.top].z, raw = this.pointAt(e, z0);
     if (!raw) return null;
-    const { p, kind } = this.wallSnap(m, raw, e, pr.base, pr.top), s0 = this.wall.start;
+    let { p, kind } = this.wallSnap(m, raw, e, pr.base, pr.top);
+    const s0 = this.wall.start, typed = s0 && Number(this.wall.typed) > 0 ? Number(this.wall.typed) / 1000 : 0;
+    // a length typed: the wall runs that far the way the pointer (snapped) points
+    if (typed) {
+      const d = [p[0] - s0[0], p[1] - s0[1]], l = Math.hypot(...d), u = l > 1e-6 ? [d[0] / l, d[1] / l] : [1, 0];
+      p = [s0[0] + u[0] * typed, s0[1] + u[1] * typed]; kind = null;
+    }
     const at = this.P([p[0], p[1], z0]);
     return {
       what: '', mutate: null, point: p,
@@ -421,7 +454,7 @@ export class ModelTools {
             const q0 = this.P([mid[0], mid[1], z0]), q1 = this.P([mid[0] + n[0] * 0.6, mid[1] + n[1] * 0.6, z0]);
             g += line(q0[0], q0[1], q1[0], q1[1], { stroke: 'var(--glass)', w: 1.4, dash: '3 2' });
           }
-          g += label((a[0] + at[0]) / 2, (a[1] + at[1]) / 2 - 12, `${Math.round(len * 1000)} mm · ${Math.round(((ang % 360) + 360) % 360)}°`, { size: 9, fill: 'var(--glass)' });
+          g += label((a[0] + at[0]) / 2, (a[1] + at[1]) / 2 - 12, `${typed ? `${this.wall.typed} mm typed` : `${Math.round(len * 1000)} mm`} · ${Math.round(((ang % 360) + 360) % 360)}°`, { size: 9, fill: 'var(--glass)' });
         }
         return g;
       },
@@ -431,9 +464,10 @@ export class ModelTools {
     const plan = this.wallAt(e);
     if (!plan) return;
     const w = this.wall, p = plan.point;
-    if (!w.start) { w.start = p; this.preview(e); return; }
+    if (!w.start) { const pr = this.wprops(); this.onWallLevels?.(pr.base, pr.top); w.start = p; w.typed = ''; this.preview(e); return; }
     if (Math.hypot(p[0] - w.start[0], p[1] - w.start[1]) < 0.05) return;
-    const pr = this.wallProps(), a = w.start;
+    const pr = this.wprops(), a = w.start;
+    w.typed = '';
     let made = null;
     this.onChange((x) => { made = addWall(x, { a, b: p, base: pr.base, top: pr.top, asm: pr.asm, line: pr.line, side: w.side }); if (!made) return false; }, 'wall drawn');
     if (made) w.chain.push(made.id);

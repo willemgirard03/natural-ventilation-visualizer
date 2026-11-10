@@ -10,7 +10,8 @@ const CUT0 = 1.2; // a plan's cut height above its level, as drawn by convention
 // box: the ribbon group; views() -> the named views; levels() -> the levels [{ name, z }] or null;
 // changeViews(mutate(host), what); onOpen(id); planes() -> the clipping planes [{ id, kind, name }];
 // fromPlane(id) makes a view of a plane's cut, linked to it
-export function viewsBar(box, { views, levels, changeViews, onOpen, planes = () => [], fromPlane = () => {} }) {
+// onCreated(id): a plan view made here
+export function viewsBar(box, { views, levels, changeViews, onOpen, planes = () => [], fromPlane = () => {}, onCreated = () => {} }) {
   const make = { level: 0, cut: CUT0, name: '' };
   const open = { list: false, plan: false, section: false }; // the menus folded out
 
@@ -68,7 +69,8 @@ export function viewsBar(box, { views, levels, changeViews, onOpen, planes = () 
   }, true);
   box.addEventListener('change', (e) => {
     const t = e.target, k = t.dataset.vb, num = Number(String(t.value).replace(',', '.'));
-    if (k === 'level') { make.level = Number(t.value); render(); }
+    // the name suggested follows the level (render waits while the list has focus)
+    if (k === 'level') { make.level = Number(t.value); const n = box.querySelector('[data-vb=name]'); if (n) n.placeholder = suggest(); }
     else if (k === 'cut') { if (Number.isFinite(num)) make.cut = num; }
     else if (k === 'name') make.name = t.value;
     else if (k === 'vname') { const id = idOf(t), v = t.value.trim(); if (v) changeViews((x) => { find(x, id).name = v; }, 'view renamed'); render(); }
@@ -86,7 +88,9 @@ export function viewsBar(box, { views, levels, changeViews, onOpen, planes = () 
     if (!b) return;
     if (b.dataset.vb === 'create') {
       const name = make.name.trim() || suggest(), L = make.level, cut = make.cut;
-      changeViews((x) => { x.views ||= []; x.views.push({ id: Math.max(0, ...x.views.map((v) => v.id + 1)), kind: 'plan', name, level: L, cut }); }, `plan view ${name} created`);
+      let made = null;
+      changeViews((x) => { x.views ||= []; made = Math.max(0, ...x.views.map((v) => v.id + 1)); x.views.push({ id: made, kind: 'plan', name, level: L, cut }); }, `plan view ${name} created`);
+      if (made !== null) onCreated(made);
       make.name = '';
       open.plan = false;
       render();

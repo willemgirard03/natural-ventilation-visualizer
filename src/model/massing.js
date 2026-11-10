@@ -56,6 +56,11 @@ export function massing0() {
   return upgradeMassing({ name: 'Floor', rot: 0, storeys: [storey0(), storey0()], settings: MASSING_SETTINGS0() });
 }
 
+// A blank massing: two levels a storey apart and nothing on them, its footprint to be drawn with walls.
+export function massingBlank() {
+  return { name: 'Floor', rot: 0, version: 2, levels: [{ name: levelName(0), z: 0 }, { name: levelName(1), z: 3.5 }], zones: [], walls: [], settings: MASSING_SETTINGS0() };
+}
+
 // An older massing's storeys as levels and zones: a level at each storey's floor and one over the top,
 // a zone a storey over its plate, its four sides its faces (S, E, N, W). A version 2 massing as it is.
 export function upgradeMassing(m) {
@@ -1572,6 +1577,13 @@ function splitByWall(m, w) {
   }
   return n;
 }
+// a point inside a polygon: its middle, else the middle of one of its corner triangles that is inside
+const innerPoint = (P) => {
+  const c = [P.reduce((t, p) => t + p[0], 0) / P.length, P.reduce((t, p) => t + p[1], 0) / P.length];
+  if (insidePlate(P, c)) return c;
+  for (let k = 1; k + 1 < P.length; k++) { const q = [(P[0][0] + P[k][0] + P[k + 1][0]) / 3, (P[0][1] + P[k][1] + P[k + 1][1]) / 3]; if (insidePlate(P, q)) return q; }
+  return null;
+};
 const insidePlate = (P, p) => { let c = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) if ((P[i][1] > p[1]) !== (P[j][1] > p[1]) && p[0] < (P[j][0] - P[i][0]) * (p[1] - P[i][1]) / (P[j][1] - P[i][1]) + P[i][0]) c = !c; return c; };
 
 // The spaces closed by the walls on levels base..top (with the edges of the zones standing on just
@@ -1581,8 +1593,33 @@ export function enclose(m, base, top) {
   for (const w of m.walls || []) if (w.base === base && w.top === top) segs.push([w.a, w.b]);
   if (!segs.length) return [];
   for (const z of m.zones) if (z.base === base && z.top === top) z.plate.forEach((p, k) => segs.push([p, z.plate[(k + 1) % z.plate.length]]));
-  const made = [];
-  for (const face of planarFaces(segs)) {
+  const made = [], faces = planarFaces(segs);
+  // a zone the walls divide (into spaces each closed all round): each space a zone, the largest keeping
+  // the zone, the others copies of it; windows kept on the pieces of its faces
+  const n0 = m.zones.length;
+  for (let i = 0; i < n0; i++) {
+    const z = m.zones[i];
+    if (z.base !== base || z.top !== top) continue;
+    const parts = faces.filter((F) => { const q = innerPoint(F); return q && insidePlate(z.plate, q) && Math.abs(polyArea(F)) < Math.abs(polyArea(z.plate)) - 0.01; });
+    if (parts.length < 2) continue;
+    parts.sort((x, y) => Math.abs(polyArea(y)) - Math.abs(polyArea(x)));
+    const P0 = z.plate, F0 = z.faces, name = zoneName(m, i);
+    const facesOf = (F) => F.map((p, k) => {
+      const q = F[(k + 1) % F.length];
+      for (let e = 0; e < P0.length; e++) {
+        const a = P0[e], b = P0[(e + 1) % P0.length], [ta, oa] = along(p, a, b), [tb, ob] = along(q, a, b);
+        if (Math.abs(oa) > 1e-3 || Math.abs(ob) > 1e-3 || ta < -1e-6 || tb > 1 + 1e-6 || tb <= ta) continue;
+        const L = len2(sub2(b, a));
+        return F0[e] ? splitArray(F0[e], L, ta * L, tb * L) : null;
+      }
+      return null;
+    });
+    parts.forEach((F, q) => {
+      if (!q) Object.assign(z, { plate: F, faces: facesOf(F), cells: undefined });
+      else { m.zones.push({ ...structuredClone({ ...z, plate: null, faces: null }), id: nextZoneId(m), name: null, plate: F, faces: facesOf(F), cells: undefined, linkFaces: false, linkAbove: false, copyFrom: name }); made.push(m.zones.length - 1); }
+    });
+  }
+  for (const face of faces) {
     const others = m.zones.filter((z) => levelsOverlap(m, { base, top }, z)).map((z) => z.plate);
     for (const P of subtract(face, others)) {
       if (Math.abs(polyArea(P)) < 0.5 || !simpleOutline(P)) continue;

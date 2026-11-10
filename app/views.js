@@ -161,6 +161,11 @@ export function createLayout(opts) {
     menu.innerHTML = '<p>Add a view</p>' + Object.entries(kinds).map(([k, l]) => `<button type="button" data-add="${k}">${esc(l)}</button>`).join('');
     Object.assign(menu.style, { left: Math.round(r.left + r.width / 2 + scrollX) + 'px', top: Math.round(r.bottom + 4 + scrollY) + 'px' });
     document.body.appendChild(menu);
+    // kept on screen: above the + when there is no room under it, and clear of the sides
+    const h = menu.offsetHeight, w = menu.offsetWidth;
+    if (r.bottom + 4 + h > innerHeight - 8) menu.style.top = Math.round(Math.max(8, r.top - 4 - h) + scrollY) + 'px';
+    const left = menu.getBoundingClientRect().left;
+    if (left + w > innerWidth - 8) menu.style.left = Math.round(parseFloat(menu.style.left) - (left + w - innerWidth + 8)) + 'px';
     menu.addEventListener('click', e => { const b = e.target.closest('[data-add]'); if (b) { closeMenu(); onPick(b.dataset.add); } });
   }
   host.addEventListener('click', e => {
