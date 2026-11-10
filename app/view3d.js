@@ -103,31 +103,137 @@ function hull2(pts) {
 // tris: flat xyz; zoneOf(t), surfaceOf(t): triangle t's zone and surface.
 function dropSeams(edges, tris, zoneOf = () => 0, surfaceOf = () => 0) {
   const planes = new Map(), v = (a, i) => new THREE.Vector3(a[i], a[i + 1], a[i + 2]);
+  const f3 = (x) => { const s = x.toFixed(3); return s === '-0.000' ? '0.000' : s; };
+  const keyOf = (n, d) => `${f3(n.x)},${f3(n.y)},${f3(n.z)},${f3(d)}`;
   for (let i = 0; i + 8 < tris.length; i += 9) {
     const a = v(tris, i), b = v(tris, i + 3), c = v(tris, i + 6), n = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
     if (n.lengthSq() < 1e-12) continue;
     n.normalize();
-    const d = n.dot(a), key = `${n.x.toFixed(3)},${n.y.toFixed(3)},${n.z.toFixed(3)},${d.toFixed(3)}`;
-    if (!planes.has(key)) planes.set(key, { n, d, t: [] });
+    const d = n.dot(a), key = keyOf(n, d);
+    if (!planes.has(key)) planes.set(key, { n, d, t: [], key });
     const t = new THREE.Triangle(a, b, c);
     t.id = i / 9;
     planes.get(key).t.push(t);
   }
+  // each plane's back: the plane facing the other way in the same place (a face against another)
+  for (const pl of planes.values()) pl.back = planes.get(keyOf(pl.n.clone().negate(), -pl.d)) || null;
   const list = [...planes.values()], p = new THREE.Vector3(), q = new THREE.Vector3(), mid = new THREE.Vector3(), w = new THREE.Vector3(), x = new THREE.Vector3();
   const cover = (pl, pt) => pl.t.find((t) => t.containsPoint(pt))?.id ?? -1;
   const out = [];
   for (let i = 0; i + 5 < edges.length; i += 6) {
     p.set(edges[i], edges[i + 1], edges[i + 2]); q.set(edges[i + 3], edges[i + 4], edges[i + 5]);
     mid.addVectors(p, q).multiplyScalar(0.5);
-    const seam = list.some((pl) => {
-      if (Math.abs(pl.n.dot(p) - pl.d) > 1e-3 || Math.abs(pl.n.dot(q) - pl.d) > 1e-3) return false;
+    // An edge stays where it bounds a face that shows (one side of it covered, the other not, and the
+    // covered side not against another face): as where a low zone's roof meets a taller zone's wall.
+    // Otherwise it goes where it lies within faces in one plane: within one surface (its triangles'
+    // seams), or between zones (one wall seen as one).
+    let seam = false, edge = false;
+    for (const pl of list) {
+      if (Math.abs(pl.n.dot(p) - pl.d) > 1e-3 || Math.abs(pl.n.dot(q) - pl.d) > 1e-3) continue;
       w.subVectors(q, p).cross(pl.n).normalize().multiplyScalar(0.01);
       const a = cover(pl, x.copy(mid).add(w)), b = cover(pl, x.copy(mid).sub(w));
-      if (a < 0 || b < 0) return false;
-      return surfaceOf(a) === surfaceOf(b) || zoneOf(a) !== zoneOf(b);
-    });
-    if (!seam) out.push(edges[i], edges[i + 1], edges[i + 2], edges[i + 3], edges[i + 4], edges[i + 5]);
+      if ((a < 0) !== (b < 0)) {
+        const at = x.copy(mid).add(a < 0 ? w.negate() : w);
+        if (!pl.back || cover(pl.back, at) < 0) { edge = true; break; }
+        continue;
+      }
+      if (a >= 0 && b >= 0 && (surfaceOf(a) === surfaceOf(b) || zoneOf(a) !== zoneOf(b))) seam = true;
+    }
+    if (edge || !seam) out.push(edges[i], edges[i + 1], edges[i + 2], edges[i + 3], edges[i + 4], edges[i + 5]);
   }
+  return out;
+}
+
+// Where solids run into one another (a low zone's roof into a taller zone's wall, a wall's end into
+// another's side), the line where their faces cross shows as an edge though it is no solid's own: each
+// such line, where the solids about it make a corner (filled on one or three sides of it, or two across
+// it), not a flat face. solids: triangle arrays (view coordinates). Returns segment positions.
+function crossEdges(solids) {
+  const E = 0.01, out = [];
+  const S = solids.map((tris) => {
+    const faces = new Map(), box = new THREE.Box3();
+    for (let i = 0; i + 8 < tris.length; i += 9) {
+      const a = new THREE.Vector3(tris[i], tris[i + 1], tris[i + 2]), b = new THREE.Vector3(tris[i + 3], tris[i + 4], tris[i + 5]), c = new THREE.Vector3(tris[i + 6], tris[i + 7], tris[i + 8]);
+      box.expandByPoint(a).expandByPoint(b).expandByPoint(c);
+      const n = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
+      if (n.lengthSq() < 1e-12) continue;
+      n.normalize();
+      const d = n.dot(a), key = `${n.x.toFixed(3)},${n.y.toFixed(3)},${n.z.toFixed(3)},${d.toFixed(3)}`;
+      if (!faces.has(key)) faces.set(key, { n, d, tris: [], box: new THREE.Box3() });
+      const f = faces.get(key);
+      f.tris.push([a, b, c]);
+      f.box.expandByPoint(a).expandByPoint(b).expandByPoint(c);
+    }
+    for (const f of faces.values()) f.box.expandByScalar(1e-3);
+    box.expandByScalar(1e-3);
+    return { tris, faces: [...faces.values()], box, mesh: null };
+  });
+  // inside a solid: an odd count of its faces crossed along a ray
+  const ray = new THREE.Raycaster(), dir = new THREE.Vector3(0.5773, 0.6131, 0.5391).normalize();
+  const mat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+  const inside = (pt) => S.some((s) => {
+    if (!s.box.containsPoint(pt)) return false;
+    if (!s.mesh) { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(s.tris, 3)); s.mesh = new THREE.Mesh(g, mat); }
+    ray.set(pt, dir);
+    return ray.intersectObject(s.mesh, false).length % 2 === 1;
+  });
+  // the stretches [t0, t1] of the line p0 + t u within a face
+  const within = (f, p0, u) => {
+    const spans = [], q = new THREE.Vector3(), m = new THREE.Vector3(), g = new THREE.Vector3();
+    for (const tri of f.tris) {
+      let lo = -Infinity, hi = Infinity;
+      g.copy(tri[0]).add(tri[1]).add(tri[2]).multiplyScalar(1 / 3);
+      for (let k = 0; k < 3 && lo <= hi; k++) {
+        const a = tri[k], b = tri[(k + 1) % 3];
+        m.subVectors(b, a).cross(f.n);
+        if (m.dot(q.subVectors(g, a)) < 0) m.negate();
+        const at0 = m.dot(q.subVectors(p0, a)), du = m.dot(u), tol = 1e-6 * m.length();
+        if (Math.abs(du) < 1e-12) { if (at0 < -tol) hi = -Infinity; continue; }
+        const t = (-tol - at0) / du;
+        if (du > 0) lo = Math.max(lo, t); else hi = Math.min(hi, t);
+      }
+      if (hi - lo > 1e-6) spans.push([lo, hi]);
+    }
+    spans.sort((x, y) => x[0] - y[0]);
+    const merged = [];
+    for (const sp of spans) { const l = merged[merged.length - 1]; if (l && sp[0] <= l[1] + 1e-5) l[1] = Math.max(l[1], sp[1]); else merged.push([...sp]); }
+    return merged;
+  };
+  const u = new THREE.Vector3(), p0 = new THREE.Vector3(), w = new THREE.Vector3(), pt = new THREE.Vector3(), t1 = new THREE.Vector3(), t2 = new THREE.Vector3();
+  for (let i = 0; i < S.length; i++) {
+    for (let j = i + 1; j < S.length; j++) {
+      if (!S[i].box.intersectsBox(S[j].box)) continue;
+      for (const fa of S[i].faces) {
+        for (const fb of S[j].faces) {
+          if (Math.abs(fa.n.dot(fb.n)) > 0.999 || !fa.box.intersectsBox(fb.box)) continue;
+          u.crossVectors(fa.n, fb.n);
+          const uu = u.lengthSq();
+          // a point on both planes
+          p0.copy(t1.crossVectors(fb.n, u).multiplyScalar(fa.d)).add(t2.crossVectors(u, fa.n).multiplyScalar(fb.d)).multiplyScalar(1 / uu);
+          u.normalize();
+          const A = within(fa, p0, u);
+          if (!A.length) continue;
+          const B = within(fb, p0, u);
+          for (const [a0, a1] of A) {
+            for (const [b0, b1] of B) {
+              const s0 = Math.max(a0, b0), s1 = Math.min(a1, b1);
+              if (s1 - s0 < 0.02) continue;
+              // the four sides about the line's middle, filled or not
+              const mid = pt.copy(p0).addScaledVector(u, (s0 + s1) / 2), fill = [];
+              for (const [x, y] of [[1, 1], [1, -1], [-1, -1], [-1, 1]]) fill.push(inside(w.copy(mid).addScaledVector(fa.n, x * E).addScaledVector(fb.n, y * E)));
+              const n = fill.filter(Boolean).length;
+              if (n === 1 || n === 3 || (n === 2 && fill[0] === fill[2])) {
+                const a = p0.clone().addScaledVector(u, s0), b = p0.clone().addScaledVector(u, s1);
+                out.push(a.x, a.y, a.z, b.x, b.y, b.z);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  for (const s of S) s.mesh?.geometry.dispose();
+  mat.dispose();
   return out;
 }
 
@@ -561,8 +667,9 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     if (this.freeMesh) { this.group.remove(this.freeMesh, this.freeEdges); this.freeMesh.geometry.dispose(); this.freeEdges.geometry.dispose(); this.freeMesh = this.freeEdges = null; }
     this.solids = (this.solids || []).filter((t) => !t.free);
     if (!list.length || !this.group) { this.render(); return; }
-    const o = this.origin || [0, 0, 0], all = [];
-    for (const w of list) {
+    const o = this.origin || [0, 0, 0], all = [], owner = [];
+    this.freeList = list;
+    for (const [wi, w] of list.entries()) {
       const dx = w.b[0] - w.a[0], dy = w.b[1] - w.a[1], l = Math.hypot(dx, dy) || 1, n = [-dy / l, dx / l];
       const s0 = w.off - w.t / 2, s1 = w.off + w.t / 2;
       const P = (p, s, z) => [p[0] + n[0] * s - o[0], p[1] + n[1] * s - o[1], z - o[2]];
@@ -572,14 +679,17 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       for (const [a, b, cc, d] of quads) tris.push(...c[a], ...c[b], ...c[cc], ...c[a], ...c[cc], ...c[d]);
       const arr = new Float32Array(tris);
       arr.free = true;
+      arr.wall = w.id;
       this.solids.push(arr);
       all.push(...tris);
+      for (let t = 0; t < tris.length / 9; t++) owner.push(wi);
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(all, 3));
     g.computeVertexNormals();
     this.freeMesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Partition || '#C9C2B6', side: THREE.DoubleSide, clippingPlanes: this.clipping }));
-    this.freeMesh.userData = { kind: 'freewall' };
+    g.userData.owner = owner;
+    this.freeMesh.userData = { kind: 'freewall', items: list.map((w) => ({ name: `wall:${w.id}`, id: w.id, wall: w })) };
     this.freeEdges = new THREE.LineSegments(new THREE.EdgesGeometry(g, 25), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
     this.group.add(this.freeMesh, this.freeEdges);
     this.caps?.update();
@@ -608,6 +718,10 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     const owner = this.front.geometry.userData.owner || [];
     try { kept = dropSeams(e.getAttribute('position').array, this.front.geometry.getAttribute('position').array, (t) => this.surfaces[owner[t]]?.zone, (t) => owner[t]); } catch { return e; }
     e.dispose();
+    // thick: where solids run into one another, the line they meet on
+    if (this.walls && this.walls !== 'thin' && this.solids?.length) {
+      kept = kept.concat(crossEdges(this.solids.filter((t) => !t.free)));
+    }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(kept, 3));
     return g;
@@ -829,6 +943,11 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     const door = this.doors.find((d) => d.name === name);
     if (door) return { kind: 'door', item: door, polys: [door] };
     if (m.zones[name]) return { kind: 'zone', item: m.zones[name], polys: m.zones[name].surfaces.map((n) => m.surfaces[n]) };
+    // a drawn wall standing free: its pieces' solids
+    if (String(name).startsWith('wall:')) {
+      const id = Number(name.slice(5)), tris = (this.solids || []).filter((t) => t.free && t.wall === id);
+      if (tris.length) return { kind: 'wall', item: { name, id, wall: this.freeList?.find((w) => w.id === id) }, polys: [], tris: tris.flatMap((t) => [...t]) };
+    }
     return null;
   }
 
@@ -941,14 +1060,15 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       const solids = found.polys.map((p) => this.thickOf(p));
       const flat = found.polys.filter((p, i) => !solids[i]);
       if (flat.length) h.add(new THREE.Mesh(polygonGeometry(flat, this.origin, null, found.kind === 'window' ? 0.03 : 0), new THREE.MeshBasicMaterial(tint)));
-      const tris = solids.filter(Boolean).flat();
+      const tris = [...solids.filter(Boolean).flat(), ...(found.tris || [])];
       if (tris.length) {
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.Float32BufferAttribute(tris, 3));
         h.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ ...tint, opacity: found.kind === 'window' ? 0.35 : 0.45 })));
       }
-      const edges = this.outlineOf(found.polys);
-      const eg = edges ? new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(edges, 3)) : edgeGeometry(found.polys, this.origin);
+      const edges = found.tris ? null : this.outlineOf(found.polys);
+      const eg = found.tris ? new THREE.EdgesGeometry(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(found.tris, 3)), 25)
+        : edges ? new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(edges, 3)) : edgeGeometry(found.polys, this.origin);
       h.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: SELECTED, clippingPlanes: this.clipping })));
       h.renderOrder = 2;
       this.highlight = h;
@@ -968,12 +1088,32 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, this.camera);
-    const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.shading.visible ? [this.shading] : [])];
+    const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.freeMesh ? [this.freeMesh] : []), ...(this.shading.visible ? [this.shading] : [])];
     const hits = ray.intersectObjects(targets, false).filter((h) => !this.sections.removed(h.point));
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];
     if (!hit) return null;
     const { kind, items } = hit.object.userData;
     return { kind, item: items[hit.object.geometry.userData.owner[hit.faceIndex]], point: hit.point, dir: ray.ray.direction.clone(), distance: hit.distance };
+  }
+
+  // Whether a point (view coordinates) shows, not behind the building (as cut by the clipping planes).
+  visibleAt(pt) {
+    if (!this.front) return true;
+    const ray = (this.occRay ||= new THREE.Raycaster());
+    ray.setFromCamera(new THREE.Vector2().copy(pt.clone().project(this.camera)), this.camera);
+    const d = ray.ray.origin.distanceTo(pt), targets = [this.front, this.back, this.doorMesh].filter(Boolean);
+    const hit = ray.intersectObjects(targets, false).find((h) => !this.sections.removed(h.point));
+    return !hit || hit.distance > d - 0.05;
+  }
+  // Where a ray from `from` toward `to` (view coordinates) first meets the building, or null.
+  firstHit(from, to) {
+    if (!this.front) return null;
+    const ray = (this.occRay ||= new THREE.Raycaster()), dir = to.clone().sub(from), L = dir.length();
+    ray.set(from, dir.normalize());
+    ray.far = L;
+    const hit = ray.intersectObjects([this.front, this.back, this.doorMesh].filter(Boolean), false).find((h) => !this.sections.removed(h.point));
+    ray.far = Infinity;
+    return hit ? hit.point : null;
   }
 
   pickAt(e) {

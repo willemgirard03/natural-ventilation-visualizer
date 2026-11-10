@@ -105,12 +105,12 @@ test('a storey turned on its own over the one below splits into convex slab, roo
 
 test('windows stay under the floor assembly above; Size keeps the glass as the storey changes', () => {
   const m = massing0(), ep = massingEpJSON(m);
-  // the slab over the ground floor is the floor assembly above (screed 60 + concrete 250); the roof has none
-  assert.deepEqual(m.zones.map((z) => z.slab), [0.31, 0]);
+  // the slab over the ground floor is the floor assembly above (the generic floor, 300 mm); the roof has none
+  assert.deepEqual(m.zones.map((z) => z.slab), [0.3, 0]);
   // a thicker floor above lowers the top of the walls below it
   const floor = Object.values(ep['BuildingSurface:Detailed']).find((o) => o.zone_name === massingGeometry(m)[1].name && o.surface_type === 'Floor').construction_name;
   const e = edit(ep, (tx) => { for (const n of Object.values(tx.epjson.Construction[floor])) tx.get('Material', n).thickness *= 2; applyMassing(tx, m); });
-  assert.ok(e.changed); near(m.zones[0].slab, 0.62, 1e-9);
+  assert.ok(e.changed); near(m.zones[0].slab, 0.6, 1e-9);
   // Offsets: a taller storey makes taller windows, the gap to the slab the same
   const g = m.zones[0].faces[0];
   setWindowSize(m, 0, 0, undefined, 'offset');
@@ -428,4 +428,34 @@ test('a zone keeps its name when another before it is deleted', () => {
   const name = zoneName(m, j);
   deleteZone(m, 1);
   assert.equal(zoneName(m, m.zones.length - 1), name);
+});
+
+test('drawn walls go with the faces they stand on; a zone face takes a location line; a wall end moves', async () => {
+  const { addWall, freeWalls, wallLine, setFaceLine, flipWall, moveWallEnd, deleteWall, extrudeFace } = await import('../src/model/massing.js');
+  const m = massing0();
+  // a wall drawn along the ground floor's south face (y = -5), then that face pushed out 1 m
+  addWall(m, { a: [-10, -5], b: [10, -5], base: 0, top: 1, line: 'exterior', side: -1 });
+  const k = m.zones[0].plate.findIndex((p, j) => { const q = m.zones[0].plate[(j + 1) % 4]; return p[1] === -5 && q[1] === -5; });
+  near(extrudeFace(m, 0, k, 1), 1, 1e-9);
+  assert.deepEqual(m.walls[0].a, [-10, -6]);
+  assert.equal(freeWalls(m).length, 0);
+  // a face with no drawn wall: its location line set (a wall standing on it, never free)
+  const e = (k + 1) % 4;
+  assert.equal(wallLine(m, 0, e), null);
+  setFaceLine(m, 0, e, 'centre');
+  assert.equal(wallLine(m, 0, e), 'centre');
+  setFaceLine(m, 0, e, 'exterior');
+  assert.equal(wallLine(m, 0, e), 'exterior');
+  const w = m.walls.at(-1);
+  assert.ok(w.onFace);
+  flipWall(m, w.id);
+  assert.equal(wallLine(m, 0, e), 'interior');
+  // a free wall's end moved, then the wall taken out
+  addWall(m, { a: [15, 0], b: [18, 0], base: 0, top: 1 });
+  const f = m.walls.at(-1);
+  moveWallEnd(m, f.id, 'b', [19, 2]);
+  assert.deepEqual(m.walls.at(-1).b, [19, 2]);
+  assert.equal(freeWalls(m).length, 1);
+  deleteWall(m, f.id);
+  assert.equal(freeWalls(m).length, 0);
 });

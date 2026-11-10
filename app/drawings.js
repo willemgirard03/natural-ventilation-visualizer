@@ -94,9 +94,9 @@ export function drawSVG(g, { w, h, cx, cy, s }, marks = {}) {
     const y = Y(v), on = L !== undefined && L === marks.sel, col = on ? 'var(--glass)' : 'var(--ink3)';
     if (y < -10 || y > h + 10) return;
     out += `<line x1="0" x2="${w}" y1="${y}" y2="${y}" stroke="${on ? 'var(--glass)' : 'var(--rule)'}" stroke-width="${on ? 1.4 : 0.6}" stroke-dasharray="9 3 2 3"/>`
-      + `<text x="6" y="${y - 3}" font-size="8.5" fill="${col}" font-family="var(--mono)">${esc(name)} <tspan text-decoration="underline" text-decoration-style="dotted">${fig}</tspan></text>`;
+      + `<text x="6" y="${y - 3}" font-size="8.5" fill="${col}" font-family="var(--mono)" data-lv="${L}"><tspan font-family="var(--sans)" font-weight="600" font-size="9.5" data-lvn="${L}">${esc(name)}</tspan> <tspan class="dfig" data-lv="${L}" data-fig="z">${fig}</tspan></text>`;
     const next = lvs.find((x) => x[3] === L + 1);
-    if (hgt && next) { const ym = (y + Y(next[0])) / 2; out += `<text x="6" y="${ym + 3}" font-size="8.5" fill="var(--ink3)" font-family="var(--mono)">${hgt}</text>`; }
+    if (hgt && next) { const ym = (y + Y(next[0])) / 2; out += `<text x="6" y="${ym + 3}" font-size="8.5" fill="var(--ink3)" font-family="var(--mono)" class="dfig" data-lv="${L}" data-fig="h">${hgt}</text>`; }
   });
   if (g.far.length) out += `<path d="${segs(g.far)}" fill="none" stroke="var(--ink3)" stroke-width="0.6" stroke-dasharray="1.5 2.5" opacity="0.6"/>`;
   if (g.beyond.length) out += `<path d="${segs(g.beyond)}" fill="none" stroke="var(--ink3)" stroke-width="0.7" stroke-dasharray="2 2.4" opacity="0.85"/>`;

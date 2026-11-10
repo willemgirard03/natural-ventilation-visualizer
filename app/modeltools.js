@@ -48,8 +48,9 @@ export class ModelTools {
   // the building's turn), or null; onChange(mutate, what) -> true when made; onAdded(zoneIndex).
   // keepSeams() -> whether Merge zones keeps the seams; onMessage(text) says why a merge is refused.
   // wallProps() -> { asm, base, top, line, chain } for Draw wall.
-  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {}, wallProps = () => ({}) }) {
-    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage, wallProps });
+  // wallThickness(asm) -> the assembly's thickness (m), for the wall drawn.
+  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {}, wallProps = () => ({}), wallThickness = () => 0.2 }) {
+    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage, wallProps, wallThickness });
     this.picked = [];
     this.tool = null;
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -339,12 +340,14 @@ export class ModelTools {
   }
   // The point a wall would take: snapped to walls' (and zones' edges') ends and middles, square onto one
   // from the start, along one it crosses; with Shift, held to 45° steps from the start.
-  wallSnap(m, raw, e, base, top) {
+  // start: where the wall starts (the snaps square onto a wall from it, and Shift steps from it); skip:
+  // a wall not to snap to (the one whose end is dragged)
+  wallSnap(m, raw, e, base, top, start = this.wall?.start, skip = null) {
     const z = m.levels[base].z, P = (p) => this.P([p[0], p[1], z]), d = (p, q) => { const a = P(p), b = P(q); return Math.hypot(a[0] - b[0], a[1] - b[1]); };
     const lvz = (L) => m.levels[L].z, over = (x) => Math.min(lvz(x.top), lvz(top)) - Math.max(lvz(x.base), lvz(base)) > 1e-6;
-    const segs = [...(m.walls || []).filter(over).map((w) => [w.a, w.b])];
+    const segs = [...(m.walls || []).filter((w) => w.id !== skip && over(w)).map((w) => [w.a, w.b])];
     for (const zz of m.zones) if (over(zz)) zz.plate.forEach((p, k) => segs.push([p, zz.plate[(k + 1) % zz.plate.length]]));
-    const start = this.wall.start, foot = (p, [a, b]) => { const ab = [b[0] - a[0], b[1] - a[1]], l2 = ab[0] ** 2 + ab[1] ** 2 || 1, t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2; return [t, [a[0] + ab[0] * t, a[1] + ab[1] * t]]; };
+    const foot = (p, [a, b]) => { const ab = [b[0] - a[0], b[1] - a[1]], l2 = ab[0] ** 2 + ab[1] ** 2 || 1, t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2; return [t, [a[0] + ab[0] * t, a[1] + ab[1] * t]]; };
     if (e.shiftKey && start) {
       const ang = Math.round(Math.atan2(raw[1] - start[1], raw[0] - start[0]) / (Math.PI / 4)) * (Math.PI / 4), u = [Math.cos(ang), Math.sin(ang)];
       const t = (raw[0] - start[0]) * u[0] + (raw[1] - start[1]) * u[1];
@@ -371,6 +374,13 @@ export class ModelTools {
     }
     return best ? { p: best.p, kind: best.kind } : { p: raw, kind: null };
   }
+  // A drawn wall's end dragged (a plan view's ctx, or null for 3D): the point it snaps to, as Draw wall's
+  // end does from the wall's other end. { p, kind }
+  snapEnd(ctx, e, m, raw, w, other) {
+    const keep = this.ctx;
+    this.ctx = ctx;
+    try { return this.wallSnap(m, raw, e, w.base, w.top, other, w.id); } finally { this.ctx = keep; }
+  }
   // the snap's mark: a square at an end, a triangle at a middle, a square-to mark, a cross on a wall
   snapMark(q, kind) {
     const [x, y] = q, o = { stroke: 'var(--sun)', w: 1.6 };
@@ -393,9 +403,18 @@ export class ModelTools {
         let g = this.snapMark(at, kind);
         if (s0) {
           const len = Math.hypot(p[0] - s0[0], p[1] - s0[1]), ang = (Math.atan2(p[1] - s0[1], p[0] - s0[0]) * 180) / Math.PI;
-          g += this.box([s0, p], z0, z1, true);
+          // the wall as it will stand: its footprint at its assembly's thickness, to the side its
+          // location line puts it, and up to its top level
+          if (len > 0.01) {
+            const u = [(p[0] - s0[0]) / len, (p[1] - s0[1]) / len], n = [-u[1], u[0]], t = this.wallThickness(pr.asm) || 0.2, side = this.wall.side;
+            const off = pr.line === 'exterior' ? -side * t / 2 : pr.line === 'interior' ? side * t / 2 : 0, lo = off - t / 2, hi = off + t / 2;
+            const C = [[s0, lo], [p, lo], [p, hi], [s0, hi]].map(([q, k]) => [q[0] + n[0] * k, q[1] + n[1] * k]);
+            g += poly(C.map((q) => this.P([q[0], q[1], z1])), { fill: 'var(--glass)', op: 0.18 });
+            g += poly(C.map((q) => this.P([q[0], q[1], z0])), { fill: 'var(--glass)', op: 0.12 });
+            g += this.box(C, z0, z1, false);
+          }
           const a = this.P([s0[0], s0[1], z0]);
-          g += line(a[0], a[1], at[0], at[1], { stroke: 'var(--glass)', w: 2.2 });
+          g += line(a[0], a[1], at[0], at[1], { stroke: 'var(--glass)', w: 1.2, dash: '6 3' });
           // the side the exterior finish is drawn on, as a short tick off the line's middle
           if (pr.line !== 'centre' && len > 0.05) {
             const u = [(p[0] - s0[0]) / len, (p[1] - s0[1]) / len], side = this.wall.side, n = [-u[1] * side, u[0] * side], mid = [(s0[0] + p[0]) / 2, (s0[1] + p[1]) / 2];

@@ -1,7 +1,8 @@
 // The Zones window (Model ▸ Zones): every zone of the model, and the settings of the one picked, in the
 // order ClimateStudio sets a zone (its Space use, its Construction, its windows):
-//  - the zones listed with their floor area; for a massing, the levels each stands on and reaches, and
-//    their windows; a zone picked here is selected in the views too;
+//  - the zones listed by the level they stand on, with their floor area; for a massing, the levels each
+//    stands on and reaches, and their windows; a zone picked (anywhere on its row) is selected in the
+//    views too;
 //  - the picked zone's space use and ventilation, and its assemblies by surface class (zoneExtra, from
 //    the app: the same rows as its pop-up);
 //  - for a massing, its windows face by face (the facade-windows skill's array settings).
@@ -40,12 +41,15 @@ export function massingPanel(box, { get, model = () => null, change, zoneExtra =
 
   // a model opened from a file: its zones and the settings of the one picked
   function modelZones(mod) {
-    const names = Object.keys(mod.zones);
-    if (!names.includes(picked)) picked = names[0];
-    let h = '<table class="libtable mstable"><thead><tr><th title="Click a zone for its settings">Zone</th><th class="num">Floor<span class="unit"> m²</span></th><th class="num">Volume<span class="unit"> m³</span></th></tr></thead><tbody>';
-    for (const n of names) {
+    // by the height each stands at: its floor's lowest point
+    const base = (n) => { let lo = Infinity; for (const s of mod.zones[n].surfaces || []) for (const v of mod.surfaces[s]?.vertices || []) lo = Math.min(lo, v[2]); return Number.isFinite(lo) ? +lo.toFixed(2) : 0; };
+    const names = Object.keys(mod.zones).map((n) => [n, base(n)]).sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0], undefined, { numeric: true }));
+    if (!names.some(([n]) => n === picked)) picked = names[0]?.[0];
+    let h = '<table class="libtable mstable"><thead><tr><th title="Click a zone for its settings">Zone</th><th class="num">Floor<span class="unit"> m²</span></th><th class="num">Volume<span class="unit"> m³</span></th></tr></thead><tbody>', at = null;
+    for (const [n, z0] of names) {
       const z = mod.zones[n];
-      h += `<tr class="${n === picked ? 'on' : ''}"><td><button type="button" class="linkbtn" data-act="pickname" data-v="${esc(n)}">${esc(n)}</button></td><td class="num">${fmt(z.floorArea.value, 1)}</td><td class="num">${fmt(z.volume.value, 0)}</td></tr>`;
+      if (z0 !== at) { at = z0; h += `<tr class="mslevel"><th colspan="3">Floor at ${fmt(z0)} m</th></tr>`; }
+      h += `<tr class="${n === picked ? 'on' : ''}" data-act="pickname" data-v="${esc(n)}" title="Its settings; selected in the views"><td>${esc(n)}</td><td class="num">${fmt(z.floorArea.value, 1)}</td><td class="num">${fmt(z.volume.value, 0)}</td></tr>`;
     }
     return h + '</tbody></table>' + (picked ? `<div class="msub">${esc(picked)}</div>${settings(picked)}` : '');
   }
@@ -61,8 +65,13 @@ export function massingPanel(box, { get, model = () => null, change, zoneExtra =
       + `<span class="tipped" title="The whole building turned clockwise in plan">Turn</span> ${num('rot', 'rot', m.rot || 0, 'Degrees clockwise', -Infinity, 1)}°</div>`;
     h += '<table class="libtable mstable"><thead><tr><th title="Click a zone for its settings">Zone</th><th title="The level it stands on">Base</th><th title="The level its roof reaches">Top</th>'
       + '<th class="num" title="Its floor area">Area<span class="unit"> m²</span></th><th class="num" title="Its windows, all faces">Windows</th><th></th></tr></thead><tbody>';
-    m.zones.forEach((x, i) => {
-      h += `<tr class="${i === sel ? 'on' : ''}" data-zn="${i}"><td><button type="button" class="linkbtn" data-act="pick" data-v="${i}" title="Its settings; selected in the views">${zoneLabel(i)}</button></td>`
+    // by the level each stands on
+    const order = m.zones.map((x, i) => i).sort((a, b) => m.zones[a].base - m.zones[b].base || a - b);
+    let at = null;
+    order.forEach((i) => {
+      const x = m.zones[i];
+      if (x.base !== at) { at = x.base; h += `<tr class="mslevel"><th colspan="6">${lvName(m, x.base)}</th></tr>`; }
+      h += `<tr class="${i === sel ? 'on' : ''}" data-zn="${i}" data-act="pick" data-v="${i}" title="Its settings; selected in the views"><td>${zoneLabel(i)}</td>`
         + `<td><select class="popsel" data-act="zone-base">${lvOpts(m, x.base, 0, x.top - 1)}</select></td><td><select class="popsel" data-act="zone-top">${lvOpts(m, x.top, x.base + 1)}</select></td>`
         + `<td class="num">${fmt(Math.abs(polyArea(x.plate)), 1)}</td><td class="num">${made[i].windows.length}</td>`
         + `<td>${m.zones.length > 1 ? `<button type="button" class="pbtn x" data-act="del" data-v="${i}" title="Remove this zone">×</button>` : ''}</td></tr>`;
@@ -152,8 +161,9 @@ export function massingPanel(box, { get, model = () => null, change, zoneExtra =
     }
   });
   box.addEventListener('click', (e) => {
+    if (e.target.closest('input, select')) return;
     const b = e.target.closest('[data-act], [data-pop]');
-    if (!b || b.matches('input, select') || b.disabled || b.closest('.zset')) return;
+    if (!b || b.disabled || b.closest('.zset')) return;
     if (b.dataset.pop === 'close') { box.hidden = true; return; }
     const act = b.dataset.act, i = Number(b.dataset.v), m = get();
     if (act === 'pick') { sel = i; face = 0; render(); const n = m && massingGeometry(m)[i]?.name; if (n) onPick(n); }

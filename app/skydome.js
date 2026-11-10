@@ -232,7 +232,9 @@ export class SkyDome {
       if (this.sunLabels && mid && mid[2] > 0) tag(mid, `${MONTHS[m - 1]} ${d} path`, { size: 8.5, fill: 'var(--sun)' });
       const sun = this.sunAt();
       if (sun.alt > 0) {
-        const q = P(sun.v.map((x) => x * R)), o = P([0, 0, 0]);
+        // the ray stops where it meets the building
+        const sw = new THREE.Vector3(...sun.v.map((x) => x * R)).applyMatrix4(this.group.matrixWorld), ow = new THREE.Vector3(0, 0, 0).applyMatrix4(this.group.matrixWorld);
+        const hit = this.view.firstHit?.(sw, ow), q = P(sun.v.map((x) => x * R)), o = hit ? (() => { const v = this.view.sections.screen(hit); return [v.x, v.y]; })() : P([0, 0, 0]);
         if (q && o) {
           const L = Math.hypot(o[0] - q[0], o[1] - q[1]) || 1, u = [(o[0] - q[0]) / L, (o[1] - q[1]) / L];
           out.push(line(q[0], q[1], o[0] - u[0] * 2, o[1] - u[1] * 2, { stroke: 'var(--sun)', w: 1.1 }), head(o[0], o[1], u[0], u[1], 'var(--sun)', 7, 3));
@@ -249,10 +251,26 @@ export class SkyDome {
       const M = (p) => { const q = this.view.sections.screen(new THREE.Vector3(...p)); return [q.x, q.y]; };
       const k = M([0, R, 0]), tip = M([0, R * 0.97, 0]), o = M([0, 0, 0]), from = M([0, R * 0.45, 0]);
       const L = Math.hypot(tip[0] - o[0], tip[1] - o[1]) || 1, u = [(tip[0] - o[0]) / L, (tip[1] - o[1]) / L];
-      out.push(line(o[0], o[1], tip[0] - u[0] * 6, tip[1] - u[1] * 6, { stroke: 'var(--glass)', w: 1.3 }), head(tip[0], tip[1], u[0], u[1], 'var(--glass)', 8, 3.5));
-      out.push(circle(k[0], k[1], 6, { fill: 'var(--panel)', stroke: 'var(--glass)', 'stroke-width': 1.6 }), circle(k[0], k[1], 2.4, { fill: 'var(--glass)' }));
-      out.push(label(k[0], k[1] - 13, `north axis ${Math.round(this.drag?.north ?? s.north)}°`, { size: 9, edit: 'north' }));
-      this.marks.knob = k; this.marks.arrow = [from, k];
+      // the arrow only where the building does not stand in front of it
+      const seen = (y) => this.view.visibleAt?.(new THREE.Vector3(0, y, 0)) ?? true, N = 40, end = R * 0.97 - (6 / L) * R * 0.97;
+      let run = null;
+      for (let i = 0; i <= N; i++) {
+        const y = (end * i) / N, v = seen(y);
+        if (v && run === null) run = y;
+        if ((!v || i === N) && run !== null) {
+          const a = M([0, run, 0]), b = M([0, v ? y : (end * (i - 1)) / N, 0]);
+          out.push(line(a[0], a[1], b[0], b[1], { stroke: 'var(--glass)', w: 1.3 }));
+          run = null;
+        }
+      }
+      const tipSeen = seen(R * 0.97), knobSeen = seen(R);
+      if (tipSeen) out.push(head(tip[0], tip[1], u[0], u[1], 'var(--glass)', 8, 3.5));
+      if (knobSeen) {
+        out.push(circle(k[0], k[1], 6, { fill: 'var(--panel)', stroke: 'var(--glass)', 'stroke-width': 1.6 }), circle(k[0], k[1], 2.4, { fill: 'var(--glass)' }));
+        out.push(label(k[0], k[1] - 13, `north axis ${Math.round(this.drag?.north ?? s.north)}°`, { size: 9, edit: 'north' }));
+        this.marks.knob = k;
+      }
+      this.marks.arrow = [from, k];
     }
     const html = out.join('');
     if (this.html !== html) this.svg.innerHTML = this.html = html; // only when it changed

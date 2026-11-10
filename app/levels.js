@@ -7,8 +7,9 @@
 //    put in above or below, the storey moved up or down, Remove storey; and the level's name.
 //  - A selected level dragged up or down moves that level alone (the storeys either side change height),
 //    by 50 mm steps (10 mm with Shift).
-//  - The elevation and the storey height are typed over: a click on either asks for the figure. The
-//    elevation moves the level alone; the height moves every level above.
+//  - The elevation and the storey height are typed over in place: a click on either. The elevation moves
+//    the level alone; the height moves every level above.
+//  - The pop-up is dragged by its title; it then stays where it was put while the level stays picked.
 // Levels belong to a massing (src/model/massing.js); every change goes through change(mutate, what).
 
 import * as THREE from 'three';
@@ -84,6 +85,15 @@ export class LevelEdits {
       this.render();
     });
     this.pop.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur?.(); e.stopPropagation(); });
+    // dragged by its title: it stays there while the same level is picked
+    this.pop.addEventListener('pointerdown', (e) => {
+      if (!e.target.closest('.pophd') || e.target.closest('button') || e.button !== 0) return;
+      e.preventDefault();
+      const r = this.pop.getBoundingClientRect(), x0 = e.clientX - r.left, y0 = e.clientY - r.top;
+      const move = (m) => { this.pinned = true; Object.assign(this.pop.style, { left: `${m.clientX - x0}px`, top: `${m.clientY - y0}px` }); };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', () => window.removeEventListener('pointermove', move), { once: true });
+    });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.selected !== null && !e.target.closest?.('input')) { this.select(null); } });
   }
   setElevation(L, z) { if (Number.isFinite(z) && L > 0) this.change((x) => moveLevel(x, L, z - x.levels[L].z, false), `${lvName(this.massing(), L)} moved to ${fmt(z)} m`); }
@@ -97,8 +107,9 @@ export class LevelEdits {
   }
   // The level picked (null: none), its pop-up opened at the point (client px) given.
   select(L, at = this.at) {
-    const m = this.massing();
+    const m = this.massing(), was = this.selected;
     this.selected = m && L !== null && L >= 0 && L < m.levels.length ? L : null;
+    if (this.selected !== was) this.pinned = false;
     this.at = at;
     this.render();
     this.onSelect(this.selected);
@@ -107,7 +118,7 @@ export class LevelEdits {
     const m = this.massing(), L = this.selected;
     if (!m || L === null) { this.pop.hidden = true; return; }
     const next = m.levels[L + 1];
-    this.pop.innerHTML = `<div class="pophd"><span class="popttl">Level</span><span class="popbtns"><button type="button" data-lvclose title="Close; Esc lets go of the level">×</button></span></div>`
+    this.pop.innerHTML = `<div class="pophd" title="Drag to move"><span class="popttl">Level</span><span class="popbtns"><button type="button" data-lvclose title="Close; Esc lets go of the level">×</button></span></div>`
       + (this.note ? `<div class="poprow error-text">${esc(this.note)}</div>` : '')
       + `<div class="poprow"><input class="libname short" data-lvf="name" value="${esc(lvName(m, L))}" title="Its name"></div>`
       + `<div class="poprow"><span class="tipped" title="Its height above the ground level: typed, this level alone moves">Elevation</span> ${L ? `<input class="popnum" data-lvf="z" value="${fmt(m.levels[L].z)}"> m` : '0.00 m'}</div>`
@@ -115,6 +126,7 @@ export class LevelEdits {
       + `<div class="msub">${next ? 'Storey on it' : 'The top level'}</div>` + storeyRows(m, L);
     this.note = null;
     this.pop.hidden = false;
+    if (this.pinned) return;
     const [x, y] = this.at || [innerWidth / 2, innerHeight / 2], w = this.pop.offsetWidth, h = this.pop.offsetHeight;
     Object.assign(this.pop.style, { left: `${Math.max(8, Math.min(x + 16, innerWidth - w - 8))}px`, top: `${Math.max(8, Math.min(y - h / 2, innerHeight - h - 8))}px` });
   }

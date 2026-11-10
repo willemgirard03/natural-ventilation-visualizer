@@ -357,7 +357,7 @@ export const GENERIC_ASSEMBLIES = {
   exposed: ['Generic Exposed Floor', ['Unspecified exposed floor 300mm']],
   partition: ['Generic Interior Wall', ['Unspecified partition 150mm']],
 };
-const MASSING_ASSEMBLIES_SLAB_T = MASSING_ASSEMBLIES.slab[1].reduce((t, n) => t + MATERIALS[n][0], 0);
+const MASSING_ASSEMBLIES_SLAB_T = GENERIC_ASSEMBLIES.slab[1].reduce((t, n) => t + UNSPECIFIED[n][0], 0);
 export const MASSING_GLAZING = ['Massing Double Glazing', { u_factor: 1.4, solar_heat_gain_coefficient: 0.4, visible_transmittance: 0.6 }];
 
 // Office day profiles, hour by hour (public DOE prototype office shape).
@@ -483,8 +483,9 @@ export function massingEpJSON(m, { weather = null, runPeriod = null, ep: from = 
   ep['WindowMaterial:SimpleGlazingSystem'][MASSING_GLAZING[0]] = { ...MASSING_GLAZING[1] };
   construction(MASSING_GLAZING[0], [MASSING_GLAZING[0]]);
 
-  // a zone enclosed by drawn walls takes the generic assemblies; a wall on a drawn wall, that wall's
-  const asmOf = (zone) => (kind) => ((m.zones[zone.zone]?.generic ? GENERIC_ASSEMBLIES : MASSING_ASSEMBLIES)[kind][0]);
+  // every zone takes the generic assemblies (of an unspecified material, until set); a wall on a drawn
+  // wall, that wall's
+  const asmOf = () => (kind) => GENERIC_ASSEMBLIES[kind][0];
   for (const zone of zones) {
     const asm0 = asmOf(zone);
     const asm = (kind, s) => {
@@ -1009,7 +1010,7 @@ function extrudeRaw(m, i, k, d) {
   z.plate = plate;
   z.faces = ring.map(([, f]) => f);
   if (z.cells) delete z.cells;
-  return true;
+  return { d }; // as far as it went (it may have snapped flush)
 }
 // An outline that may stand: as counterclockwise as the one it replaces, each face at least EDGE_MIN,
 // and simple (polygon-clipping finds it one piece of the same area: it does not cross itself).
@@ -1088,10 +1089,15 @@ function limited(m, i, x, act) {
   }
   if (!best) return Array.isArray(x) ? [0, 0] : 0;
   m.levels = best.levels; m.zones = best.zones;
+  if (best.walls) m.walls = best.walls;
   return scale(bt);
 }
 // The pushed face, as far as it may go. Returns the distance taken.
-export function extrudeFace(m, i, k, d) { return limited(m, i, d, (x, v) => extrudeRaw(x, i, k, v)); }
+// The drawn walls on the face go with it, unless another zone shares the face (they stay with that one).
+export function extrudeFace(m, i, k, d) {
+  const ws = sharingFaces(m, i, k).length ? [] : wallsOn(m, i, k), N = faceAxes(m, i, k).n;
+  return limited(m, i, d, (x, v) => { const r = extrudeRaw(x, i, k, v); if (r === false) return false; shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]); });
+}
 
 // The faces of other zones that share face k of zone i: in line with it, facing the other way, along
 // some of its length, on levels it stands on too. [[zone, face], ...]
@@ -1119,7 +1125,12 @@ export function sharingFaces(m, i, k) {
 export function pushWall(m, i, k, d) {
   const share = sharingFaces(m, i, k);
   if (!share.length) return extrudeFace(m, i, k, d);
-  return limited(m, [i, ...share.map(([j]) => j)], d, (x, v) => extrudeRaw(x, i, k, v) !== false && share.every(([j, q]) => extrudeRaw(x, j, q, -v) !== false));
+  const ws = wallsOn(m, i, k), N = faceAxes(m, i, k).n;
+  return limited(m, [i, ...share.map(([j]) => j)], d, (x, v) => {
+    const r = extrudeRaw(x, i, k, v);
+    if (r === false || !share.every(([j, q]) => extrudeRaw(x, j, q, -r.d) !== false)) return false;
+    shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]);
+  });
 }
 
 // A seam (corner v of zone i, between two faces in line) slid along them by du m: one face longer, the
@@ -1392,10 +1403,13 @@ export function moveStorey(m, i, axis, dist) {
 }
 // Zone i moved by [dx, dy] in plan (the building's axes before its turn), as far as it may go.
 export function moveZone(m, i, d) {
+  // the drawn walls on its faces go with it, but for those on a face another zone shares
+  const ws = [...new Set(m.zones[i].plate.flatMap((_, k) => (sharingFaces(m, i, k).length ? [] : wallsOn(m, i, k))))];
   return limited(m, i, d, (x, [dx, dy]) => {
     const z = x.zones[i], move = (P) => P.map(([px, py]) => [R6(px + dx), R6(py + dy)]);
     z.plate = move(z.plate);
     if (z.cells) z.cells = z.cells.map(move);
+    shiftWalls(x, ws, [dx, dy]);
   });
 }
 
@@ -1461,10 +1475,49 @@ export function wallLine(m, i, k) {
   if (w.line === 'exterior') return outIsExterior ? 'exterior' : 'interior';
   return outIsExterior ? 'interior' : 'exterior';
 }
+// The drawn walls (their indices) on face k of zone i: in line with it, along some of it, on its levels.
+export function wallsOn(m, i, k) {
+  const z = m.zones[i], P = z?.plate;
+  if (!P || !m.walls?.length) return [];
+  const a = P[k], b = P[(k + 1) % P.length], out = [];
+  m.walls.forEach((w, j) => {
+    if (!levelsOverlap(m, w, z)) return;
+    const [ta, oa] = along(w.a, a, b), [tb, ob] = along(w.b, a, b);
+    if (Math.abs(oa) > 0.01 || Math.abs(ob) > 0.01) return;
+    if (Math.min(1, Math.max(ta, tb)) - Math.max(0, Math.min(ta, tb)) > 1e-4) out.push(j);
+  });
+  return out;
+}
+function shiftWalls(m, ids, [dx, dy]) {
+  for (const j of ids) { const w = m.walls?.[j]; if (w) { w.a = [R6(w.a[0] + dx), R6(w.a[1] + dy)]; w.b = [R6(w.b[0] + dx), R6(w.b[1] + dy)]; } }
+}
+// Where face k of zone i sits in its wall's thickness, set: 'centre', 'exterior' (at the exterior
+// finish: the wall's body inside the zone) or 'interior'. A face with no drawn wall gets one standing on
+// it (onFace: it never stands free, and takes the face's own assembly).
+export function setFaceLine(m, i, k, line) {
+  const z = m.zones[i], P = z.plate, a = P[k], b = P[(k + 1) % P.length], w = wallFor(m, i, k);
+  if (!w) { m.walls ||= []; m.walls.push({ id: nextWallId(m), a: [...a], b: [...b], base: z.base, top: z.top, asm: null, line, side: -1, onFace: true }); return; }
+  if (line === 'centre') { w.line = 'centre'; return; }
+  // the line asked for is the face's own: turned to the wall's, whose exterior side may be the zone's inside
+  const d = sub2(b, a), out = [d[1], -d[0]], wd = sub2(w.b, w.a), left = [-wd[1], wd[0]];
+  const outIsExterior = Math.sign(dot2(out, left)) === Math.sign(w.side || 1);
+  w.line = outIsExterior ? line : line === 'exterior' ? 'interior' : 'exterior';
+}
+// A drawn wall's exterior side turned to the other side.
+export function flipWall(m, id) { const w = m.walls?.find((x) => x.id === id); if (w) w.side = -(w.side || 1); }
+// A drawn wall's end ('a' or 'b') moved to p (plan, the building's axes); a space it now closes is made a zone.
+export function moveWallEnd(m, id, end, p) {
+  const w = m.walls?.find((x) => x.id === id);
+  if (!w || len2(sub2(end === 'a' ? w.b : w.a, p)) < 0.05) return false;
+  w[end] = p.map(R6);
+  enclose(m, w.base, w.top);
+}
+export function deleteWall(m, id) { if (m.walls) m.walls = m.walls.filter((w) => w.id !== id); }
 // The parts of drawn walls on no zone's face: they stand free. [{ ...wall, a, b }]
 export function freeWalls(m) {
   const out = [];
   for (const w of m.walls || []) {
+    if (w.onFace) continue;
     let spans = [[0, 1]];
     for (const z of m.zones) {
       if (!levelsOverlap(m, w, z)) continue;

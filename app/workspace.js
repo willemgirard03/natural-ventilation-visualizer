@@ -94,6 +94,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
           : ['Section', '<p>The building cut by a clipping plane, seen from the side the plane removes. What the cut passes through is hatched (floors and roofs solid); what lies beyond is dotted, finer further away. The levels are marked.</p><p>Wheel: zoom; right drag (or middle): pan; double click: fit.</p>'],
       });
       Object.assign(this, shell, { pin, cam: null, geo: null, at: -1, key: '' });
+      this.type ??= type;
       this.el.dataset.pin = pin ?? '';
       // the modelling tools, on a second row of the bar (plans only)
       if (toolsHTML) this.bar.insertAdjacentHTML('beforeend', `<div class="vbarrow vtools mtools">${toolsHTML}</div>`);
@@ -112,9 +113,19 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       new ResizeObserver(() => this.paint()).observe(this.host);
       drawings.add(this);
       this.options();
+      this.follow();
       settle(this);
     }
     get item() { return views().find((v) => v.id === this.pin) || null; }
+    // its kind, its editor and its bar follow the view it shows (a view kept from before, its id now
+    // another kind's)
+    follow() {
+      const v = this.item;
+      if (!v || v.kind === this.type) return;
+      this.el.dataset.type = this.type = v.kind;
+      this.setEditor();
+      this.options();
+    }
     show(id) {
       this.pin = id; this.el.dataset.pin = id ?? ''; this.cam = null; this.at = -1;
       const v = this.item;
@@ -188,7 +199,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
         const none = !views().some((x) => x.kind === this.type);
         this.host.querySelector('svg.dwg')?.remove();
         this.ov.innerHTML = ''; this.tv.innerHTML = '';
-        this.empty(none ? (this.type === 'plan' ? 'No plan views yet: create one from the View tab (Plan at level), or from a plan clipping plane\'s pop-up.' : 'No section views yet: create one from a section clipping plane\'s pop-up.') : 'Pick a view from the name in the bar.');
+        this.empty(none ? (this.type === 'plan' ? 'No plan views yet: make one with Create plan on the View tab.' : 'No section views yet: add a clipping plane, then make one with Create section on the View tab.') : 'Pick a view from the name in the bar.');
         this.foot.innerHTML = '';
         return;
       }
@@ -263,16 +274,15 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
   // the storey height between two levels) clicked is typed over.
   class SectionLevels {
     constructor(d) { this.d = d; this.kind = 'section'; }
+    // what is under the pointer: a level's figure (its elevation or its storey's height), its name, or
+    // its line
     near(e) {
-      const d = this.d, r = d.host.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
-      for (const [v, name, fig, L, hgt] of d.marks?.levels || []) {
-        const Y = d.toPx(0, v)[1];
-        if (Math.abs(y - Y) < 6) return { L, fig: x > 6 + (name.length + 1) * 5 && x < 6 + (name.length + 1 + fig.length) * 5.4 + 6 };
-        if (hgt && x < 6 + hgt.length * 5.4 + 6) {
-          const next = d.marks.levels.find((m) => m[3] === L + 1);
-          if (next && Math.abs(y - (Y + d.toPx(0, next[0])[1]) / 2) < 7) return { L, height: true };
-        }
-      }
+      const d = this.d, r = d.host.getBoundingClientRect(), y = e.clientY - r.top;
+      const under = document.elementsFromPoint(e.clientX, e.clientY).filter((x) => d.host.contains(x));
+      const f = under.find((x) => x.dataset?.fig), n = under.find((x) => x.dataset?.lvn !== undefined);
+      if (f) return { L: Number(f.dataset.lv), fig: f.dataset.fig === 'z', height: f.dataset.fig === 'h', el: f };
+      if (n) return { L: Number(n.dataset.lvn) };
+      for (const [v, , , L] of d.marks?.levels || []) if (Math.abs(y - d.toPx(0, v)[1]) < 6) return { L };
       return null;
     }
     move(e) {
@@ -286,13 +296,15 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
         return;
       }
       const n = this.near(e);
-      this.d.host.style.cursor = n ? (n.fig || n.height ? 'text' : 'ns-resize') : '';
+      this.d.host.style.cursor = n ? (n.fig || n.height ? 'text' : n.L === levelsRef?.selected && n.L > 0 ? 'ns-resize' : 'default') : '';
     }
     down(e) {
       const n = this.near(e);
       if (!n || !levelsRef) return;
-      if (n.height) { levelsRef.ask(e, n.L, 'h'); return; }
-      if (n.fig && n.L > 0) { levelsRef.ask(e, n.L, 'z'); return; }
+      // a figure typed over in place
+      const at = { clientX: e.clientX, clientY: e.clientY, target: n.el };
+      if (n.height) { levelsRef.ask(at, n.L, 'h'); return; }
+      if (n.fig && n.L > 0) { levelsRef.ask(at, n.L, 'z'); return; }
       this.drag = { L: n.L, y0: e.clientY, moved: false };
       this.d.host.setPointerCapture?.(e.pointerId);
     }

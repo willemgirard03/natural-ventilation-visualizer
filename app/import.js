@@ -28,10 +28,12 @@ import {
 } from '../src/model/edit.js';
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
+import { WallEnds3D } from './wallends.js';
 import {
   massing0, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
   setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch, wallLine, freeWalls,
+  WALL_LINES, setFaceLine, flipWall, deleteWall,
 } from '../src/model/massing.js';
 import { PRESETS, SIZES } from '../src/model/windows.js';
 import { massingPanel } from './massing-panel.js';
@@ -205,8 +207,8 @@ const sky = new SkyDome(view, {
     if (!applyEdit((tx) => { tx.get('Building', name).north_axis = deg; }, `north axis set to ${deg}°`, { geometry: true })) updateSky();
   },
 });
-let levelMarks = null; // the levels' markers in 3D, made with the views below
-view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); tools.beforeRender(); levelMarks?.draw(); };
+let levelMarks = null, wallEnds = null; // the levels' markers and a free wall's ends in 3D, made with the views below
+view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); tools.beforeRender(); levelMarks?.draw(); wallEnds?.draw(); };
 // The modelling tools (app/modeltools.js): Add zone and Split zone, in the view's bar for a massing.
 const tools = new ModelTools(view, {
   massing: () => massing,
@@ -226,6 +228,7 @@ const tools = new ModelTools(view, {
   onChange: (mutate, what) => massingChange(mutate, what),
   onAdded: (j) => { const z = massingGeometry(massing)[j]; if (z && model.zones[z.name]) view.select(z.name); },
   keepSeams: () => $('keep-seams').checked,
+  wallThickness: (asm) => asmThickness(asm),
   wallProps: () => ({ asm: $('wall-asm').value, base: Number($('wall-base').value), top: Number($('wall-top').value), line: $('wall-line').value, chain: $('wall-chain').checked }),
   onTool: (tool) => {
     for (const b of document.querySelectorAll('.mtools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
@@ -690,14 +693,6 @@ view.sections.onSelect = (p) => {
   if (p) { const c = view.sections.screen(view.sections.centre(p)); view.lastPick = [c.x, c.y]; view.select(null); showInfo({ kind: 'plane', item: p }); }
   else if ($('info').dataset.kind === 'plane') showInfo(current());
 };
-// Section | Plan: what the Clipping plane button places
-for (const k of document.querySelectorAll('#clip-kind [data-clip]')) {
-  k.addEventListener('click', () => {
-    for (const x of document.querySelectorAll('#clip-kind [data-clip]')) x.setAttribute('aria-pressed', String(x === k));
-    document.querySelector('[data-add]').dataset.add = k.dataset.clip;
-    if (view.sections.placing) view.sections.startPlacing(k.dataset.clip, false);
-  });
-}
 for (const b of document.querySelectorAll('[data-add]')) {
   b.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !model) return;
@@ -961,7 +956,8 @@ async function loadText(name, read) {
     $('export').disabled = true;
     return;
   }
-  $('status').textContent = name;
+  $('status').textContent = '';
+  document.title = `${name} · Natural Ventilation Visualizer`;
   $('export').disabled = false;
   render(model);
 }
@@ -1089,6 +1085,7 @@ function popContent(kind, item) {
     if (item.adjacentZone) rows.push(`Shared with zone ${esc(item.adjacentZone)}`);
     { const ms = massingSide(kind, item); if (ms) rows.push(...sideRows(ms)); }
     rows.push(...assemblyRows(item));
+    rows.push(...faceLineRows(item));
   } else if (kind === 'window') {
     const r = windowRect(model, item.name), floor = model.zones[item.zone].bottom;
     title = `Window · ${dirWord(item.azimuth)} · level ${levelOf(item) + 1}`;
@@ -1099,6 +1096,11 @@ function popContent(kind, item) {
     if (ms) title = `Window ${ms.index + 1} of ${ms.n}`;
     if (r) rows.push(`<button class="pbtn${winEdit.name === item.name ? ' on' : ''}" data-act="winedit" title="${winEdit.name === item.name ? 'Back to the building: the handles go (Esc)' : 'Its sill, head and jambs get handles in the view to push or pull; drag the glass to move it across its wall; click a handle or a figure to type it'}">${winEdit.name === item.name ? 'Done' : 'Edit window in 3D'}</button>`);
     if (ms) rows.push(...sideRows(ms, winEdit.name === item.name));
+  } else if (kind === 'wall') {
+    const w = massing?.walls?.find((x) => x.id === item.id);
+    if (!w) return { title: 'Wall', rows: [] };
+    title = `Wall · ${esc(w.asm || 'Generic Exterior Wall')}`;
+    rows.push(...freeWallRows(w));
   } else if (kind === 'door') {
     title = 'Door';
     rows.push(`Between ${esc(item.zone)} and ${esc(item.partnerZone)}`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m`,
@@ -1137,7 +1139,7 @@ function planeRows(p) {
   const a = p.air, opt = (list, now) => list.map(([v, l]) => `<option value="${v}"${v === now ? ' selected' : ''}>${l}</option>`).join('');
   const fields = [['', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂']];
   const made = namedViews().filter((v) => v.plane === p.id), kindWord = p.kind === 'plan' ? 'plan' : 'section';
-  const suggest = p.kind === 'plan' ? `Plan at ${fmt(p.o.z + (view.origin?.[2] || 0), 2)} m` : `Section ${namedViews().filter((v) => v.kind === 'section').length + 1}`;
+  const suggest = planeViewName(p);
   return [
     ...made.map((v) => `<span class="popkv"><span class="tipped" title="A ${v.kind} view made from this plane, linked to it: moving either moves the other">View</span><button type="button" class="pbtn" data-plview-open="${v.id}" title="Show it">${esc(v.name)}</button></span>`),
     `<div class="poprow"><input class="popname" data-plview-name placeholder="${esc(suggest)}" title="The view's name (Tab takes the suggestion)"><button type="button" class="pbtn" data-plview title="A ${kindWord} view of this cut, named and linked to this plane: show it from its name here, or pick it in a plan or section view">Create ${kindWord} view</button></div>`,
@@ -1207,7 +1209,59 @@ function assemblyRows(s) {
   const along = String(s.surfaceType).toLowerCase() === 'wall' ? 'wall' : String(s.surfaceType).toLowerCase() === 'floor' ? 'floor' : 'roof';
   return [popSec('Assembly', 'The construction of this surface. Partitions and slabs shared by two zones take it on both sides, reversed on the other.'),
     `<select class="popsel wide" data-act="construction" title="Give this surface another of the model's assemblies">${opts}</select>`,
+    `<div class="poprow"><button type="button" class="pbtn" data-act="asm-edit" data-v="${esc(base)}" title="Open this assembly in Materials &amp; assemblies">Edit assembly</button></div>`,
     ...assemblyEditor(base, { outside, inside, along, users, film: FILMS[String(s.surfaceType).toLowerCase()] ?? 0.17, open: layersOpen, copy: true })];
+}
+
+// The location line of a massing zone's wall: where its surface sits in the wall's thickness (drawing
+// only: the thermal model takes the line as drawn). Set here, it is the wall's own, apart from the view's
+// Walls setting; Flip (or Space) turns the finish to the other side.
+const lineOpts = (now) => WALL_LINES.map(([v, l]) => `<option value="${v}"${v === now ? ' selected' : ''}>${l}</option>`).join('');
+function faceLineRows(s) {
+  const t = massing && String(s.surfaceType).toLowerCase() === 'wall' && massingTarget({ kind: 'surface', item: s });
+  if (!t || !Number.isInteger(t.face)) return [];
+  const own = wallLine(massing, t.zone, t.face), now = own || (wallMode() === 'thin' ? 'interior' : wallMode());
+  return [popSec('Location line', 'Where this wall\'s surface sits in its thickness, as drawn: at its centre, or at its exterior or interior finish (the wall\'s body then lies to the other side). For drawing only: the thermal model takes the surface as modelled.'),
+    `<div class="poprow"><select class="popsel" data-fline title="${own ? 'This wall\'s own' : 'As the view\'s Walls setting, until set here'}">${lineOpts(now)}</select>`
+    + (now !== 'centre' ? '<button type="button" class="pbtn" data-act="fline-flip" title="Turn the finish to the other side (Space)">Flip</button>' : '')
+    + (own ? '' : '<span class="muted">as the view</span>') + '</div>'];
+}
+// A drawn wall standing free (on no zone's face): its assembly, its levels, its location line; its ends
+// are dragged in the views.
+function freeWallRows(w) {
+  const ep = model.epjson, lv = massing.levels, len = Math.hypot(w.b[0] - w.a[0], w.b[1] - w.a[1]);
+  const asm = Object.keys(ep.Construction || {}).filter((n) => !n.endsWith('_FLIPPED') && !constructionProperties(ep, n)?.glazing && !/slab|floor|roof/i.test(n)).sort();
+  const now = w.asm || 'Generic Exterior Wall';
+  const lvOpt = (from, to, at) => lv.map((l, L) => (L >= from && L <= to ? `<option value="${L}"${L === at ? ' selected' : ''}>${esc(l.name)}</option>` : '')).join('');
+  return [`<span class="muted">${fmt(len, 2)} m long · standing free: it closes no zone. Drag its ends in a view.</span>`,
+    popSec('Assembly', 'What the wall is built of; its thickness is drawn from it'),
+    `<div class="poprow"><select class="popsel wide" data-wall="asm">${asm.map((n) => `<option${n === now ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div>`,
+    `<div class="poprow"><button type="button" class="pbtn" data-act="asm-edit" data-v="${esc(now)}" title="Open this assembly in Materials &amp; assemblies, to set its layers">Edit assembly</button></div>`,
+    popSec('Levels'),
+    `<div class="poprow"><span class="tipped" title="The level it stands on">Base</span><select class="popsel" data-wall="base">${lvOpt(0, w.top - 1, w.base)}</select><span class="tipped" title="The level it reaches">Top</span><select class="popsel" data-wall="top">${lvOpt(w.base + 1, lv.length - 1, w.top)}</select></div>`,
+    popSec('Location line', 'Where the line it was drawn on sits in its thickness: its centre, or its exterior or interior finish. Flip (or Space) turns the finish to the other side.'),
+    `<div class="poprow"><select class="popsel" data-wall="line">${lineOpts(w.line || 'centre')}</select>`
+    + (w.line && w.line !== 'centre' ? '<button type="button" class="pbtn" data-act="wall-flip" title="Turn the finish to the other side (Space)">Flip</button>' : '') + '</div>',
+    '<div class="poprow"><button type="button" class="pbtn danger" data-act="wall-del" title="Take the wall out (Delete)">Delete wall</button></div>'];
+}
+// The wall selected (a free one, or a massing zone's wall surface) turned to show its finish on the other side.
+function flipSelected() {
+  const found = current();
+  if (found?.kind === 'wall') { massingChange((x) => flipWall(x, found.item.id), 'wall flipped'); return true; }
+  if (found?.kind !== 'surface' || !massing) return false;
+  const t = massingTarget(found);
+  if (!t || !Number.isInteger(t.face)) return false;
+  const own = wallLine(massing, t.zone, t.face), now = own || (wallMode() === 'thin' ? 'interior' : wallMode());
+  if (now === 'centre') return false;
+  massingChange((x) => setFaceLine(x, t.zone, t.face, now === 'exterior' ? 'interior' : 'exterior'), 'wall flipped');
+  return true;
+}
+// An assembly opened in the Materials and assemblies window, in view.
+function editAssembly(name) {
+  libTab = 'assemblies'; libOpen = name;
+  $('library').hidden = false;
+  renderLibrary();
+  requestAnimationFrame(() => [...$('library').querySelectorAll('[data-act=asm-open]')].find((b) => b.dataset.v === name)?.scrollIntoView({ block: 'nearest' }));
 }
 
 // Layers of an assembly, drawn and listed, for the pop-up and the Materials and assemblies window.
@@ -2101,7 +2155,6 @@ function render(m) {
   if (baking) baking.cancel();
   bake = null; edits = 0;
   keyframes = []; kfHour = null;
-  $('edited').hidden = true;
   $('lib-open').disabled = false;
   libOpen = null;
   renderLibrary();
@@ -2154,9 +2207,10 @@ function redo() { const e = redoStack.pop(); if (!e) return; e.redo(); undoStack
 // Clipping planes moved, turned, resized, added or removed: undone like the model's edits, but they
 // change only the view.
 view.sections.onCommit = (before, after, what) => {
-  undoStack.push({ undo: () => view.sections.setState(before), redo: () => view.sections.setState(after), what, view: true });
+  undoStack.push({ undo: () => { view.sections.setState(before); vbar.render(); }, redo: () => { view.sections.setState(after); vbar.render(); }, what, view: true });
   if (undoStack.length > 100) undoStack.shift();
   redoStack.length = 0;
+  vbar.render(); // Create section lists the planes
 };
 function popMessage(text) {
   const body = $('info').querySelector('.popbody');
@@ -2184,8 +2238,6 @@ function refreshModel(geometry = true) {
   view.cube.setNorth(-m.site.northAxis);
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);
-  $('edited').hidden = false;
-  $('edited').textContent = `Edited (${undoStack.length})`;
   applyHour(); // solves the air with the model as it is now
   if ($('show-air').checked) air.play();
   winEdit.refresh();
@@ -2194,6 +2246,22 @@ function refreshModel(geometry = true) {
   renderLibrary();
   legend();
 }
+// Esc leaves any pop-up: from a box in one, the pop-up closes (its selection let go); an open menu
+// folds; then the selection goes (below); then the Zones and Materials windows close.
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const t = e.target, win = t.closest?.('#info, .lvpop, #massing, #library');
+  if (win && t.matches('input, select, textarea')) {
+    e.preventDefault(); e.stopImmediatePropagation();
+    t.blur();
+    if (win.id === 'info') { if (winEdit.active) winEdit.stop(); view.sections.select(null); view.select(null); }
+    else if (win.classList.contains('lvpop')) levelEdits.select(null);
+    else win.hidden = true;
+    return;
+  }
+  const menus = [...document.querySelectorAll('details.dd[open]')];
+  if (menus.length && !t.closest?.('.floatedit')) { for (const d of menus) d.open = false; e.stopImmediatePropagation(); }
+}, true);
 document.addEventListener('keydown', (e) => {
   if (!model || e.target.closest?.('input, select, textarea')) return;
   const k = e.key.toLowerCase();
@@ -2201,13 +2269,20 @@ document.addEventListener('keydown', (e) => {
   else if ((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))) { redo(); e.preventDefault(); }
   else if (e.key === 'Escape' && !view.sections.selected && !$('view3d').classList.contains('full')) {
     if (winEdit.active) { winEdit.stop(); showInfo(current()); } else if (selected) view.select(null);
+    else if (levelEdits.selected === null && !tools.tool) { $('massing').hidden = true; $('library').hidden = true; }
+  } else if (e.key === ' ' && massing && selected && !tools.tool) {
+    if (flipSelected()) e.preventDefault();
+  } else if (e.key === 'Delete' && massing && current()?.kind === 'wall') {
+    const f = current();
+    view.select(null);
+    massingChange((x) => deleteWall(x, f.item.id), 'wall deleted');
+    e.preventDefault();
   } else if (e.key === 'Delete' && massing && selected) {
     const found = current(), at = found && massingSide(found.kind, found.item), zt = found?.kind === 'zone' && massingTarget(found);
     if (at && massing.zones[at.zone].faces[at.face]) { sideEdit(at, (x) => { x.zones[at.zone].faces[at.face] = null; }, 'windows removed'); e.preventDefault(); }
     else if (zt) { removeZone(zt.zone); e.preventDefault(); }
   }
 });
-$('edited').addEventListener('click', undo);
 
 // Settings typed in the pop-up and in the Materials and assemblies window: a zone's, an assembly's
 // layers, a material's figures, names. Tab in a name box takes its suggestion.
@@ -2225,6 +2300,19 @@ function onChange(e) {
     const v = t.tagName === 'SELECT' ? t.value : Number(String(t.value).replace(',', '.')) * Number(t.dataset.scale || 1);
     if (t.tagName !== 'SELECT' && !(Number.isFinite(v) && v >= 0)) { showInfo(current()); return; }
     applyEdit((tx) => setZoneSetting(tx, zone, t.dataset.zset, v), `zone ${zone} ${t.dataset.zset}`);
+    return;
+  }
+  // a free wall's settings, a massing wall's location line
+  if (t.dataset.wall) {
+    const f = current();
+    if (f?.kind !== 'wall') return;
+    const k = t.dataset.wall, v = k === 'base' || k === 'top' ? Number(t.value) : t.value;
+    massingChange((x) => { const w = x.walls.find((y) => y.id === f.item.id); if (w) w[k] = v; }, `wall ${k} set`);
+    return;
+  }
+  if (t.dataset.fline !== undefined) {
+    const f = current(), at = f && massingTarget(f);
+    if (at && Number.isInteger(at.face)) massingChange((x) => setFaceLine(x, at.zone, at.face, t.value), 'location line set');
     return;
   }
   const s = selected && model.surfaces[selected], base = assemblyOf(t);
@@ -2258,6 +2346,9 @@ function onClick(e) {
   if (!b || !model || b.disabled) return;
   const s = selected && model.surfaces[selected], base = assemblyOf(b), i = Number(b.dataset.i), act = b.dataset.act;
   if (act === 'layers') { layersOpen = !layersOpen; showInfo(current()); }
+  else if (act === 'asm-edit') editAssembly(b.dataset.v);
+  else if (act === 'wall-flip' || act === 'fline-flip') flipSelected();
+  else if (act === 'wall-del') { const f = current(); if (f?.kind === 'wall') { view.select(null); massingChange((x) => deleteWall(x, f.item.id), 'wall deleted'); } }
   else if (act === 'layer-del' && base) applyEdit((tx) => removeLayer(tx, base, i), `layer of ${base}`);
   else if (act === 'layer-up' && base) applyEdit((tx) => moveLayer(tx, base, i, -1), `layer of ${base}`);
   else if (act === 'layer-down' && base) applyEdit((tx) => moveLayer(tx, base, i, 1), `layer of ${base}`);
@@ -2369,10 +2460,16 @@ const levelEdits = new LevelEdits({
   onSelect: (L) => { if (L !== null && (selected || view.sections.selected)) { view.sections.select(null); view.select(null); } levelMarks.draw(); ws.redraw(); },
 });
 levelMarks = new LevelMarks3D(view, levelEdits, () => massing);
+// a free wall's ends, dragged in 3D (wallends.js)
+wallEnds = new WallEnds3D(view, { massing: () => massing, selected: () => selected, change: massingChange, tools });
 ws.setLevels(levelEdits);
 $('show-levels').addEventListener('change', () => { levelMarks.on = $('show-levels').checked; levelMarks.draw(); });
 // the View tab: Plan at level, and the views made
-const vbar = viewsBar($('view-make'), { views: namedViews, levels: () => massing?.levels || null, changeViews: viewsChange, onOpen: (id) => ws.open(id) });
+const vbar = viewsBar($('view-make'), {
+  views: namedViews, levels: () => massing?.levels || null, changeViews: viewsChange, onOpen: (id) => ws.open(id),
+  planes: () => view.sections.planes.filter((p) => !p.forChecks).map((p) => ({ id: p.id, kind: p.kind, name: p.name })),
+  fromPlane: (id) => { const p = planeById(id); if (p) viewFromPlane(p, planeViewName(p)); },
+});
 vbar.render();
 // the modelling tools' buttons on a plan view's bar: as the 3D view's
 document.addEventListener('click', (e) => {
@@ -2395,14 +2492,21 @@ for (const k of ['setModel', 'setWalls']) {
     return r;
   };
 }
+// an assembly's thickness (m): its layers' with mass; 0.2 m when it has none
+function asmThickness(n) {
+  const ep = model?.epjson, c = ep?.Construction?.[n];
+  if (!c) return 0.2;
+  let t = 0;
+  for (const [k, v] of Object.entries(c)) if (k !== 'name' && ep.Material?.[v]?.thickness) t += ep.Material[v].thickness;
+  return t || 0.2;
+}
 // the drawn walls standing free, in model coordinates, at their assembly's thickness
 function freeWallSolids() {
   if (!massing?.walls?.length || !model) return [];
-  const ep = model.epjson, thick = (n) => { const c = ep.Construction?.[n]; if (!c) return 0.2; let t = 0; for (const [k, v] of Object.entries(c)) if (k !== 'name' && ep.Material?.[v]?.thickness) t += ep.Material[v].thickness; return t || 0.2; };
   return freeWalls(massing).map((w) => {
-    const t = thick(w.asm), side = w.side || 1, off = w.line === 'exterior' ? -side * t / 2 : w.line === 'interior' ? side * t / 2 : 0;
+    const t = asmThickness(w.asm || 'Generic Exterior Wall'), side = w.side || 1, off = w.line === 'exterior' ? -side * t / 2 : w.line === 'interior' ? side * t / 2 : 0;
     const [a, b] = [w.a, w.b].map((p) => turnPlan(p, massing.rot || 0));
-    return { a, b, z0: massing.levels[w.base].z, z1: massing.levels[w.top].z, t, off };
+    return { id: w.id, a, b, z0: massing.levels[w.base].z, z1: massing.levels[w.top].z, t, off };
   });
 }
 // The Place wall tab: shown while Draw wall is on, its lists filled from the model.
@@ -2449,14 +2553,22 @@ const planZ = (v) => (Number.isInteger(v.level) && massing?.levels[v.level] ? ma
 // The clipping planes moved: the views linked to them follow (their cut, not an edit of their own).
 function planesMoved() {
   const o3 = view.origin || [0, 0, 0];
+  let clamped = false;
   for (const v of namedViews()) {
     const p = planeById(v.plane);
     if (!p) continue;
     if (v.kind === 'plan') {
-      const z = p.o.z + o3[2];
-      if (Number.isInteger(v.level) && massing?.levels[v.level]) v.cut = +(z - massing.levels[v.level].z).toFixed(4); else v.elev = +z.toFixed(4);
+      let z = p.o.z + o3[2];
+      const lv = massing?.levels, L = v.level;
+      if (Number.isInteger(L) && lv?.[L]) {
+        // a plan at a level cuts within its storey: its plane stops at the level and at the top of the storey
+        const top = lv[L + 1] ? lv[L + 1].z - 0.01 : Infinity, zz = Math.min(Math.max(z, lv[L].z), top);
+        if (zz !== z) { z = zz; p.o.z = z - o3[2]; clamped = true; }
+        v.cut = +(z - lv[L].z).toFixed(4);
+      } else v.elev = +z.toFixed(4);
     } else v.frame = frameRecord(p);
   }
+  if (clamped) { view.sections.changed(); return; } // drawn again where it stopped (this runs again from there)
   ws.redraw();
 }
 // a plane's frame in model coordinates, for a section view to keep
@@ -2481,13 +2593,35 @@ function cut3d(id) {
   if (p) { viewsChange((x) => { x.views.find((y) => y.id === id).plane = p.id; }, `${v.name} linked to ${p.name}`); showInfo(current()); }
 }
 // A view made from a clipping plane's pop-up, named there; linked to the plane.
+// a name for a view of a plane's cut, not yet taken
+function planeViewName(p) {
+  const taken = new Set(namedViews().map((v) => v.name));
+  let base;
+  if (p.kind === 'plan') {
+    const z = p.o.z + (view.origin?.[2] || 0), L = levelUnder(z);
+    base = L === null ? `Plan at ${fmt(z, 2)} m` : `${massing.levels[L].name} plan`;
+  } else base = 'Section';
+  let k = p.kind === 'plan' ? 1 : namedViews().filter((v) => v.kind === 'section').length + 1, name = p.kind === 'plan' ? base : `${base} ${k}`;
+  while (taken.has(name)) name = `${base} ${++k}`;
+  return name;
+}
+// the massing's level whose storey holds height z (the top level not), or null
+function levelUnder(z) {
+  const lv = massing?.levels;
+  if (!lv) return null;
+  for (let L = lv.length - 2; L >= 0; L--) if (z >= lv[L].z - 1e-6) return z < lv[L + 1].z + 1e-6 ? L : null;
+  return null;
+}
 function viewFromPlane(p, name) {
   const host = viewsHost(), o3 = view.origin || [0, 0, 0];
   let made = null;
   viewsChange((x) => {
     x.views ||= [];
     const id = Math.max(0, ...x.views.map((v) => v.id + 1));
-    made = p.kind === 'plan' ? { id, kind: 'plan', name, level: null, elev: +(p.o.z + o3[2]).toFixed(4), cut: 0, plane: p.id } : { id, kind: 'section', name, frame: frameRecord(p), plane: p.id };
+    const z = p.o.z + o3[2], L = p.kind === 'plan' ? levelUnder(z) : null;
+    made = p.kind !== 'plan' ? { id, kind: 'section', name, frame: frameRecord(p), plane: p.id }
+      : L === null ? { id, kind: 'plan', name, level: null, elev: +z.toFixed(4), cut: 0, plane: p.id }
+      : { id, kind: 'plan', name, level: L, cut: +(z - massing.levels[L].z).toFixed(4), plane: p.id };
     x.views.push(made);
   }, `${p.kind} view ${name} created`);
   void host;
@@ -2562,12 +2696,13 @@ $('new-massing').addEventListener('click', () => {
   if (model && !confirm('Start a new massing in place of the model open now? Export it first to keep it.')) return;
   massing = massing0();
   model = importEpJSON(massingEpJSON(massing, { weather }), { fileName: 'Massing.epJSON' });
-  $('status').textContent = 'Massing';
+  $('status').textContent = '';
+  document.title = 'Massing · Natural Ventilation Visualizer';
   $('export').disabled = false;
   render(model);
   $('mass-open').hidden = false;
   $('model-tools').hidden = false;
-  $('massing').hidden = false;
+  $('massing').hidden = true;
   massingUI.reset(); massingUI.render();
   vbar.render();
   ribbon('model');

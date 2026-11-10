@@ -609,7 +609,7 @@ for (int i = 0; i < ${MAX}; i++) {
     return [at, null];
   }
 
-  // Starts placing a section or a plan (the bar's Section | Plan): the ghost follows the pointer over
+  // Starts placing a section or a plan (Tab turns it from one to the other): the ghost follows the pointer over
   // the view until a click (or release, when dragged in) puts the plane there. Space steps through its
   // ways: a section over a wall, square to it and turned round; over a roof (as Split zone does), along
   // the building's x, along its y, and each turned round; a plan, looking down and looking up. An arrow
@@ -622,7 +622,7 @@ for (int i = 0; i < ${MAX}; i++) {
     let last = null;
     // what the plane would be here: [kind, point, along, flip]
     const what = (pt) => {
-      const roof = kind === 'section' && pt.zone && pt.normal && pt.normal.z > 0.7;
+      const roof = this.placing.kind === 'section' && pt.zone && pt.normal && pt.normal.z > 0.7;
       this.placing.overRoof = !!roof;
       if (roof) {
         const w = this.placing.roofWay % 4, yaw = (this.view.longAxis || 0) + (w % 2 ? Math.PI / 2 : 0);
@@ -648,6 +648,8 @@ for (int i = 0; i < ${MAX}; i++) {
     const up = (e) => { if (dragged) put(e); };
     const key = (e) => {
       if (e.key === 'Escape') this.stopPlacing();
+      // Tab: a section or a plan
+      if (e.key === 'Tab') { e.preventDefault(); e.stopImmediatePropagation(); this.placing.kind = this.placing.kind === 'plan' ? 'section' : 'plan'; ghost(last); return; }
       if (e.key === ' ' && !e.target.closest?.('input, select, textarea')) {
         e.preventDefault(); e.stopImmediatePropagation();
         if (this.placing.overRoof) this.placing.roofWay++;
@@ -704,16 +706,28 @@ function segmentDistance(p, a, b) {
 // A grip: a square with the panel's fill and the editing colour's outline (9 px, as in the Solar
 // Shading Explorer's sheets).
 let gripTex = null;
-// A box to type a figure in, beside the pointer in a view's container; apply(number) on Enter or on
-// leaving the box, Esc cancels. Zero is ignored unless zeroOk.
+// A box to type a figure in; apply(number) on Enter or on leaving the box, Esc cancels. Zero is ignored
+// unless zeroOk. A figure clicked on a drawing (a text whose value the placeholder gives as "now X") is
+// typed over in place: the box takes the figure's place and type, holding its value, selected. Else
+// (an arrow clicked, say) the box opens beside the pointer, its placeholder saying what to type.
 export function askNumber(container, e, placeholder, apply, zeroOk = false) {
   const input = document.createElement('input');
   input.className = 'floatedit';
   input.placeholder = placeholder;
-  const r = container.getBoundingClientRect();
-  Object.assign(input.style, { left: `${e.clientX - r.left + 10}px`, top: `${e.clientY - r.top - 12}px` });
+  input.spellcheck = false;
+  const r = container.getBoundingClientRect(), fig = e.target?.closest?.('text, tspan'), now = /now (-?[\d.,]+)/.exec(placeholder)?.[1];
+  if (fig && now !== undefined) {
+    const f = fig.getBoundingClientRect(), cs = getComputedStyle(fig);
+    input.classList.add('inplace');
+    input.value = now;
+    input.title = placeholder;
+    Object.assign(input.style, {
+      left: `${f.left - r.left - 3}px`, top: `${f.top - r.top - 2}px`, width: `${Math.max(f.width + 14, 44)}px`, height: `${f.height + 4}px`,
+      fontFamily: cs.fontFamily, fontSize: cs.fontSize, fontWeight: cs.fontWeight,
+    });
+  } else Object.assign(input.style, { left: `${e.clientX - r.left + 10}px`, top: `${e.clientY - r.top - 12}px` });
   container.appendChild(input);
-  setTimeout(() => input.focus()); // after the click that opened it
+  setTimeout(() => { input.focus(); input.select(); }); // after the click that opened it
   let done = false;
   const finish = (keep) => {
     if (done) return;
