@@ -472,3 +472,26 @@ test('walls closing spaces inside a zone divide it: each space a zone', async ()
   near(ground.reduce((t, z) => t + Math.abs(polyArea(z.plate)), 0), 200, 1e-6);
   near(Math.min(...ground.map((z) => Math.abs(polyArea(z.plate)))), 50, 1e-6);
 });
+
+test('Corner joins two walls where their lines cross; Extend takes one to another; a wall moves whole', async () => {
+  const { massingBlank, addWall, cornerWalls, extendWall, moveWall } = await import('../src/model/massing.js');
+  const m = massingBlank();
+  addWall(m, { a: [0, 0], b: [6, 0], base: 0, top: 1 });
+  addWall(m, { a: [6, 0], b: [6, 4], base: 0, top: 1 });
+  addWall(m, { a: [6, 4], b: [0, 4], base: 0, top: 1 });
+  addWall(m, { a: [0, 4], b: [0, 0.6], base: 0, top: 1 }); // short of the corner: no room yet
+  addWall(m, { a: [0.3, 0], b: [6, 0], base: 0, top: 1 }); // a stand-in for a wall short at the other end
+  assert.equal(m.zones.length, 0);
+  // the left wall (picked near its top) and the bottom wall joined: the room closes
+  cornerWalls(m, 3, 0, 0.2, 0.8);
+  assert.deepEqual(m.walls[3].b, [0, 0]);
+  assert.equal(m.zones.length, 1);
+  // a wall extended to another's line, then moved whole
+  addWall(m, { a: [8, 1], b: [8, 3], base: 0, top: 1 });
+  extendWall(m, 1, 5, 0.5); // nothing: parallel
+  addWall(m, { a: [9, 2], b: [12, 2], base: 0, top: 1 });
+  extendWall(m, 5, 6, 0.9);
+  assert.deepEqual(m.walls[6].a, [8, 2]);
+  moveWall(m, 6, [0, 1]);
+  assert.deepEqual(m.walls[6].a, [8, 3]);
+});

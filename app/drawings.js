@@ -1,6 +1,7 @@
 // Plans and sections drawn from the 3D view's geometry, in the Solar Shading Explorer's 2D style (the
 // drawing-style skill): what the cut passes through filled with the poche hatch and outlined in ink
-// (floors and roofs cut solid, in --poche), glass cut as a thick pane, and what lies beyond the cut,
+// (walls, floors and roofs alike, joined where they meet so the hatch runs round corners and
+// junctions), glass cut as a thick pane, and what lies beyond the cut,
 // up to a depth, in fine dotted --ink3 (near ones heavier than far ones). A plan also names the
 // zones it cuts; a section marks the levels.
 //
@@ -10,6 +11,7 @@
 
 import * as THREE from 'three';
 import { cutSolid, chain } from './caps.js';
+import pc from 'polygon-clipping';
 
 const r1 = (x) => Math.round(x * 10) / 10;
 
@@ -58,7 +60,7 @@ export function cutGeometry(view, f, { depth = Infinity, near = 4 } = {}) {
   }
   const all = [...poche.flat(2), ...slabs.flat(2), ...lines.flat(), ...glass.flat(), ...beyond.flat(), ...far.flat()];
   const box = all.length ? all.reduce((b, [x, y]) => [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)], [Infinity, Infinity, -Infinity, -Infinity]) : null;
-  return { poche, slabs, lines, glass, beyond, far, box, mirror, frame: f };
+  return { poche, slabs, cut: joined([...poche, ...slabs]), lines, glass, beyond, far, box, mirror, frame: f };
 }
 
 // A solid whose largest faces are level: a floor, a ceiling or a roof.
@@ -100,8 +102,8 @@ export function drawSVG(g, { w, h, cx, cy, s }, marks = {}) {
   });
   if (g.far.length) out += `<path d="${segs(g.far)}" fill="none" stroke="var(--ink3)" stroke-width="0.6" stroke-dasharray="1.5 2.5" opacity="0.6"/>`;
   if (g.beyond.length) out += `<path d="${segs(g.beyond)}" fill="none" stroke="var(--ink3)" stroke-width="0.7" stroke-dasharray="2 2.4" opacity="0.85"/>`;
-  for (const loops of g.slabs) out += `<path d="${path(loops)}" fill="var(--poche)" fill-rule="evenodd" stroke="var(--ink)" stroke-width="0.7"/>`;
-  for (const loops of g.poche) out += `<path d="${path(loops)}" fill="url(#poche2d)" fill-rule="evenodd" stroke="var(--ink)" stroke-width="0.85"/>`;
+  if (g.cut) out += `<path d="${path(g.cut)}" fill="url(#poche2d)" fill-rule="evenodd" stroke="var(--ink)" stroke-width="0.85"/>`;
+  else for (const loops of [...g.slabs, ...g.poche]) out += `<path d="${path(loops)}" fill="url(#poche2d)" fill-rule="evenodd" stroke="var(--ink)" stroke-width="0.85"/>`;
   if (g.lines.length) out += `<path d="${segs(g.lines)}" fill="none" stroke="var(--ink)" stroke-width="1.4"/>`;
   // glass cut: a pane at least 3 px thick, --shade with an ink edge
   if (g.glass.length) out += `<path d="${segs(g.glass)}" fill="none" stroke="var(--ink)" stroke-width="4.6" stroke-linecap="butt"/><path d="${segs(g.glass)}" fill="none" stroke="var(--shade)" stroke-width="3" stroke-linecap="butt"/>`;
@@ -111,6 +113,18 @@ export function drawSVG(g, { w, h, cx, cy, s }, marks = {}) {
   }
   if (!g.box) out += `<text x="${w / 2}" y="${h / 2}" text-anchor="middle" font-size="12" fill="var(--ink3)">The cut passes nothing of the building</text>`;
   return out + `<rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" fill="none" stroke="var(--rule2)" stroke-width="0.6"/></svg>`;
+}
+
+// The cut pieces (each a set of loops, filled even-odd) as one: their outlines where they meet go, so
+// a corner or a wall meeting a floor reads as one hatched piece. null if they cannot be joined.
+function joined(sets) {
+  if (!sets.length) return [];
+  const R = (p) => [Math.round(p[0] * 1e4) / 1e4, Math.round(p[1] * 1e4) / 1e4];
+  try {
+    const polys = sets.map((loops) => pc.xor(...loops.filter((L) => L.length > 2).map((L) => [[...L.map(R), R(L[0])]]))).filter((x) => x.length);
+    if (!polys.length) return [];
+    return pc.union(...polys).flatMap((poly) => poly.map((ring) => ring.slice(0, -1)));
+  } catch { return null; }
 }
 
 const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);

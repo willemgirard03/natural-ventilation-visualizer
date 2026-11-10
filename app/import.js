@@ -336,7 +336,7 @@ function startGrid(m) {
     drawSlices();
     if (!gridLive && airflow) { gridLive = true; air.clear(); air.setField(grid, airflow.conditions); }
     const pace = data.dt / (data.ms / 1000);
-    $('room-air-status').textContent = `${fmt(grid.fluid.length / 1000, 0)}k cells · ${fmt(pace, 1)}× real time`;
+    $('room-air-status').textContent = `${fmt(grid.fluid.length / 1000, 0)}k cells · ${pace.toFixed(1).padStart(4, ' ')}× real time`;
     const walls = Object.keys(airflow?.conditions.surfaceT || {}).length;
     $('room-air-status').title = `Simulated air time ${fmt(data.time, 0)} s; this step ${fmt(data.ms, 0)} ms for ${fmt(data.dt, 2)} s of air, ${data.iterations} pressure iterations. `
       + (walls ? `Walls, floors and windows warm or cool the air at the inside temperatures of the results (${walls} surfaces).` : 'Surfaces neither warm nor cool the air: the results have no surface temperatures; a rerun adds them.');
@@ -2162,6 +2162,7 @@ function render(m) {
   $('results').hidden = false;
   view.resize();
   view.setModel(m, { doors: interiorDoors(m), walls: wallMode() });
+  ws.reset(); // a new model: the 3D view alone again
   hover.clear();
   net = buildNetwork(m);
   rooms = prepareRoomFlow(voxelize(m), net, m);
@@ -2458,6 +2459,17 @@ ws.setTools(tools);
 // Levels in the views (levels.js): markers in 3D and in sections, a pop-up for the level picked.
 const levelEdits = new LevelEdits({
   massing: () => massing, change: massingChange,
+  planOf: (L) => namedViews().find((v) => v.kind === 'plan' && v.level === L)?.id ?? null,
+  openPlan: (L) => {
+    let id = namedViews().find((v) => v.kind === 'plan' && v.level === L)?.id;
+    if (id === undefined) {
+      const taken = new Set(namedViews().map((v) => v.name)), base = `${massing.levels[L].name} plan`;
+      let name = base;
+      for (let k = 2; taken.has(name); k++) name = `${base} ${k}`;
+      viewsChange((x) => { x.views ||= []; id = Math.max(0, ...x.views.map((v) => v.id + 1)); x.views.push({ id, kind: 'plan', name, level: L, cut: 1.2 }); }, `plan view ${name} created`);
+    }
+    ws.swapIn(id);
+  },
   onSelect: (L) => { if (L !== null && (selected || view.sections.selected)) { view.sections.select(null); view.select(null); } levelMarks.draw(); ws.redraw(); },
 });
 levelMarks = new LevelMarks3D(view, levelEdits, () => massing);

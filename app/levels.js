@@ -59,18 +59,20 @@ const WHAT = { 'ins-up': 'storey added above', 'ins-down': 'storey added below',
 // ---------- the levels' edits, shared by the 3D view and the sections ----------
 // A small window off the level picked: its name, its figures, the storey rows.
 export class LevelEdits {
-  // massing() -> the massing; change(mutate, what); onSelect(L or null)
-  constructor({ massing, change, onSelect = () => {} }) {
-    Object.assign(this, { massing, change, onSelect });
+  // massing() -> the massing; change(mutate, what); onSelect(L or null); planOf(L) -> a plan view of the
+  // level (its id) or null; openPlan(L): that plan shown, made first where there is none
+  constructor({ massing, change, onSelect = () => {}, planOf = () => null, openPlan = () => {} }) {
+    Object.assign(this, { massing, change, onSelect, planOf, openPlan });
     this.selected = null;
     this.pop = document.createElement('div');
     this.pop.className = 'lvpop';
     this.pop.hidden = true;
     document.body.appendChild(this.pop);
     this.pop.addEventListener('click', (e) => {
-      const b = e.target.closest('[data-st], [data-lvclose]');
+      const b = e.target.closest('[data-st], [data-lvclose], [data-lvplan]');
       if (!b || b.disabled) return;
       if (b.dataset.lvclose !== undefined) { this.select(null); return; }
+      if (b.dataset.lvplan !== undefined) { const L = this.selected; this.select(null); this.openPlan(L); return; }
       const L = this.selected, m = this.massing();
       let res = null;
       this.change((x) => { res = storeyAction(x, L, b.dataset.st); }, `${WHAT[b.dataset.st]} (${lvName(m, L)})`);
@@ -120,7 +122,7 @@ export class LevelEdits {
     const next = m.levels[L + 1];
     this.pop.innerHTML = `<div class="pophd" title="Drag to move"><span class="popttl">Level</span><span class="popbtns"><button type="button" data-lvclose title="Close; Esc lets go of the level">×</button></span></div>`
       + (this.note ? `<div class="poprow error-text">${esc(this.note)}</div>` : '')
-      + `<div class="poprow"><input class="libname short" data-lvf="name" value="${esc(lvName(m, L))}" title="Its name"></div>`
+      + `<div class="poprow"><input class="libname short" data-lvf="name" value="${esc(lvName(m, L))}" title="Its name"><button type="button" class="pbtn" data-lvplan title="${this.planOf(L) === null ? 'Make a plan view of this level, cut 1.2 m above it, and show it' : 'Show the plan view of this level'}">${this.planOf(L) === null ? 'Create plan' : 'Open plan'}</button></div>`
       + `<div class="poprow"><span class="tipped" title="Its height above the ground level: typed, this level alone moves">Elevation</span> ${L ? `<input class="popnum" data-lvf="z" value="${fmt(m.levels[L].z)}"> m` : '0.00 m'}</div>`
       + (next ? `<div class="poprow"><span class="tipped" title="Up to the next level: typed, every level above moves with it">Storey height</span> <input class="popnum" data-lvf="h" value="${fmt(next.z - m.levels[L].z)}"> m</div>` : '')
       + `<div class="msub">${next ? 'Storey on it' : 'The top level'}</div>` + storeyRows(m, L);
@@ -163,7 +165,7 @@ export class LevelMarks3D {
     const m = this.massing(), v = this.view;
     const canvas = v.renderer.domElement, cr = canvas.getBoundingClientRect(), kr = v.container.getBoundingClientRect();
     Object.assign(this.svg.style, { left: `${cr.left - kr.left}px`, top: `${cr.top - kr.top}px`, width: `${cr.width}px`, height: `${cr.height}px` });
-    const fr = m && this.on && this.frame();
+    const fr = m && this.on && cr.width > 0 && this.frame(); // none while the 3D view is off the page
     if (!fr) { this.svg.innerHTML = ''; return; }
     const o3 = v.origin || [0, 0, 0], sel = this.edits.selected, drag = this.drag;
     let g = '';

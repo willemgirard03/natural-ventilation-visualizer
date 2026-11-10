@@ -1517,6 +1517,47 @@ export function moveWallEnd(m, id, end, p) {
   w[end] = p.map(R6);
   enclose(m, w.base, w.top);
 }
+// A drawn wall moved whole by d (plan); a space it now closes is made a zone.
+export function moveWall(m, id, d) {
+  const j = (m.walls || []).findIndex((w) => w.id === id);
+  if (j < 0) return false;
+  shiftWalls(m, [j], d);
+  enclose(m, m.walls[j].base, m.walls[j].top);
+}
+// Where the lines of walls p and q cross, and how far along each (0 at its a, 1 at its b), or null.
+function crossing(p, q) {
+  const r = sub2(p.b, p.a), s = sub2(q.b, q.a), den = cross2(r, s);
+  if (Math.abs(den) < 1e-9) return null;
+  const t = cross2(sub2(q.a, p.a), s) / den, u = cross2(sub2(q.a, p.a), r) / den;
+  return { x: [p.a[0] + r[0] * t, p.a[1] + r[1] * t], t, u };
+}
+// One end of a wall taken to point x on its line: past an end, the nearer end goes there (extended);
+// within it, the end away from the side kept (at `keep`, 0..1 along it) goes there (trimmed).
+function toPoint(w, x, t, keep) {
+  if (t <= 0 || t >= 1) { if (Math.abs(t) < Math.abs(t - 1)) w.a = x.map(R6); else w.b = x.map(R6); }
+  else if (keep < t) w.b = x.map(R6); else w.a = x.map(R6);
+}
+// Two drawn walls joined at a corner (as Revit's Trim/Extend to Corner): each extended or trimmed to
+// where their lines cross, keeping the side of each that was picked (keepP, keepQ: 0..1 along each).
+export function cornerWalls(m, idP, idQ, keepP = 0.5, keepQ = 0.5) {
+  const p = m.walls?.find((w) => w.id === idP), q = m.walls?.find((w) => w.id === idQ);
+  if (!p || !q || p === q) return false;
+  const c = crossing(p, q);
+  if (!c) return false;
+  toPoint(p, c.x, c.t, keepP); toPoint(q, c.x, c.u, keepQ);
+  for (const w of [p, q]) if (len2(sub2(w.b, w.a)) < 0.05) return false;
+  enclose(m, p.base, p.top); if (q.base !== p.base || q.top !== p.top) enclose(m, q.base, q.top);
+}
+// A drawn wall extended (or trimmed) to the line of another, which stays (as Revit's Trim/Extend).
+export function extendWall(m, idTo, id, keep = 0.5) {
+  const to = m.walls?.find((w) => w.id === idTo), w = m.walls?.find((x) => x.id === id);
+  if (!to || !w || to === w) return false;
+  const c = crossing(w, to);
+  if (!c) return false;
+  toPoint(w, c.x, c.t, keep);
+  if (len2(sub2(w.b, w.a)) < 0.05) return false;
+  enclose(m, w.base, w.top);
+}
 export function deleteWall(m, id) { if (m.walls) m.walls = m.walls.filter((w) => w.id !== id); }
 // The parts of drawn walls on no zone's face: they stand free. [{ ...wall, a, b }]
 export function freeWalls(m) {

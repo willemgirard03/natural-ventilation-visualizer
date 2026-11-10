@@ -28,13 +28,16 @@
 //    onto a wall from the start, and along a wall it crosses; Shift holds the wall to 45° steps. Space
 //    turns the location line to the other side, for the whole chain. A wall across a zone splits it;
 //    walls closing a space make it a zone.
+//  - Corner (as Revit's Trim/Extend to Corner): pick two drawn walls; each is extended or trimmed to
+//    where their lines cross, the side of each picked kept. Extend: pick the wall to reach, then the
+//    wall to extend (or trim) to it.
 //  - Push/pull: over a face, the face outlined; dragged, it moves square to itself by 50 mm steps
 //    (100 mm with Shift), stepping out from a seam to make an L or in to make a notch, its neighbours
 //    stretching where it meets a corner; a click types how far. The tool stays on.
 
 import * as THREE from 'three';
 import { label, line, poly } from './handles.js';
-import { addWall, WALL_LINES } from '../src/model/massing.js';
+import { addWall, WALL_LINES, cornerWalls, extendWall, sharingFaces } from '../src/model/massing.js';
 import { addZone, splitZone, splitFace, extrudeFace, reentrantCorners, faceAxes, faceLength, zoneLevels, turnPlan, zoneFrame,
   mergeZones, mergeFaces, mergeCells, removeWallSeam, zoneSeams, cellAt, cellsOf } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
@@ -90,6 +93,7 @@ export class ModelTools {
     this.dir = 0;
     this.picked = [];
     this.wall = tool === 'wall' ? { start: null, chain: [], side: 1 } : null;
+    this.first = null; // Corner, Extend: the wall picked first
     document.body.classList.add(dragged ? 'placedrag' : 'placing');
     const el = this.view.renderer.domElement;
     const move = (e) => {
@@ -143,6 +147,7 @@ export class ModelTools {
     this.ctx = this.ctxAt(e);
     this.last = e;
     if (this.tool === 'wall') { this.wallClick(e); return; }
+    if (this.tool === 'corner' || this.tool === 'extend') { this.trimClick(e); return; }
     if (this.tool === 'push') { this.pressPush(e); return; }
     if (this.tool === 'merge' || this.tool === 'mergefaces') { this.pick(e); return; }
     this.commit(e);
@@ -162,6 +167,7 @@ export class ModelTools {
   // What the tool would do here: { what, mutate, draw } or null.
   planAt(e) {
     if (this.tool === 'wall') return this.wallAt(e);
+    if (this.tool === 'corner' || this.tool === 'extend') return this.trimAt(e);
     const m = this.massing(), t = m && this.tgt(e);
     if (!t) return null;
     if (this.tool === 'add') return this.addAt(m, t);
@@ -289,14 +295,66 @@ export class ModelTools {
     for (const w of m.walls || []) if (over(w.base, w.top)) for (const p of [w.a, w.b]) { const s = on(p); if (s !== null) cands.push(s); }
     const near = cands.map((s) => [s, Math.abs(s - raw) * pxm]).filter(([, d]) => d < 12).sort((x, y) => x[1] - y[1])[0];
     if (near) { u = near[0]; joint = true; }
-    const trial = structuredClone(m);
-    if (!splitFace(trial, i, k, u)) return null;
-    const p = [A[0] + U[0] * u, A[1] + U[1] * u], a = this.P([...p, z0]), b = this.P([...p, z1]);
+    const trial = structuredClone(m), p = [A[0] + U[0] * u, A[1] + U[1] * u];
+    if (!this.splitShared(trial, i, k, u, p)) return null;
+    let a = this.P([...p, z0]), b = this.P([...p, z1]);
+    // in a plan (looking down the seam) a tick across the wall shows where it goes
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 2) { const n = faceAxes(m, i, k).n, c = this.P([p[0] + n[0] * 0.6, p[1] + n[1] * 0.6, z0]), e2 = this.P([p[0] - n[0] * 0.6, p[1] - n[1] * 0.6, z0]); a = c; b = e2; }
     return {
       what: 'wall split',
-      mutate: (x) => splitFace(x, i, k, u),
+      mutate: (x) => this.splitShared(x, i, k, u, p),
       draw: () => this.face(m, i, k, true) + line(a[0], a[1], b[0], b[1], { stroke: 'var(--glass)', w: 2.2 }) + (joint ? this.snapMark(a, 'end') : '') + this.note(p, z1, `${Math.round(u * 1000)} | ${Math.round((len - u) * 1000)} mm${joint ? ' · where a wall meets it' : ''}`),
     };
+  }
+
+  // A face split at u, and the faces of other zones sharing it split at the same point p (one wall).
+  splitShared(m, i, k, u, p) {
+    const share = sharingFaces(m, i, k);
+    if (!splitFace(m, i, k, u)) return false;
+    for (const [j, q] of share) {
+      const { A, U } = faceAxes(m, j, q), len = faceLength(m, j, q), v = (p[0] - A[0]) * U[0] + (p[1] - A[1]) * U[1];
+      if (v > 0.05 && v < len - 0.05) splitFace(m, j, q, v);
+    }
+    return true;
+  }
+
+  // ---------- Corner and Extend ----------
+  // the drawn wall under the pointer (its line on its base level, on the sheet) and where along it
+  wallUnder(e) {
+    const m = this.massing(), [x, y] = this.px(e);
+    let best = null;
+    for (const w of m?.walls || []) {
+      if (w.onFace) continue;
+      const z = m.levels[w.base].z, a = this.P([...w.a, z]), b = this.P([...w.b, z]), dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / l2)), dd = Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy);
+      if (dd < 10 && (!best || dd < best.dd)) best = { w, t, dd };
+    }
+    return best;
+  }
+  trimAt(e) {
+    const m = this.massing(), h = this.wallUnder(e);
+    if (!m || !h) return null;
+    const mark = (w, o) => { const z = m.levels[w.base].z, a = this.P([...w.a, z]), b = this.P([...w.b, z]); return line(a[0], a[1], b[0], b[1], o); };
+    let g = (this.first ? mark(this.first.w, { stroke: 'var(--sun)', w: 4, op: 0.6 }) : '') + mark(h.w, { stroke: 'var(--glass)', w: 4, op: 0.5 });
+    if (this.first && this.first.w.id !== h.w.id) {
+      const trial = structuredClone(m);
+      if (this.tool === 'corner') cornerWalls(trial, this.first.w.id, h.w.id, this.first.t, h.t); else extendWall(trial, this.first.w.id, h.w.id, h.t);
+      for (const id of [this.first.w.id, h.w.id]) { const w = trial.walls.find((x) => x.id === id); if (w) g += mark(w, { stroke: 'var(--glass)', w: 1.6, dash: '5 3' }); }
+    }
+    const word = this.tool === 'corner' ? (this.first ? 'the second wall' : 'the first wall') : this.first ? 'the wall to extend' : 'the wall to extend to';
+    return { what: '', mutate: null, draw: () => g + this.noteAt(e, `pick ${word}`) };
+  }
+  noteAt(e, text) { const [x, y] = this.px(e); return label(x + 12, y - 12, text, { size: 9, fill: 'var(--glass)', anchor: 'start' }); }
+  trimClick(e) {
+    const h = this.wallUnder(e);
+    if (!h) return;
+    if (!this.first) { this.first = h; this.preview(e); return; }
+    if (h.w.id === this.first.w.id) return;
+    const f = this.first;
+    this.first = null;
+    if (this.tool === 'corner') this.onChange((x) => cornerWalls(x, f.w.id, h.w.id, f.t, h.t), 'walls joined at a corner');
+    else this.onChange((x) => extendWall(x, f.w.id, h.w.id, h.t), 'wall extended');
+    this.preview(e);
   }
 
   // A face outlined, to push or pull; dragging draws the zone as it will be.
@@ -365,7 +423,8 @@ export class ModelTools {
   // a wall not to snap to (the one whose end is dragged)
   wallSnap(m, raw, e, base, top, start = this.wall?.start, skip = null) {
     const z = m.levels[base].z, P = (p) => this.P([p[0], p[1], z]), d = (p, q) => { const a = P(p), b = P(q); return Math.hypot(a[0] - b[0], a[1] - b[1]); };
-    const lvz = (L) => m.levels[L].z, over = (x) => Math.min(lvz(x.top), lvz(top)) - Math.max(lvz(x.base), lvz(base)) > 1e-6;
+    // the walls and zones on these levels, and those of the storey below (seen under the plan)
+    const lvz = (L) => m.levels[L].z, over = (x) => Math.min(lvz(x.top), lvz(top)) - Math.max(lvz(x.base), lvz(base)) > 1e-6 || x.top === base;
     const segs = [...(m.walls || []).filter((w) => w.id !== skip && over(w)).map((w) => [w.a, w.b])];
     for (const zz of m.zones) if (over(zz)) zz.plate.forEach((p, k) => segs.push([p, zz.plate[(k + 1) % zz.plate.length]]));
     const foot = (p, [a, b]) => { const ab = [b[0] - a[0], b[1] - a[1]], l2 = ab[0] ** 2 + ab[1] ** 2 || 1, t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2; return [t, [a[0] + ab[0] * t, a[1] + ab[1] * t]]; };
@@ -393,7 +452,18 @@ export class ModelTools {
       const [t, q] = foot(raw, [a, b]);
       if (t >= 0 && t <= 1) offer(q, 'on', 8, 3);
     }
-    return best ? { p: best.p, kind: best.kind } : { p: raw, kind: null };
+    if (best) return { p: best.p, kind: best.kind };
+    // in line with a wall's end (across x or y of the plan, or both): the pointer tracks along it
+    const ends = segs.flatMap(([a, b]) => [a, b]);
+    if (start) ends.push(start);
+    let ax = null, ay = null;
+    for (const q of ends) {
+      const dx = d([q[0], raw[1]], raw), dy = d([raw[0], q[1]], raw);
+      if (dx < 8 && (!ax || dx < ax.dd)) ax = { q, dd: dx };
+      if (dy < 8 && (!ay || dy < ay.dd)) ay = { q, dd: dy };
+    }
+    if (ax || ay) return { p: [ax ? ax.q[0] : raw[0], ay ? ay.q[1] : raw[1]], kind: 'align', refs: [ax?.q, ay?.q].filter(Boolean) };
+    return { p: raw, kind: null };
   }
   // A drawn wall's end dragged (a plan view's ctx, or null for 3D): the point it snaps to, as Draw wall's
   // end does from the wall's other end. { p, kind }
@@ -408,6 +478,7 @@ export class ModelTools {
     if (kind === 'end') return poly([[x - 5, y - 5], [x + 5, y - 5], [x + 5, y + 5], [x - 5, y + 5]], o);
     if (kind === 'mid') return poly([[x, y - 6], [x + 6, y + 4], [x - 6, y + 4]], o);
     if (kind === 'perp') return line(x - 6, y + 5, x + 6, y + 5, o) + line(x, y + 5, x, y - 6, o);
+    if (kind === 'align') return line(x - 4, y - 4, x + 4, y + 4, o) + line(x - 4, y + 4, x + 4, y - 4, o);
     if (kind === 'on' || kind === 'cross') return line(x - 5, y - 5, x + 5, y + 5, o) + line(x - 5, y + 5, x + 5, y - 5, o);
     return '';
   }
@@ -422,7 +493,7 @@ export class ModelTools {
     if (!m || !m.levels[pr.base] || !m.levels[pr.top]) return null;
     const z0 = m.levels[pr.base].z, z1 = m.levels[pr.top].z, raw = this.pointAt(e, z0);
     if (!raw) return null;
-    let { p, kind } = this.wallSnap(m, raw, e, pr.base, pr.top);
+    let { p, kind, refs } = this.wallSnap(m, raw, e, pr.base, pr.top);
     const s0 = this.wall.start, typed = s0 && Number(this.wall.typed) > 0 ? Number(this.wall.typed) / 1000 : 0;
     // a length typed: the wall runs that far the way the pointer (snapped) points
     if (typed) {
@@ -434,6 +505,8 @@ export class ModelTools {
       what: '', mutate: null, point: p,
       draw: () => {
         let g = this.snapMark(at, kind);
+        // the ends it lines up with, traced to it
+        for (const q of kind === 'align' ? refs : []) { const r = this.P([q[0], q[1], z0]); g += line(r[0], r[1], at[0], at[1], { stroke: 'var(--sun)', w: 1, dash: '3 3' }); }
         if (s0) {
           const len = Math.hypot(p[0] - s0[0], p[1] - s0[1]), ang = (Math.atan2(p[1] - s0[1], p[0] - s0[0]) * 180) / Math.PI;
           // the wall as it will stand: its footprint at its assembly's thickness, to the side its

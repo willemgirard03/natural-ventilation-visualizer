@@ -450,3 +450,5 @@ body.bartucked .calcbar>.ribbon{display:none}
 .massing .mstable tr[data-act]:hover td{background:var(--glasssoft)}
 .massing .mstable tr.mslevel th{font:600 10px var(--mono); color:var(--ink3); text-align:left; padding:6px 4px 2px; border-bottom:1px solid var(--rule); background:none; position:static; text-transform:none; letter-spacing:0}
 .pick-info .pbtn.danger{color:#C0442B; border-color:#e3b3a8}
+/* figures that change as the air runs keep their room: the buttons beside them stay put */
+#room-air-status,#results-status,#bake-status{display:inline-block; min-width:28ch; font-variant-numeric:tabular-nums; white-space:nowrap}

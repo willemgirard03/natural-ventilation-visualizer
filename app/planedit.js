@@ -10,6 +10,8 @@
 //    each end of the bracket sets the array's length (the other end held; a click types it); its number
 //    and spacing slide with a drag along them (a click types them over); a selected window dragged
 //    along its wall sets the spacing, as in 3D.
+//  - A wall pressed and dragged moves, selected or not: a zone's wall for every zone sharing it, a free
+//    wall whole. Pressed and let go, it is selected.
 //  - A drawn wall standing free (it closes no zone) is picked as the others; selected, a grip at each
 //    end, dragged to move that end, snapping as Draw wall does.
 //  - The modelling tools work here too: the plan lends them its own projection, the zone and face
@@ -18,7 +20,7 @@
 
 import { cutSolid, chain } from './caps.js';
 import { gripMark, label, line, poly, inside, segDist, CLICK_PX } from './handles.js';
-import { zoneLevels, turnPlan, faceAxes, faceLength, pushFace, pushWall, moveWallEnd, unitLayout, bayExtents, setArraySpan, setCount, setSpacing, spreadSide, dragPitch } from '../src/model/massing.js';
+import { zoneLevels, turnPlan, faceAxes, faceLength, pushFace, pushWall, moveWallEnd, moveWall, unitLayout, bayExtents, setArraySpan, setCount, setSpacing, spreadSide, dragPitch } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
 
 const NEAR_PX = 6; // a wall's or window's line this close is under the pointer (drawn thin)
@@ -262,6 +264,12 @@ export class PlanEdit {
       if (r.moved) this.arrayDraft(trial, r);
       return this.arrayFor(this.api.selected(), trial, false);
     }
+    if (r.free !== undefined) {
+      const w = m.walls?.find((x) => x.id === r.free);
+      if (!w) return '';
+      const A = this.P([w.a[0] + r.dv[0], w.a[1] + r.dv[1]]), B = this.P([w.b[0] + r.dv[0], w.b[1] + r.dv[1]]);
+      return line(A[0], A[1], B[0], B[1], { stroke: 'var(--glass)', w: 2.4 }) + label((A[0] + B[0]) / 2, (A[1] + B[1]) / 2 - 12, `${Math.round(Math.hypot(...r.dv) * 1000)} mm`, { size: 9, fill: 'var(--glass)' });
+    }
     if (r.end) {
       const w = m.walls?.find((x) => x.id === r.wall);
       if (!w) return '';
@@ -286,6 +294,7 @@ export class PlanEdit {
       const r = this.drag, dx = e.clientX - r.x0, dy = e.clientY - r.y0;
       if (!r.moved && Math.hypot(dx, dy) < CLICK_PX) return;
       r.moved = true;
+      if (r.free !== undefined) { const q = this.toMassing(e), step = e.shiftKey ? 0.1 : STEP; r.dv = [q[0] - r.q0[0], q[1] - r.q0[1]].map((v) => Math.round(v / step) * step); this.paint(); return; }
       if (r.fig) { const along = dx * this.figs.ud[0] + dy * this.figs.ud[1]; r.steps = Math.round(along / 12); this.paint(); return; }
       if (r.pitch) {
         const m = this.api.massing(), { A, U } = faceAxes(m, r.zone, r.face), len = faceLength(m, r.zone, r.face), q = this.toMassing(e);
@@ -329,9 +338,23 @@ export class PlanEdit {
       return;
     }
     // the selected window pressed again: dragged along its wall, it sets the spacing
-    const sel = this.api.selected(), h = sel && this.pickAt(e), t = h?.kind === 'window' && h.name === sel && this.api.massingTarget(sel);
+    const sel = this.api.selected(), h = this.pickAt(e), t = sel && h?.kind === 'window' && h.name === sel && this.api.massingTarget(sel);
     if (t && Number.isInteger(t.window)) {
       this.drag = { pitch: true, zone: t.zone, face: t.face, index: t.window, u: 0, x0: e.clientX, y0: e.clientY, moved: false };
+      this.d.host.setPointerCapture?.(e.pointerId);
+      return;
+    }
+    // a wall pressed: dragged, it moves (for every zone sharing it); let go where pressed, it is picked
+    const wt = h?.kind === 'surface' && this.api.massingTarget(h.name), m = this.api.massing();
+    if (wt && Number.isInteger(wt.face) && this.zonesHere(m).includes(wt.zone)) {
+      const { A, U, n } = faceAxes(m, wt.zone, wt.face), len = faceLength(m, wt.zone, wt.face), mid = [A[0] + U[0] * len / 2, A[1] + U[1] * len / 2];
+      const p = this.P(mid), q = this.P([mid[0] + n[0], mid[1] + n[1]]);
+      this.drag = { p, dir: [q[0] - p[0], q[1] - p[1]], zone: wt.zone, face: wt.face, shared: true, press: h.name, x0: e.clientX, y0: e.clientY, d: 0, moved: false };
+      this.d.host.setPointerCapture?.(e.pointerId);
+      return;
+    }
+    if (h?.kind === 'wall') {
+      this.drag = { free: h.item.id, press: h.name, q0: this.toMassing(e), dv: [0, 0], x0: e.clientX, y0: e.clientY, moved: false };
       this.d.host.setPointerCapture?.(e.pointerId);
       return;
     }
@@ -342,6 +365,13 @@ export class PlanEdit {
     if (r) {
       this.drag = null;
       this.d.host.releasePointerCapture?.(e.pointerId);
+      // pressed and let go where it was: picked
+      if (r.press && !r.moved) { this.api.select(r.press); this.paint(); return; }
+      if (r.free !== undefined) {
+        if (r.dv[0] || r.dv[1]) this.api.change((m) => { moveWall(m, r.free, r.dv); }, 'wall moved');
+        this.paint();
+        return;
+      }
       if (r.end) {
         if (r.p) this.api.change((m) => { moveWallEnd(m, r.wall, r.end, r.p); }, 'wall end moved');
         this.paint();
