@@ -193,6 +193,29 @@ test('grid solver: warm air rises above a heated floor, a warm layer forms, and 
   assert.ok(worst < 1e-6, `largest cell imbalance ${worst}`);
 });
 
+test('grid solver: time-lapse steps of seconds stay stable, keep the plume and conserve air', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { voxelize, prepareRoomFlow, cellCentre } = await import('../src/solver/roomflow.js');
+  const { GridFlow } = await import('../src/solver/grid.js');
+  const model = twoRooms();
+  const g = voxelize(model, { cell: 0.25 }), net = buildNetwork(model, { doors: false });
+  const cond = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0.5, 'Hall:s:w': 0.5 }, zones: { Room: { t: 22, w: 0.008 }, Hall: { t: 22, w: 0.008 } }, outdoor: { t: 16, w: 0.008, pressure: 101325, windSpeed: 3, windDirection: 180 } };
+  const grid = new GridFlow(prepareRoomFlow(g, net), model);
+  grid.setConditions(flowStreams(net, solveNetwork(net, cond), cond), cond);
+  const hot = [...grid.fluid].filter((c) => { const [x, y, z] = cellCentre(g, c); return x > 1.5 && x < 2.5 && y > 1.5 && y < 2.5 && z < 0.3; });
+  grid.sources = grid.sources.map((s, i) => ({ ...s, occupied: i === 0 ? Int32Array.from(hot) : s.occupied, lower: i === 0 ? 500 : 0, upper: 0 }));
+  // two minutes of air in 2 s steps, then in 5 s steps
+  for (const dt of [2, 5]) {
+    for (let t = 0; t < 120;) t += grid.step(dt);
+    let top = 0;
+    for (const c of grid.fluid) for (let a = 0; a < 3; a++) { assert.ok(Number.isFinite(grid.U[a][c]) && Number.isFinite(grid.T[c])); top = Math.max(top, Math.abs(grid.U[a][c])); }
+    assert.ok(top < 5, `${dt} s steps: speeds stay bounded (${top.toFixed(2)} m/s)`);
+    let worst = 0;
+    for (const c of grid.fluid) worst = Math.max(worst, Math.abs(grid.divergence(c)));
+    assert.ok(worst < 1e-3, `${dt} s steps: largest cell imbalance ${worst}`);
+  }
+});
+
 test('sashes: air comes in under an awning and over a hopper', async () => {
   const { flowStreams } = await import('../src/solver/paths.js');
   const { voxelize, prepareRoomFlow, boundaryFluxes, cellCentre } = await import('../src/solver/roomflow.js');

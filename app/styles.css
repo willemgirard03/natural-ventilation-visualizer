@@ -452,3 +452,8 @@ body.bartucked .calcbar>.ribbon{display:none}
 .pick-info .pbtn.danger{color:#C0442B; border-color:#e3b3a8}
 /* figures that change as the air runs keep their room: the buttons beside them stay put */
 #room-air-status,#results-status,#bake-status{display:inline-block; min-width:28ch; font-variant-numeric:tabular-nums; white-space:nowrap}
+.playmenu{min-width:330px}
+.playmenu .layrow{display:flex; align-items:center; justify-content:space-between; gap:8px}
+.playmenu input[type=range]{width:120px; vertical-align:middle}
+.playmenu .opv{display:inline-block; min-width:11ch; font-variant-numeric:tabular-nums}
+#play-status{min-width:24ch; white-space:nowrap}

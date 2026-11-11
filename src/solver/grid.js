@@ -337,12 +337,21 @@ export class GridFlow {
   }
 
   // A time step fit for the current flow: air moves at most about one cell.
-  stableDt() {
+  stableDt() { return Math.min(1, (0.9 * this.g.h) / this.topSpeed()); }
+  topSpeed() {
     let top = 0.05;
     for (let a = 0; a < 3; a++) for (const c of this.fluid) top = Math.max(top, Math.abs(this.U[a][c]));
     for (const v of this.setVel) top = Math.max(top, Math.abs(v));
-    return Math.min(1, (0.9 * this.g.h) / top);
+    return top;
   }
+
+  // The longest step over which buoyancy pushes in full (s). A time-lapse takes steps of a few seconds
+  // (carried in one jump each, as fast fluid dynamics allows: Example 02's flow at 2 s steps matches
+  // its flow at the solver's own steps about as closely as that flow matches itself a minute on,
+  // at 5 s less so); over such a step the push is held to this, beyond which the warm air would
+  // already have moved, which keeps the long steps from overshooting.
+  get buoyDt() { return this._buoyDt ?? 1; }
+  set buoyDt(v) { this._buoyDt = v; }
 
   // Advances the flow by dt seconds.
   step(dt = this.stableDt()) {
@@ -398,7 +407,10 @@ export class GridFlow {
     for (const c of this.fluid) {
       if (this.kind[c * 6 + 5] !== OPEN) continue;
       const up = this.nbr[c * 6 + 5], tr = ref[this.region[c]];
-      this.U[2][c] += (dt * G * (0.5 * (this.T[c] + this.T[up]) - tr)) / (tr + 273.15);
+      const b = (G * (0.5 * (this.T[c] + this.T[up]) - tr)) / (tr + 273.15);
+      // over a long step, the push is limited to what the air could take on in the time it takes to
+      // cross a cell (beyond that the warm air would already have moved): keeps time-lapse steps stable
+      this.U[2][c] += dt <= this.buoyDt ? dt * b : this.buoyDt * b;
     }
     // Air coming in over a hopper's sash, turned upwards.
     for (const { c, up } of this.deflect || []) if (this.kind[c * 6 + 5] === OPEN) this.U[2][c] = Math.max(this.U[2][c], up);

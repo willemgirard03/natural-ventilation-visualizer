@@ -294,10 +294,10 @@ let sliceRanges = {}, sliceTimer = 0, sliceLast = 0;
 // room's own temperature. Throttled, since the simulation posts several steps a second.
 function drawSlices(now = false) {
   // While a baked day plays, its blended fields; otherwise the live room air.
-  const simulated = bakedPlay ? bakedPlay.kind === 'grid' : $('room-air').value === 'grid';
-  const grid = bakedPlay?.grid || liveGrid(), field = bakedPlay?.live || liveField();
+  const simulated = $('room-air').value === 'grid';
+  const grid = liveGrid(), field = liveField();
   const any = view.sections.planes.some((p) => p.air.field || p.air.particles);
-  if (!any || !model || !rooms || (simulated ? !(bakedPlay || gridLive) : !field)) { slices.hide(); sliceRanges = {}; legend(); return; }
+  if (!any || !model || !rooms || (simulated ? !gridLive : !field)) { slices.hide(); sliceRanges = {}; legend(); return; }
   const wait = 300 - (performance.now() - sliceLast);
   if (!now && wait > 0) { clearTimeout(sliceTimer); sliceTimer = setTimeout(() => drawSlices(true), wait); return; }
   sliceLast = performance.now();
@@ -314,7 +314,7 @@ function drawSlices(now = false) {
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
 const liveGrid = () => grid, liveField = () => field;
-let co2Timer = 0;
+let co2Timer = 0, co2Last = 0, fieldLast = 0;
 let rooms = null, field = null, fieldTimer = 0; // cells and faces for the room flow, and its latest field
 let pressureRange = 1; // Pa, the end of the pressure colour scale for the hour solved
 // The grid solver runs in a worker; `grid` is the page's copy, reading the worker's latest step.
@@ -330,6 +330,10 @@ function startGrid(m) {
   worker.onmessage = ({ data }) => {
     if (data.type !== 'state' || !grid) return;
     gridAirTime = data.time;
+    // how much air it could run a second at the largest air step (for Auto), and how it is keeping up
+    const paceNow = Number($('play-cap').value) / Math.max(1e-3, data.ms / 1000);
+    gridPace = gridPace ? gridPace * 0.85 + paceNow * 0.15 : paceNow;
+    gridState = { behind: data.behind, settled: data.settled };
     grid.FV.set(data.FV);
     grid.T.set(data.T);
     if (data.C) grid.C.set(data.C);
@@ -342,6 +346,8 @@ function startGrid(m) {
       + (walls ? `Walls, floors and windows warm or cool the air at the inside temperatures of the results (${walls} surfaces).` : 'Surfaces neither warm nor cool the air: the results have no surface temperatures; a rerun adds them.');
   };
   worker.postMessage({ type: 'model', epjson: m.epjson });
+  gridPace = null; gridState = null;
+  if (play) play.mode = null; // the new worker told how to keep up
 }
 // Windows opened or closed one by one (by window name) or room by room (by zone), over the Windows setting.
 const windowSet = new Map(), roomSet = new Map();
@@ -366,7 +372,14 @@ let esoSource = null; // where the results file in use comes from: { name, blob(
 // Inside setting) and windows and doors as set, following the results' own openings where asked.
 function conditionsAt(hourAt, outdoor, site) {
   const tIn = Number($('t-in').value), mode = $('windows').value;
-  const inside = (z) => (results && zoneAt(results, z, hourAt, outdoor.pressure)) || { t: tIn, w: 0.008, vent: null };
+  const inside = (z) => {
+    const r = results && zoneAt(results, z, hourAt, outdoor.pressure);
+    if (!r) return { t: tIn, w: 0.008, vent: null };
+    // playing: between the results' hours (each the mean of its hour, so read at its middle)
+    if (!playAt) return r;
+    const x = playAt.H - 0.5, j = Math.floor(x), f = x - j, a = zoneAt(results, z, ((j % 8760) + 8760) % 8760, outdoor.pressure), b = zoneAt(results, z, (j + 1) % 8760, outdoor.pressure);
+    return a && b ? { ...r, t: a.t + (b.t - a.t) * f, w: a.w + (b.w - a.w) * f } : r;
+  };
   const conditions = {
     site, outdoor,
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
@@ -443,7 +456,7 @@ function solveAir() {
   airflow = { solution, flows, conditions, co2: airflow?.co2 ?? null, site, outdoor, hourAt };
   clearTimeout(co2Timer);
   co2Timer = setTimeout(() => {
-    if (baking || bakedPlay) return; // a bake has its own CO2
+    co2Last = performance.now();
     const now = airflow;
     if (now?.solution !== solution) return;
     now.co2 = co2History(hourAt, solution, site, outdoor);
@@ -458,7 +471,7 @@ function solveAir() {
     if ($('color-by').value === 'co2') legend();
     const line = document.getElementById('co2-line');
     if (line) line.outerHTML = co2Line(line.dataset.zone);
-  }, 250);
+  }, play ? Math.max(0, 1000 - (performance.now() - co2Last)) : 250);
   const openNow = Object.entries(conditions.open).filter(([n, f]) => f > 0 && !n.endsWith(':door')).map(([n]) => n);
   view.setOpenDoors(new Set(Object.entries(conditions.open).filter(([n, f]) => f > 0 && n.endsWith(':door')).map(([n]) => n)));
   view.showWindows(new Set(openNow), new Map(openNow.map((n) => {
@@ -488,8 +501,6 @@ function solveAir() {
   pressureRange = [0.5, 1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100].find((x) => x >= top) || Math.ceil(top);
   view.setPressures(dps, pressureRange);
   if ($('color-by').value === 'pressure' || $('color-by').value === 'co2') legend();
-  // Baking, or playing a bake: the hour's network only; the bake has its own room air.
-  if (baking || bakedPlay) { airTotals(flows, conditions); return; }
   if ($('room-air').value === 'grid') {
     // Simulated: the background solver takes the new conditions; the page's copy of the grid follows.
     if (grid && worker) {
@@ -502,11 +513,12 @@ function solveAir() {
     // Ideal flow takes a few hundred milliseconds, so it follows once the controls settle.
     clearTimeout(fieldTimer);
     fieldTimer = setTimeout(() => {
+      fieldLast = performance.now();
       if (!rooms || airflow?.flows !== flows) return;
       field = roomFlow(rooms, flows, { previous: field, open: conditions.open, sashes: conditions.sashes });
       air.setField(field, conditions);
       drawSlices(true);
-    }, 120);
+    }, play ? Math.max(0, 200 - (performance.now() - fieldLast)) : 120);
   }
   airTotals(flows, conditions);
 }
@@ -780,7 +792,7 @@ function co2Message(hourAt, targets, site) {
 }
 // CO2 at a point (model coordinates): the grid solver's field, or with ideal flow its room's level.
 function co2Near(p, zoneIndex = null) {
-  const G = bakedPlay?.grid || grid, sim = bakedPlay ? bakedPlay.kind === 'grid' : $('room-air').value === 'grid';
+  const G = grid, sim = $('room-air').value === 'grid';
   if (sim && G?.co2) return G.co2At(p);
   const g = rooms?.g;
   if (!g) return 400;
@@ -815,7 +827,6 @@ function updateRun() {
 function applyHour() {
   updateRun();
   if (keyframes.length) followKeyframes(Number($('hour').value) - 1);
-  if (!baking && !bakedPlay) bakeStatus();
   for (const id of ['day', 'hour', 'play']) $(id).disabled = !weather && !results;
   if (!weather && !results && $('play').classList.contains('on')) setPlaying(false);
   const day = Number($('day').value), hour = Number($('hour').value);
@@ -1796,46 +1807,154 @@ for (const el of document.querySelectorAll('.barval[data-for]')) {
 // The sliders' names drag them too: a day or an hour for every 4 px.
 for (const [id, per] of [['day', 0.25], ['hour', 0.25]]) scrubbable($(id).previousElementSibling, $(id), { per, min: Number($(id).min), max: Number($(id).max) });
 
-// Play day: the hour steps on from From to To, each held for a few seconds while its air moves. The
-// weather, room temperatures, windows and CO2 follow each hour as if picked by hand; the grid solver
-// carries its air on from hour to hour (setConditions keeps the flow). Changing the date or time by
-// hand pauses it.
-let playTimer = 0, stepping = false, gridAirTime = 0;
-// The air's own clock (s): the grid solver's simulated time, or with ideal flow (which has no time of
-// its own) the real time. Play day paces its hours by it, so every hour gets the same air time
-// whatever the computer's speed, and the plumes an hour shows do not depend on how long it is watched.
-const airSource = () => ($('room-air').value === 'grid' && gridLive ? 'air' : 'real');
-const airClock = () => (airSource() === 'air' ? gridAirTime : performance.now() / 1000);
+// Play day: the day's clock runs from From to To at the speed set (Speed: an hour of the day in an hour,
+// down to an hour in a second). At each weather step (10 min to 1 h) the conditions change: the weather
+// between the weather file's hours (a straight line; the wind as a vector, so it turns the short way),
+// the rooms' temperatures between the results' hours, the windows as the results or the keyframes have
+// them; the network is solved again and the room air takes the new flows. The room air (the grid
+// solver, in its worker) keeps up as Room air says: Follow runs it in step with the clock, in steps of
+// up to the Largest air step, falling behind where the computer cannot keep up (the lag shown);
+// Settle runs it at each weather step until it settles, then holds; Auto follows while the computer
+// keeps up and settles beyond. Everything else (orbit, cuts, picking) goes on as it plays. Changing
+// the date or time by hand pauses it.
+let stepping = false, gridAirTime = 0, gridPace = null, gridState = null; // the worker's latest: air time, air seconds it can run a second at the largest step, behind / settled
+let play = null; // while playing: { H (hours since 1 January 00:00), H1 (the end), Hfrom, next (the next weather step), mode, air0, H0 }
+let playAt = null; // the moment the conditions are for while playing: { H, outdoor }
 const pad2 = (h) => String(h).padStart(2, '0');
+const PLAY_STEPS = [10, 15, 20, 30, 60]; // minutes
+const playStepH = () => PLAY_STEPS[Number($('play-step').value)] / 60;
+const playSpeed = () => 3600 ** (Number($('play-speed').value) / 1000); // seconds of the day a second
+// the speed named as an hour of the day in so long: 1 h in 1 h … 1 h in 1 s
+function speedLabel(k) {
+  const per = 3600 / k, r = (x) => +x.toFixed(x < 10 ? 1 : 0);
+  return `1 h in ${per >= 3599 ? '1 h' : per >= 60 ? `${r(per / 60)} min` : `${r(per)} s`}`;
+}
+const SPEED_STOPS = [1, 6, 60, 360, 3600].map((k) => (1000 * Math.log(k)) / Math.log(3600));
+function playControls() {
+  $('play-step-value').textContent = `${PLAY_STEPS[Number($('play-step').value)]} min`;
+  const k = playSpeed();
+  $('play-speed-value').textContent = `${speedLabel(k)} (${k < 10 ? +k.toFixed(1) : Math.round(k)}×)`;
+}
+$('play-speed').addEventListener('input', (e) => {
+  // close to a round speed (an hour in an hour, 10 min, 1 min, 10 s, 1 s), it takes it
+  const v = Number(e.target.value), near = SPEED_STOPS.find((x) => Math.abs(x - v) < 14);
+  if (near !== undefined) e.target.value = String(Math.round(near));
+  playControls();
+});
+$('play-step').addEventListener('input', () => { playControls(); if (play) play.next = Math.floor(play.H / playStepH() + 1e-9) * playStepH() + playStepH(); });
+for (const id of ['play-air', 'play-cap']) $(id).addEventListener('change', () => { if (play) play.mode = null; });
+playControls();
+
+// The weather at H (hours since 1 January 00:00): the file's hours read at the moments they end,
+// values between them in a straight line; the wind as a vector, so it turns the short way, its speed
+// in a straight line.
+function weatherAtTime(H) {
+  const k = Math.floor(H), f = H - k, at = (i) => { const j = ((i % 8760) + 8760) % 8760; return outdoorAt(weather, Math.floor(j / 24) + 1, (j % 24) + 1); };
+  const a = at(k - 1), b = at(k), mix = (x, y) => x + (y - x) * f, R = Math.PI / 180;
+  const u = mix(a.windSpeed * Math.sin(a.windDirection * R), b.windSpeed * Math.sin(b.windDirection * R));
+  const v = mix(a.windSpeed * Math.cos(a.windDirection * R), b.windSpeed * Math.cos(b.windDirection * R));
+  const dir = Math.hypot(u, v) > 1e-6 ? ((Math.atan2(u, v) / R) + 360) % 360 : a.windDirection;
+  return { t: mix(a.t, b.t), w: mix(a.w, b.w), pressure: mix(a.pressure, b.pressure), windSpeed: mix(a.windSpeed, b.windSpeed), windDirection: dir };
+}
+// The room air's way of keeping up: follow (in step with the clock) or settle (at each weather step).
+function playMode() {
+  const want = $('play-air').value;
+  if (want !== 'auto') return want;
+  return playSpeed() <= 0.8 * (gridPace ?? 1) ? 'follow' : 'settle';
+}
+function setPlaying(on) {
+  if (play) cancelAnimationFrame(play.raf);
+  const was = !!play;
+  play = null; playAt = null;
+  $('play').classList.toggle('on', on);
+  $('play').textContent = on ? '❚❚ Pause' : '▶ Play day';
+  if (!on) {
+    worker?.postMessage({ type: 'live', mode: 'free' });
+    $('play-status').textContent = '';
+    if (was) applyHour(); // the hour as picked, whole
+    return;
+  }
+  const [from, to] = playSpan(), D = (Number($('day').value) - 1) * 24, start = Number($('hour').value) - 1;
+  const h0 = start >= from && start < to ? start : from; // from the hour shown, unless it is outside the span
+  play = { H: D + h0, H1: D + to, Hfrom: D + from, next: D + h0, mode: null, air0: gridAirTime, H0: D + h0, last: performance.now() };
+  playStep();
+  play.raf = requestAnimationFrame(playFrame);
+}
+function playFrame(now) {
+  const P = play;
+  if (!P) return;
+  const dt = Math.min(1, Math.max(0, (now - P.last) / 1000)); // slow frames keep the day's pace; a pause (a hidden tab) does not jump it
+  P.last = now;
+  P.H += (dt * playSpeed()) / 3600;
+  if (P.H >= P.H1) {
+    if (!$('play-loop').checked) { setPlaying(false); return; }
+    P.H = P.Hfrom; P.next = P.Hfrom; P.mode = null;
+  }
+  if (P.H >= P.next) playStep();
+  // the room air: the worker told how to keep up, and how much of the day has passed
+  const sim = $('room-air').value === 'grid' && worker;
+  if (sim) {
+    const mode = playMode();
+    if (mode !== P.mode) {
+      P.mode = mode;
+      worker.postMessage({ type: 'live', mode, cap: Number($('play-cap').value) });
+      if (mode === 'follow') { P.air0 = gridAirTime; P.H0 = P.H; }
+    }
+    if (mode === 'follow') worker.postMessage({ type: 'target', air: P.air0 + (P.H - P.H0) * 3600 });
+  }
+  playClock(P.H);
+  playStatus(sim ? P.mode : null);
+  P.raf = requestAnimationFrame(playFrame);
+}
+// A weather step: the conditions at its moment, as if the time were picked by hand.
+function playStep() {
+  const P = play, stepH = playStepH(), Hs = Math.floor(P.H / stepH + 1e-9) * stepH;
+  P.next = Hs + stepH;
+  const day = Math.floor(Hs / 24) + 1, hour = Math.floor(Hs - (day - 1) * 24);
+  stepping = true;
+  $('day').value = day; $('hour').value = hour + 1;
+  stepping = false;
+  $('day-value').textContent = dateOf(day).label;
+  if (keyframes.length) followKeyframes(hour);
+  updateRun();
+  playAt = { H: Hs, outdoor: weather ? weatherAtTime(Hs) : null };
+  if (playAt.outdoor) {
+    weatherHour = playAt.outdoor;
+    $('t-out').value = +playAt.outdoor.t.toFixed(2);
+    $('wind').value = +playAt.outdoor.windSpeed.toFixed(2);
+    $('wind-dir').value = Math.round(playAt.outdoor.windDirection);
+  }
+  solveAir();
+  drawRose();
+  if (model) showInfo(current());
+}
+// The day's clock, to the minute.
+function playClock(H) {
+  const m = Math.floor((H - Math.floor(H)) * 60), h = Math.floor(H) % 24;
+  $('when').textContent = `${pad2(h)}:${pad2(m)}`;
+}
+// How the room air is keeping up, beside the play button.
+const duration = (s) => (s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${+(s / 3600).toFixed(1)} h`);
+function playStatus(mode) {
+  const k = playSpeed(), speed = `${k < 10 ? +k.toFixed(1) : Math.round(k)}×`;
+  let text = speed, tip = `${speedLabel(k)}; weather step ${PLAY_STEPS[Number($('play-step').value)]} min.`;
+  if (!mode) { text += ' · ideal flow'; tip += ' Ideal flow keeps up at any speed: it has no time of its own (no buoyancy or momentum).'; }
+  else if (mode === 'follow') {
+    const behind = gridState?.behind || 0;
+    text += behind > 10 ? ` · air following, ${duration(behind)} behind` : ' · air following';
+    tip += ` The room air runs in step with the day's clock, in steps of up to ${$('play-cap').value} s.` + (behind > 10 ? ' The computer cannot keep up at this speed: the air shown is that long behind the clock. Slow the day, take longer air steps, or let it Settle.' : '');
+  } else {
+    const done = gridState?.settled ?? 0;
+    text += done >= 1 ? ' · air settled' : ` · air settling ${Math.round(done * 100)}%`;
+    tip += ` At each weather step the room air is run until it settles for the new conditions (${$('play-cap').value} s steps), then holds: the pattern at each moment, not its history. The computer can run about ${gridPace ? Math.round(gridPace) : '?'} s of air a second.`;
+  }
+  if ($('play-status').textContent !== text) $('play-status').textContent = text;
+  $('play-status').title = tip;
+}
 function playSpan() {
   const from = Number($('play-from').value), to = Math.max(from + 1, Number($('play-to').value));
   $('play-span').textContent = `${pad2(from)}:00–${pad2(to)}:00`;
   return [from, to];
-}
-function setPlaying(on) {
-  clearInterval(playTimer);
-  playTimer = 0;
-  if (bakedPlay) stopBaked();
-  $('play').classList.toggle('on', on);
-  $('play').textContent = on ? '❚❚ Pause' : bakeReady() ? '▶ Play baked' : '▶ Play day';
-  if (!on) { applyHour(); return; } // the label back to the whole hour
-  if (bakeReady()) { playBaked(); return; }
-  const [from, to] = playSpan(), start = Number($('hour').value) - 1; // the hour's start, standard time
-  if (start < from || start >= to) setHour(from); // start from the beginning unless already within
-  let began = airClock(), source = airSource();
-  // Each tenth of a second: the clock shows the minutes of the hour as its air time passes; when the
-  // hour's air time is up, the next hour.
-  playTimer = setInterval(() => {
-    if (airSource() !== source) { source = airSource(); began = airClock(); } // the grid started or stopped: count afresh
-    const per = Number($('play-hold').value), done = (airClock() - began) / per;
-    if (done < 1) { showMinutes(Math.floor(done * 60)); return; }
-    const [f, t] = playSpan(), now = Number($('hour').value) - 1;
-    if (now + 1 < t) setHour(now + 1);
-    else if ($('play-loop').checked) setHour(f);
-    else { setPlaying(false); return; }
-    began = airClock();
-    showMinutes(0);
-  }, 100);
 }
 // ---------- window keyframes ----------
 // The windows and doors kept at an hour (◆ Keyframe): the Windows, Doors and Sashes settings and every
@@ -1896,163 +2015,7 @@ $('keyframes').addEventListener('click', (e) => {
   const el = $('hour'); el.value = h + 1; el.dispatchEvent(new Event('input', { bubbles: true }));
 });
 
-// ---------- Play day, baked ----------
-// A day worked out before it is played, so it plays smoothly at any speed: each hour's network, and
-// its room air, either ideal flow (seconds) or the grid solver run for each hour's air time in a
-// worker of its own (minutes). Playing blends each hour's fields into the next as its clock runs; the
-// particles move through the blend and the cuts are drawn from it, so clipping planes still cut it
-// live. A bake holds while the model, the day, the hours and the window settings are as they were.
-let bake = null, baking = null, bakedPlay = null, edits = 0;
-function bakeKey(kind) {
-  return JSON.stringify([kind, edits, model?.source.fileName, results?.name || null, weather?.fileName || null, $('day').value, playSpan(),
-    ...(keyframes.length ? [] : [$('windows').value, $('doors').value, $('sash-type').value, [...windowSet], [...roomSet], [...sashSet], [...amountSet]]),
-    weather ? null : [$('t-out').value, $('t-in').value, $('wind').value, $('wind-dir').value], kind === 'grid' ? $('play-hold').value : null, keyframes]);
-}
-const bakeReady = () => !!bake && bake.key === bakeKey(bake.kind);
-function bakeStatus(text) {
-  if (text === undefined) {
-    const day = dateOf(Number($('day').value)).label, [f, t] = bake?.span || [];
-    text = !bake ? '' : bakeReady() ? `Baked: ${bake.kind === 'grid' ? 'simulated' : 'ideal flow'}, ${day} ${pad2(f)}:00–${pad2(t)}:00. Play day plays it.`
-      : 'The bake no longer matches the settings: bake again, or Play day plays live.';
-    if (!baking && !$('play').classList.contains('on')) $('play').textContent = bakeReady() ? '▶ Play baked' : '▶ Play day';
-  }
-  $('bake-status').textContent = text;
-  $('bake-quick').textContent = baking?.kind === 'ideal' ? 'Cancel' : 'Ideal flow';
-  $('bake-full').textContent = baking?.kind === 'grid' ? 'Cancel' : 'Simulated';
-  $('bake-quick').disabled = !model || (baking && baking.kind !== 'ideal');
-  $('bake-full').disabled = !model || (baking && baking.kind !== 'grid');
-}
-
-async function bakeDay(kind) {
-  if (baking) { baking.cancel(); return; }
-  if (!model || !rooms) return;
-  setPlaying(false);
-  const [from, to] = playSpan(), keep = Number($('hour').value) - 1, frames = [];
-  const job = baking = { kind, cancelled: false, cancel() { this.cancelled = true; this.stop?.(); } };
-  if (kind === 'grid') worker?.postMessage({ type: 'stop' }); // the live room air rests meanwhile
-  bakeStatus('Baking: the network, hour by hour…');
-  let prev = null;
-  for (let h = from; h < to && !job.cancelled; h++) {
-    setHour(h); // the hour's weather, temperatures and network, as Play day steps it
-    const a = airflow, co2 = co2History(a.hourAt, a.solution, a.site, a.outdoor);
-    const f = { hour: h, conditions: a.conditions, flows: a.flows, co2 };
-    if (kind === 'ideal') { prev = roomFlow(rooms, a.flows, { previous: prev, open: a.conditions.open, sashes: a.conditions.sashes }); f.field = prev; }
-    else f.co2msg = co2Message(a.hourAt, co2, a.site);
-    frames.push(f);
-    bakeStatus(`Baking: hour ${h - from + 1} of ${to - from}${kind === 'grid' ? ', network' : ''}…`);
-    await new Promise((r) => setTimeout(r, 0));
-  }
-  if (kind === 'grid' && !job.cancelled) {
-    const w = new Worker(new URL('./grid-worker.js', import.meta.url), { type: 'module' }), t0 = performance.now();
-    await new Promise((resolve) => {
-      job.stop = () => { w.terminate(); resolve(); };
-      w.onmessage = ({ data }) => {
-        if (data.type === 'baked') {
-          Object.assign(frames[data.i], { FV: data.FV, T: data.T, C: data.C });
-          const left = ((performance.now() - t0) / (data.i + 1)) * (frames.length - data.i - 1) / 1000;
-          bakeStatus(`Baking the room air: hour ${data.i + 1} of ${frames.length} done, about ${Math.ceil(left / 60)} min left…`);
-        } else if (data.type === 'bake-done') { w.terminate(); resolve(); }
-      };
-      w.postMessage({ type: 'model', epjson: model.epjson });
-      w.postMessage({ type: 'bake', air: Number($('play-hold').value), hours: frames.map((f) => ({ conditions: f.conditions, hour: hourIndex(Number($('day').value), f.hour + 1), co2: f.co2msg })) });
-    });
-  }
-  baking = null;
-  if (!job.cancelled) {
-    bake = { kind, span: [from, to], frames, key: null };
-    if (kind === 'grid') { bake.grid = new GridFlow(rooms, model); bake.grid.setCO2(frames[0].co2msg); }
-  }
-  setHour(keep); // back to the hour shown before, with the live room air
-  if (bake && !job.cancelled) bake.key = bakeKey(kind);
-  bakeStatus(job.cancelled ? 'Bake cancelled.' : undefined);
-}
-$('bake-quick').addEventListener('click', () => bakeDay('ideal'));
-$('bake-full').addEventListener('click', () => bakeDay('grid'));
-
-// Plays the bake: each hour blends into the next over the seconds it is given; the last is held.
-function playBaked() {
-  const B = bake, n = B.frames.length, now = Number($('hour').value) - 1;
-  worker?.postMessage({ type: 'stop' });
-  const P = bakedPlay = { kind: B.kind, t: Math.max(0, Math.min(n - 1, now - B.span[0])), k: -1 };
-  if (B.kind === 'grid') P.grid = B.grid;
-  else {
-    const f0 = B.frames[0].field;
-    P.live = { phi: Float64Array.from(f0.phi), velocity: Float32Array.from(f0.velocity), out: new Map(f0.out), entries: f0.entries };
-  }
-  let last = performance.now();
-  const frame = (time) => {
-    if (bakedPlay !== P) return;
-    P.t += Math.max(0, Math.min(0.1, (time - last) / 1000)) / Math.max(0.1, Number($('play-sec').value) || 4); // a frame's time can come before playing began
-    last = time;
-    if (P.t >= n) {
-      if (!$('play-loop').checked) { setPlaying(false); return; }
-      P.t = 0;
-    }
-    const k = Math.min(n - 1, Math.floor(P.t)), f = P.t - k;
-    if (k !== P.k) enterBakedHour(P, k);
-    blendBaked(P, k, k < n - 1 ? f : 0);
-    showMinutes(Math.floor(f * 60));
-    drawSlices();
-    P.raf = requestAnimationFrame(frame);
-  };
-  P.raf = requestAnimationFrame(frame);
-}
-// An hour of the bake begins: its network drawn (open windows, pressures) and the particles' sources.
-function enterBakedHour(P, k) {
-  const B = bake, F = B.frames[k], G = B.frames[Math.min(k + 1, B.frames.length - 1)];
-  P.k = k;
-  setHour(F.hour);
-  airflow.co2 = F.co2;
-  view.setCO2(F.co2);
-  const zones = rooms.g.zones;
-  P.za = zones.map((z) => F.conditions.zones[z].t);
-  P.zb = zones.map((z) => G.conditions.zones[z].t);
-  P.oa = F.conditions.outdoor.t; P.ob = G.conditions.outdoor.t;
-  if (P.grid) {
-    P.grid.setConditions(F.flows, F.conditions, { copy: true });
-    if (F.co2msg) P.grid.setCO2(F.co2msg);
-    air.setField(P.grid, F.conditions);
-  } else {
-    P.live.entries = F.field.entries;
-    P.keys = [...new Set([...F.field.out.keys(), ...G.field.out.keys()])];
-    P.live.out = new Map(P.keys.map((key) => [key, 0]));
-    air.setField(P.live, F.conditions);
-  }
-  P.zoneT = P.za.slice();
-}
-// The fields between two hours, f of the way from the first to the second.
-function blendBaked(P, k, f) {
-  const B = bake, A = B.frames[k], Z = B.frames[Math.min(k + 1, B.frames.length - 1)], g = 1 - f;
-  const mix = (out, a, b) => { for (let i = 0; i < out.length; i++) out[i] = a[i] * g + b[i] * f; };
-  if (P.grid) {
-    mix(P.grid.FV, A.FV, Z.FV);
-    mix(P.grid.T, A.T, Z.T);
-    if (A.C && Z.C && P.grid.C) mix(P.grid.C, A.C, Z.C);
-  } else {
-    mix(P.live.phi, A.field.phi, Z.field.phi);
-    mix(P.live.velocity, A.field.velocity, Z.field.velocity);
-    for (const key of P.keys) P.live.out.set(key, (A.field.out.get(key) || 0) * g + (Z.field.out.get(key) || 0) * f);
-  }
-  for (let i = 0; i < P.zoneT.length; i++) P.zoneT[i] = P.za[i] * g + P.zb[i] * f;
-  air.tracer.zoneT = P.zoneT;
-  air.tracer.outdoorT = P.oa * g + P.ob * f;
-}
-function stopBaked() {
-  if (!bakedPlay) return;
-  cancelAnimationFrame(bakedPlay.raf);
-  bakedPlay = null;
-  air.clear();
-  solveAir(); // the live room air again
-  if ($('room-air').value === 'grid' && grid && airflow) air.setField(grid, airflow.conditions);
-}
-
-// The time label with minutes, while the day plays: standard time, and the clock's on daylight-saving days.
-function showMinutes(minute) {
-  const day = Number($('day').value), start = Number($('hour').value) - 1;
-  const dst = model && daylightSavingDays(model.epjson);
-  const t = (h) => `${pad2(h % 24)}:${pad2(minute)}`;
-  $('when').textContent = t(start) + (dst && day - 1 >= dst[0] && day - 1 <= dst[1] ? ` (${t(start + 1)} daylight time)` : '');
-}
+let edits = 0;
 // Moves to the hour starting at h (0 to 23), as the Time slider would.
 function setHour(h) {
   stepping = true;
@@ -2060,8 +2023,8 @@ function setHour(h) {
   $('hour').dispatchEvent(new Event('input', { bubbles: true }));
   stepping = false;
 }
-$('play').addEventListener('click', () => setPlaying(!playTimer && !$('play').classList.contains('on')));
-for (const id of ['day', 'hour']) $(id).addEventListener('input', () => { if (!stepping && $('play').classList.contains('on')) setPlaying(false); });
+$('play').addEventListener('click', () => setPlaying(!play));
+for (const id of ['day', 'hour']) $(id).addEventListener('input', () => { if (!stepping && play) setPlaying(false); });
 for (const id of ['play-from', 'play-to']) $(id).addEventListener('input', playSpan);
 playSpan();
 
@@ -2152,9 +2115,7 @@ function render(m) {
   fillDetails(m);
   winEdit.stop();
   undoStack.length = 0; redoStack.length = 0; modelEdited = false; axisCache = null; schedCache.clear();
-  if (bakedPlay) stopBaked();
-  if (baking) baking.cancel();
-  bake = null; edits = 0;
+  edits = 0;
   keyframes = []; kfHour = null;
   $('lib-open').disabled = false;
   libOpen = null;
