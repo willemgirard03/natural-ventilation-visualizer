@@ -461,7 +461,7 @@ function solveAir() {
   }, 250);
   const openNow = Object.entries(conditions.open).filter(([n, f]) => f > 0 && !n.endsWith(':door')).map(([n]) => n);
   view.setOpenDoors(new Set(Object.entries(conditions.open).filter(([n, f]) => f > 0 && n.endsWith(':door')).map(([n]) => n)));
-  view.setOpenWindows(new Set(openNow), new Map(openNow.map((n) => {
+  view.showWindows(new Set(openNow), new Map(openNow.map((n) => {
     const l = net.links.find((x) => x.name === n);
     return [n, { ...sashOf(n), angle: sashFor(l, conditions.open[n]).angle }];
   })));

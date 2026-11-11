@@ -104,6 +104,8 @@ function hull2(pts) {
 // the model checks that find a fault in where or which way surfaces stand: painted in the view
 const GEOMETRY_CHECKS = new Set(['surface-upside-down', 'interzone-not-opposite', 'interzone-not-reciprocal', 'interzone-partner-missing', 'zone-surface-reversed', 'zone-not-closed', 'zone-negative-volume', 'window-off-plane', 'surface-zone-missing']);
 
+const WINDOW_SWING = 650; // ms a sash takes to swing to its new angle, drawn
+
 function dropSeams(edges, tris, zoneOf = () => 0, surfaceOf = () => 0) {
   const planes = new Map(), v = (a, i) => new THREE.Vector3(a[i], a[i + 1], a[i + 2]);
   const f3 = (x) => { const s = x.toFixed(3); return s === '-0.000' ? '0.000' : s; };
@@ -873,7 +875,34 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
   // An open window with a sash is drawn as its sash swung to that angle on its hinge, in the open
   // colour, with the rough opening left as an outline; other open windows are tinted in place.
   // rebuild: redraw the in-place glazing even if no sash changed (after the walls or window depth change).
-  setOpenWindows(open, sashes = new Map(), rebuild = false) {
+  // The windows opened and closed as the air has them, each sash swinging to its new angle over a
+  // moment (WINDOW_SWING ms, eased) rather than jumping there. Only the drawing moves: the air takes
+  // the new opening at once. open: the open windows' names; sashes: name -> { type, hinge, angle }.
+  showWindows(open, sashes = new Map()) {
+    const from = this.sashNow || new Map(), to = new Map([...open].map((n) => [n, { sash: sashes.get(n), angle: sashes.get(n)?.angle || 0 }]));
+    const names = new Set([...[...from].filter(([, v]) => v.angle > 0.01).map(([n]) => n), ...to.keys()]);
+    const moves = [...names].some((n) => Math.abs((from.get(n)?.angle || 0) - (to.get(n)?.angle || 0)) > 0.5);
+    cancelAnimationFrame(this.swingRaf);
+    if (!moves || !this.glass) { this.sashNow = to; this.setOpenWindows(open, sashes); return; }
+    const t0 = performance.now();
+    const step = (now) => {
+      const k = Math.min(1, (now - t0) / WINDOW_SWING), e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+      if (k >= 1) { this.sashNow = to; this.setOpenWindows(open, sashes); return; }
+      const cur = new Map(), shown = new Set(), sh = new Map();
+      for (const n of names) {
+        const a0 = from.get(n)?.angle || 0, a1 = to.get(n)?.angle || 0, sash = to.get(n)?.sash || from.get(n)?.sash, a = a0 + (a1 - a0) * e;
+        cur.set(n, { sash, angle: a });
+        if (open.has(n) || a > 0.01) { shown.add(n); if (sash) sh.set(n, { ...sash, angle: a }); }
+      }
+      this.sashNow = cur;
+      this.setOpenWindows(shown, sh, false, true);
+      this.swingRaf = requestAnimationFrame(step);
+    };
+    this.swingRaf = requestAnimationFrame(step);
+  }
+
+  // quick: a frame of a swing, the cuts left to its last
+  setOpenWindows(open, sashes = new Map(), rebuild = false, quick = false) {
     if (!this.glass) return;
     this.lastWindows = [open, sashes];
     const swung = new Set([...(open || [])].filter((n) => sashes.get(n)?.angle > 0 && sashPanel(this.model.windows[n], sashes.get(n))));
@@ -913,7 +942,7 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     this.group.add(this.sashGroup);
     // The cuts redraw where they cross glass when sashes swing or close.
     const key = [...swung].map((n) => `${n}:${sashes.get(n)?.type}:${sashes.get(n)?.angle?.toFixed(1)}`).sort().join('|');
-    if (key !== this.sashKey) { this.sashKey = key; if (this.sections?.planes.length) this.caps.update(); }
+    if (!quick && key !== this.sashKey) { this.sashKey = key; if (this.sections?.planes.length) this.caps.update(); }
     this.render();
   }
 
