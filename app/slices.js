@@ -15,7 +15,7 @@
 
 import * as THREE from 'three';
 import { frameOf, removes as removesPoint } from './sections.js';
-import { rampAt, placeOf, niceRange, DEFAULT_RAMP } from './ramps.js';
+import { rampAt, placeOf, niceRange, DEFAULT_RAMP, DEFAULT_RANGE } from './ramps.js';
 
 const FILL = 0.82; // the slices' opacity: a field to read, with the model still showing through
 const TINT = new THREE.Color();
@@ -38,9 +38,10 @@ export function rampTemperature(t, lo, hi, out = new THREE.Color()) {
 // A new plane's settings: its slice filled by temperature, with particles coloured the same way, at
 // density x1 and real-time speed. field: the fill's data, 'temperature', 'speed', 'co2' or '' (none);
 // color: the particles' data, the same or 'plain' (black), 'none' for no particles. Each has its
-// gradient (fillRamp, partRamp: a name in ramps.js, null for the data's own) and its range
-// (fillRange, partRange: [lo, hi], or null for the data's own lowest to highest on the cuts).
-export const AIR_DEFAULT = { field: 'temperature', fillRamp: null, fillRange: null, particles: true, color: 'temperature', partRamp: null, partRange: null, density: 1, speed: 1, beyond: false };
+// gradient (fillRamp, partRamp: a name in ramps.js, null for the data's own; fillFlip, partFlip: run
+// high to low), its range (fillRange, partRange: [lo, hi], or null for the data's own default, as
+// 19 to 23 degC; Sync in the pop-up sets it to what the cut shows) and the fill's opacity.
+export const AIR_DEFAULT = { field: 'temperature', fillRamp: null, fillFlip: false, fillRange: null, fillOpacity: 0.82, particles: true, color: 'temperature', partRamp: null, partFlip: false, partRange: null, density: 1, speed: 1, beyond: false };
 // a plane's fill or particles' gradient, its own or its data's
 export const rampOf = (a, which) => (which === 'fill' ? a.fillRamp || DEFAULT_RAMP[a.field] : a.partRamp || DEFAULT_RAMP[a.color]) || 'coolwarm';
 
@@ -142,13 +143,12 @@ export class FieldSlices {
       if (s.field) { const r = lohi(s.values.filter((x) => x !== null)); if (r) data[s.field] = data[s.field] ? [Math.min(data[s.field][0], r[0]), Math.max(data[s.field][1], r[1])] : r; s.fillData = r; }
       if (s.part) { const by = s.plane.air.color, r = lohi(s.part); if (r) data[by] = data[by] ? [Math.min(data[by][0], r[0]), Math.max(data[by][1], r[1])] : r; s.partData = r; }
     }
-    const auto = Object.fromEntries(Object.entries(data).map(([k, r]) => [k, niceRange(k, r[0], r[1])]));
     for (const p of planes) p.shown = null;
     for (const s of out) {
       const a = s.plane.air;
       s.plane.shown = {
-        fill: s.field ? { field: s.field, ramp: rampOf(a, 'fill'), range: a.fillRange || auto[s.field] || [0, 1], data: s.fillData, auto: !a.fillRange, suggest: s.fillData && niceRange(s.field, ...s.fillData) } : null,
-        part: a.particles && a.color !== 'plain' ? { field: a.color, ramp: rampOf(a, 'part'), range: a.partRange || auto[a.color] || [0, 1], data: s.partData, auto: !a.partRange, suggest: s.partData && niceRange(a.color, ...s.partData) } : null,
+        fill: s.field ? { field: s.field, ramp: rampOf(a, 'fill'), flip: !!a.fillFlip, range: a.fillRange || DEFAULT_RANGE[s.field], data: s.fillData, suggest: s.fillData && niceRange(s.field, ...s.fillData) } : null,
+        part: a.particles && a.color !== 'plain' ? { field: a.color, ramp: rampOf(a, 'part'), flip: !!a.partFlip, range: a.partRange || DEFAULT_RANGE[a.color], data: s.partData, suggest: s.partData && niceRange(a.color, ...s.partData) } : null,
       };
     }
     for (const s of out) {
@@ -156,15 +156,23 @@ export class FieldSlices {
       s.values.forEach((val, k) => {
         if (val === null) { data[k * 4 + 3] = 0; return; }
         if (!s.field) { data[k * 4 + 3] = 255; return; } // depth only: hides the particles behind
-        const col = rampAt(fill.ramp, placeOf(s.field, val, fill.range[0], fill.range[1]), TINT);
-        data[k * 4] = col.r * 255; data[k * 4 + 1] = col.g * 255; data[k * 4 + 2] = col.b * 255; data[k * 4 + 3] = FILL * 255;
+        const x = placeOf(s.field, val, fill.range[0], fill.range[1]), col = rampAt(fill.ramp, fill.flip ? 1 - x : x, TINT);
+        data[k * 4] = col.r * 255; data[k * 4 + 1] = col.g * 255; data[k * 4 + 2] = col.b * 255; data[k * 4 + 3] = 255;
       });
       s.texture.needsUpdate = true;
+      if (s.material) s.material.opacity = s.plane.air.fillOpacity ?? FILL; // the fill's own opacity
     }
     this.visible = out.length > 0;
     v.render();
     void colour;
     return out.map((s) => s.plane);
+  }
+
+  // A plane's fill shown at another opacity, without sampling it again (as its opacity is dragged).
+  setOpacity(p, k) {
+    const i = this.view.sections.planes.indexOf(p);
+    for (const m of this.group.children) if (m.userData.plane === i) m.material.opacity = k;
+    this.view.render();
   }
 
   // The slice under the pointer: { plane, point (model coordinates) }, or null where the pointer is
@@ -244,13 +252,14 @@ export class FieldSlices {
     const geometry = new THREE.BufferGeometry().setFromPoints([c0, c1, c2, c0, c2, c3]);
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1], 2));
     if (coloured) {
-      const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide, alphaTest: 0.5 });
+      var material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide, alphaTest: 0.5 });
       this.view.sections.patch(material, i);
       const mesh = new THREE.Mesh(geometry, material);
+      mesh.userData.plane = i;
       mesh.renderOrder = 2;
       this.group.add(mesh);
     } else { texture.dispose(); geometry.dispose(); }
-    return { texture, values, W, H, step };
+    return { texture, values, W, H, step, material: coloured ? material : null };
   }
 
   // A plane's particles: made when it first shows them, started again when it has moved. Where air is
@@ -331,7 +340,7 @@ export class FieldSlices {
           // range; or plain black.
           const by = t.p.air.color, sh = t.p.shown?.part;
           const v = by === 'speed' ? Math.hypot(vel[0], vel[1], vel[2]) : by === 'co2' ? sample.co2(x, y, z) : sample.temperature(x, y, z);
-          const col = by === 'plain' || !sh ? NONE : rampAt(sh.ramp, placeOf(by, v, sh.range[0], sh.range[1]), TINT);
+          const xp = sh ? placeOf(by, v, sh.range[0], sh.range[1]) : 0, col = by === 'plain' || !sh ? NONE : rampAt(sh.ramp, sh.flip ? 1 - xp : xp, TINT);
           t.tint[k * 3] = col.r; t.tint[k * 3 + 1] = col.g; t.tint[k * 3 + 2] = col.b;
           const du = vel[0] * f.u.x + vel[1] * f.u.y + vel[2] * f.u.z, dv = vel[0] * f.v.x + vel[1] * f.v.y + vel[2] * f.v.z;
           a += du * dt; b += dv * dt;

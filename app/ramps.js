@@ -16,8 +16,9 @@ export const RAMPS = {
   greys: { name: 'Greys', stops: ['#F2F2F2', '#9A9A9A', '#262626'] },
 };
 const COLOURS = Object.fromEntries(Object.entries(RAMPS).map(([k, r]) => [k, r.stops.map((c) => new THREE.Color(c))]));
-// each kind of data's own gradient, until another is picked
+// each kind of data's own gradient, and range, until others are picked or typed
 export const DEFAULT_RAMP = { temperature: 'coolwarm', speed: 'heat', co2: 'traffic' };
+export const DEFAULT_RANGE = { temperature: [19, 23], speed: [0.01, 1], co2: [400, 1200] };
 export const UNITS = { temperature: '°C', speed: 'm/s', co2: 'ppm' };
 const SPEED_FLOOR = 0.005; // m/s: the slowest speed the log scale tells apart
 
@@ -51,4 +52,4 @@ export function niceRange(field, lo, hi) {
   return [+a.toFixed(d), +b.toFixed(d)];
 }
 // The gradient as a CSS linear-gradient, for swatches.
-export const rampCss = (name) => `linear-gradient(90deg, ${(RAMPS[name] || RAMPS.coolwarm).stops.join(', ')})`;
+export const rampCss = (name, flip = false) => `linear-gradient(${flip ? 270 : 90}deg, ${(RAMPS[name] || RAMPS.coolwarm).stops.join(', ')})`;

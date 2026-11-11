@@ -8,8 +8,9 @@
 //  - follow: the air keeps the day's clock. The page says how much air time has passed (target);
 //    the solver catches up in steps of up to `cap` seconds and waits when it is level. Where it
 //    cannot keep up it falls behind, and says by how much.
-//  - settle: each new set of conditions gets the air run, in steps of up to `cap` seconds, until it
-//    has settled (SETTLE_AIR seconds of air from the last ones), then it waits for the next.
+//  - settle: each new set of conditions gets the air run, in steps of up to `cap` seconds, as fast as
+//    it can: settled once SETTLE_AIR seconds of air have passed under them; it runs on after that (the
+//    air moving on under the same conditions) until the next, so the view never stands still.
 
 import { importEpJSON } from '../src/model/import-epjson.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
@@ -19,7 +20,7 @@ import { GridFlow } from '../src/solver/grid.js';
 
 // seconds of air a room's flow takes to settle after its conditions change (its plumes and jets
 // formed, the pattern then wandering about itself)
-const SETTLE_AIR = 90;
+export const SETTLE_AIR = 90;
 
 let grid = null, net = null, running = false;
 let live = { mode: 'free', cap: 2 }, target = 0, since = 0; // since: the air time the last conditions came at
@@ -54,10 +55,7 @@ function loop() {
     const need = target - grid.time;
     if (need < 0.05) { setTimeout(loop, 15); return; } // level with the day: wait
     dt = Math.min(need, Math.max(grid.stableDt(), live.cap));
-  } else if (live.mode === 'settle') {
-    if (grid.time - since >= SETTLE_AIR) { setTimeout(loop, 30); return; } // settled: wait for the next conditions
-    dt = Math.max(grid.stableDt(), live.cap);
-  }
+  } else if (live.mode === 'settle') dt = Math.max(grid.stableDt(), live.cap);
   const t0 = performance.now();
   dt = grid.step(dt ?? undefined);
   self.postMessage({

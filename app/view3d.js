@@ -106,6 +106,14 @@ const GEOMETRY_CHECKS = new Set(['surface-upside-down', 'interzone-not-opposite'
 
 const WINDOW_SWING = 650; // ms a sash takes to swing to its new angle, drawn
 
+// x with A x = b, A 3 x 3 (Cramer's rule)
+function solve3(A, b) {
+  const det = (m) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  const D = det(A);
+  if (Math.abs(D) < 1e-18) return [0, 0, 0];
+  return [0, 1, 2].map((k) => det(A.map((row, r) => row.map((v, c) => (c === k ? b[r] : v)))) / D);
+}
+
 function dropSeams(edges, tris, zoneOf = () => 0, surfaceOf = () => 0) {
   const planes = new Map(), v = (a, i) => new THREE.Vector3(a[i], a[i + 1], a[i + 2]);
   const f3 = (x) => { const s = x.toFixed(3); return s === '-0.000' ? '0.000' : s; };
@@ -1073,9 +1081,16 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       const k = key(q), list = at.get(k) || at.set(k, []).get(k), same = list.find((g) => g.n[0] * f.n[0] + g.n[1] * f.n[1] + g.n[2] * f.n[2] > 0.99);
       if (same) same.t = Math.max(same.t, f.t); else list.push({ n: f.n, t: f.t });
     }
-    // On the zone's own surfaces (its room's faces), hugging it: pushing each corner out by its faces'
-    // solids overshot where faces meet at angles (a hipped roof's eaves) and in thick models.
-    const moved = (q) => [q[0] - o[0], q[1] - o[1], q[2] - o[2]];
+    // Each corner out to where the faces meeting there meet once each is set out by its solid: the
+    // point nearest the corner on all their set-out planes (least squares, so two faces give their
+    // edge's line and three or more their mitre). Adding each face's push, as before, overshot where
+    // faces meet at angles other than square (a hipped roof's eaves).
+    const moved = (q) => {
+      const list = at.get(key(q)), A = [[1e-6, 0, 0], [0, 1e-6, 0], [0, 0, 1e-6]], b = [0, 0, 0];
+      for (const g of list) for (let r = 0; r < 3; r++) { b[r] += g.n[r] * g.t; for (let c = 0; c < 3; c++) A[r][c] += g.n[r] * g.n[c]; }
+      const y = solve3(A, b);
+      return [q[0] - o[0] + y[0], q[1] - o[1] + y[1], q[2] - o[2] + y[2]];
+    };
     // The edges where faces meet at an angle, and the open ones: the zone's box, without its openings.
     const edges = new Map();
     for (const f of info) {

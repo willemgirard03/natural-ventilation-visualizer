@@ -29,7 +29,7 @@ import {
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 import { WallEnds3D } from './wallends.js';
-import { RAMPS, rampAt, rampCss, UNITS } from './ramps.js';
+import { RAMPS, rampAt, rampCss, UNITS, niceRange } from './ramps.js';
 import {
   massing0, massingBlank, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
@@ -438,6 +438,16 @@ function conditionsAt(hourAt, outdoor, site) {
 // doors as set now, people from the model's schedules and the outdoor air its ventilation equipment
 // supplies.
 const CO2_HOURS = 48;
+// CO2 in each zone as the results give it, where they report it for every zone (as temperatures, the
+// rooms' levels are EnergyPlus's; the tool's own balance only stands in where they do not); between the
+// results' hours while the day plays. null where they do not.
+function co2FromResults(hourAt) {
+  if (!results || !net.zones.every((z) => results.zones[z]?.co2)) return null;
+  const at = (z, i) => results.zones[z].co2[((i % 8760) + 8760) % 8760];
+  if (!playAt) return Object.fromEntries(net.zones.map((z) => [z, at(z, hourAt)]));
+  const x = playAt.H - 0.5, j = Math.floor(x), f = x - j;
+  return Object.fromEntries(net.zones.map((z) => [z, at(z, j) + (at(z, j + 1) - at(z, j)) * f]));
+}
 function co2History(hourAt, solutionNow, site, outdoorNow) {
   const volumes = net.zones.map((z) => model.zones[z].volume.value);
   let C = null;
@@ -490,7 +500,7 @@ function solveAir() {
     co2Last = performance.now();
     const now = airflow;
     if (now?.solution !== solution) return;
-    now.co2 = co2History(hourAt, solution, site, outdoor);
+    now.co2 = co2FromResults(hourAt) || co2History(hourAt, solution, site, outdoor);
     view.setCO2(now.co2);
     // The grid solver carries CO2 within rooms, each zone's mean held at these levels.
     if (grid && worker) {
@@ -1175,16 +1185,17 @@ function popContent(kind, item) {
   return { title, rows };
 }
 
-// A plane's fill or particles: their gradient, and their range (set, or Auto: the data's lowest to
-// highest on the cuts showing it), the range this plane's data spans suggested.
+// A plane's fill or particles: their gradient (picked from a list showing each; the swatch beside
+// flips it) and their range (typed; Sync sets it once to what this cut shows, rounded).
 function gradientRows(which, field, shown) {
-  const p = view.sections.selected, a = p.air, key = which === 'fill' ? 'fillRamp' : 'partRamp', rangeKey = which === 'fill' ? 'fillRange' : 'partRange';
-  const now = a[key] || shown?.ramp || 'coolwarm', set = a[rangeKey], unit = UNITS[field], d = field === 'co2' ? 0 : field === 'speed' ? 3 : 1;
+  const p = view.sections.selected, a = p.air, key = `${which}Ramp`, flipKey = `${which}Flip`, rangeKey = `${which}Range`;
+  const now = a[key] || shown?.ramp || 'coolwarm', flip = !!a[flipKey], unit = UNITS[field], d = field === 'co2' ? 0 : field === 'speed' ? 3 : 1;
   const f = (v) => (v === null || v === undefined ? '' : String(+Number(v).toFixed(d)));
-  const sug = shown?.suggest, used = shown?.range, data = shown?.data;
+  const used = shown?.range, data = shown?.data;
+  const pick = Object.entries(RAMPS).map(([k, r]) => `<button type="button" class="ramppick${k === now ? ' on' : ''}" data-ramp-pick="${k}" data-which="${which}"><i class="rampsw" style="background:${rampCss(k, flip)}"></i>${r.name}</button>`).join('');
   return [
-    `<span class="popkv"><span class="tipped" title="The colours the values run through, low to high">Gradient</span><span class="popv"><select class="popsel" data-air="${key}">${Object.entries(RAMPS).map(([k, r]) => `<option value="${k}"${k === now ? ' selected' : ''}>${r.name}</option>`).join('')}</select> <i class="rampsw" style="background:${rampCss(now)}"></i></span></span>`,
-    `<span class="popkv"><span class="tipped" title="The values at the two ends of the gradient. Auto: the lowest to the highest on the cuts showing this data, as the air changes. Type a figure to hold the range (Tab takes the one suggested: this plane's lowest or highest, rounded); Auto lets it follow the air again.${field === 'speed' ? ' Speed runs on a log scale.' : ''}">Range</span><span class="popv"><input class="popnum short" data-air="${which}Lo" value="${set ? f(set[0]) : ''}" placeholder="${f(set ? sug?.[0] : used?.[0] ?? sug?.[0])}"> – <input class="popnum short" data-air="${which}Hi" value="${set ? f(set[1]) : ''}" placeholder="${f(set ? sug?.[1] : used?.[1] ?? sug?.[1])}"> ${unit} <button type="button" class="pbtn${set ? '' : ' on'}" data-air-auto="${rangeKey}" title="The range follows the air: its lowest to its highest on the cuts">Auto</button></span></span>`,
+    `<span class="popkv"><span class="tipped" title="The colours the values run through, low to high. Click the swatch to run them the other way.">Gradient</span><span class="popv"><details class="dd rampdd"><summary>${RAMPS[now].name}</summary><div class="ddmenu rampmenu">${pick}</div></details> <button type="button" class="rampsw flipsw" data-air-flip="${flipKey}" style="background:${rampCss(now, flip)}" title="Flip the gradient: ${flip ? 'low to high again' : 'high to low'}">⇄</button></span></span>`,
+    `<span class="popkv"><span class="tipped" title="The values at the two ends of the gradient: type them, or Sync to set them once to the lowest and highest on this cut now, rounded (they then hold as the air changes).${field === 'speed' ? ' Speed runs on a log scale.' : ''}">Range</span><span class="popv"><input class="popnum short" data-air="${which}Lo" value="${f(used?.[0])}"> – <input class="popnum short" data-air="${which}Hi" value="${f(used?.[1])}"> ${unit} <button type="button" class="pbtn" data-air-sync="${rangeKey}" data-field="${field}"${data ? '' : ' disabled'} title="Set the range to this cut's lowest and highest now${data ? `, ${f(shown.suggest[0])} … ${f(shown.suggest[1])} ${unit}` : ''}, once">Sync</button></span></span>`,
     data ? `<span class="muted">On this cut now: ${f(data[0])} … ${f(data[1])} ${unit}</span>` : '',
   ].filter(Boolean);
 }
@@ -1201,7 +1212,7 @@ function planeRows(p) {
     ...made.map((v) => `<span class="popkv"><span class="tipped" title="A ${v.kind} view made from this plane, linked to it: moving either moves the other">View</span><button type="button" class="pbtn" data-plview-open="${v.id}" title="Show it">${esc(v.name)}</button></span>`),
     `<div class="poprow"><input class="popname" data-plview-name placeholder="${esc(suggest)}" title="The view's name (Tab takes the suggestion)"><button type="button" class="pbtn" data-plview title="A ${kindWord} view of this cut, named and linked to this plane: show it from its name here, or pick it in a plan or section view">Create ${kindWord} view</button></div>`,
     `<label class="chk" title="Switch the plane's clipping off without removing it: the building, the air and the particles show whole; switch it on again to clip as before"><input type="checkbox" data-air="on"${p.off ? '' : ' checked'}> Clip on</label>`,
-    `<span class="popkv"><span class="tipped" title="Fill the cut where it passes through rooms with the air's temperature, speed or CO2. Point at the cut to read the values there, and its zone's averages.">Clip fill</span><select class="popsel" data-air="field">${opt(fields, a.field)}</select></span>`,
+    `<span class="popkv"><span class="tipped" title="Fill the cut where it passes through rooms with the air's temperature, speed or CO2, at the opacity beside (drag it left or right, or type it). Point at the cut to read the values there, and its zone's averages.">Clip fill</span><span class="popv"><select class="popsel" data-air="field">${opt(fields, a.field)}</select>${a.field ? ` <input class="popnum short scrubnum" data-air="fillOpacity" data-min="5" data-max="100" value="${Math.round((a.fillOpacity ?? 0.82) * 100)}" title="Opacity: drag left or right, or type">%` : ''}</span></span>`,
     ...(a.field ? gradientRows('fill', a.field, p.shown?.fill) : []),
     popSec('Particle data', 'Particles moving with the air within this plane, trailing, as in a 2D section: its own, apart from the 3D particles'),
     `<span class="popkv"><span class="tipped" title="Particles in this plane, coloured by the air's temperature, speed or CO2 where each is, or plain black; None: no particles in it">Clip particles</span><select class="popsel" data-air="color">${opt([['none', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['plain', 'Plain (black)']], a.particles ? a.color : 'none')}</select></span>`,
@@ -1229,8 +1240,13 @@ function onAir(e) {
     const r = [...(a[rk] || sh?.range || [v, v])];
     r[key.endsWith('Lo') ? 0 : 1] = v;
     a[rk] = r[0] <= r[1] ? r : [r[1], r[0]];
-  } else if (key === 'color') { a.color = t.value; a.particles = t.value !== 'none'; }
+  } else if (key === 'color') { a.color = t.value; a.particles = t.value !== 'none'; a.partRange = null; }
   else if (key === 'field') { a.field = t.value; a.fillRange = null; } // another kind of data: its own range
+  else if (key === 'fillOpacity') {
+    const v = Number(String(t.value).replace(',', '.'));
+    if (Number.isFinite(v)) a.fillOpacity = Math.max(0.05, Math.min(1, v / 100));
+    if (e.type === 'input') { slices.setOpacity?.(p, a.fillOpacity); return; } // as it is dragged: the fill alone
+  }
   else if (key === 'beyond') { a.beyond = t.checked; view.sections.changed(); }
   else if (key === 'density') a.density = 2 ** Number(t.value);
   else if (key === 'speed') a.speed = Number(t.value);
@@ -1241,12 +1257,44 @@ function onAir(e) {
   legend();
 }
 $('info').addEventListener('input', onAir);
-// Auto: a range follows the air again
+// A plane's gradient picked or flipped, a range synced once to what the cut shows
 $('info').addEventListener('click', (e) => {
-  const b = e.target.closest('[data-air-auto]'), p = view.sections.selected;
+  const p = view.sections.selected, b = e.target.closest('[data-ramp-pick], [data-air-flip], [data-air-sync]');
   if (!b || !p) return;
-  p.air[b.dataset.airAuto] = null;
+  if (b.dataset.rampPick) p.air[`${b.dataset.which}Ramp`] = b.dataset.rampPick;
+  else if (b.dataset.airFlip) p.air[b.dataset.airFlip] = !p.air[b.dataset.airFlip];
+  else {
+    const which = b.dataset.airSync === 'fillRange' ? 'fill' : 'part', sh = p.shown?.[which];
+    if (sh?.data) p.air[b.dataset.airSync] = niceRange(sh.field, sh.data[0], sh.data[1]);
+  }
   drawSlices(true); showInfo(current()); legend();
+});
+// A gradient list opens over the pop-up, not inside its scrolling body
+$('info').addEventListener('toggle', (e) => {
+  const d = e.target;
+  if (!d.classList?.contains('rampdd') || !d.open) return;
+  const r = d.querySelector('summary').getBoundingClientRect(), m = d.querySelector('.rampmenu');
+  // under the field where it fits (scrolling if it must), else above it, below the settings bar
+  const below = innerHeight - r.bottom - 10, above = r.top - $('drop').getBoundingClientRect().bottom - 10;
+  const up = below < 150 && above > below;
+  Object.assign(m.style, { position: 'fixed', left: `${Math.round(r.left)}px`, maxHeight: `${Math.max(100, up ? above : below)}px`, overflowY: 'auto' });
+  m.style.top = up ? `${Math.round(r.top - 2 - Math.min(m.scrollHeight, above))}px` : `${Math.round(r.bottom + 2)}px`;
+}, true);
+// A figure dragged left or right (the fill's opacity): a percent for every 2 px; a click types it.
+$('info').addEventListener('pointerdown', (e) => {
+  const t = e.target.closest('input.scrubnum');
+  if (!t || e.button !== 0) return;
+  const x0 = e.clientX, v0 = Number(t.value), lo = Number(t.dataset.min), hi = Number(t.dataset.max);
+  let moved = false;
+  const move = (m) => {
+    if (!moved && Math.abs(m.clientX - x0) < 3) return;
+    if (!moved) { moved = true; t.blur(); }
+    m.preventDefault();
+    t.value = String(Math.round(Math.max(lo, Math.min(hi, v0 + (m.clientX - x0) / 2))));
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); if (moved) t.dispatchEvent(new Event('change', { bubbles: true })); };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
 });
 $('info').addEventListener('click', (e) => {
   const p = view.sections.selected, b = e.target.closest('[data-plview], [data-plview-open]');
@@ -1475,7 +1523,7 @@ function daySpark(day, now) {
     + [0, 6, 12, 18].map((x) => `<text x="${x * w}" y="${h + 9}">${x}</text>`).join('') + '</svg>';
 }
 
-const CO2_HELP = `The mean over this hour, from a balance over the airflow network run through the ${CO2_HOURS} hours before: the people in the model's schedules breathing out CO2, outdoor air coming in through windows, leaks and any ventilation equipment, and air passing between rooms. Windows and doors are held as set now for those hours. Outdoor air is about 400 ppm; above 1000 ppm rooms feel stuffy.`;
+const CO2_HELP = `The mean over this hour: by the tool, from a balance over the airflow network run through the ${CO2_HOURS} hours before: the people in the model's schedules breathing out CO2, outdoor air coming in through windows, leaks and any ventilation equipment, and air passing between rooms. Windows and doors are held as set now for those hours. Outdoor air is about 400 ppm; above 1000 ppm rooms feel stuffy. Where the results report CO2 for every zone, each zone's level is EnergyPlus's instead, as its temperature is.`;
 
 // A zone's CO2 from the tool, with the results' own figure beside it where they report one.
 function co2Line(zone) {
@@ -1699,8 +1747,8 @@ function legend() {
   const UNIT = { temperature: '°C', speed: 'm/s', co2: 'ppm' }, WORD = { temperature: 'temperature', speed: 'speed', co2: 'CO₂' };
   const figure = (k, v) => (k === 'speed' ? +v.toPrecision(2) : k === 'co2' ? Math.round(v) : fmt(v, 1));
   const cutKey = (sh, who) => {
-    const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => rampAt(sh.ramp, x));
-    const how = sh.auto ? 'over the lowest to the highest on the cuts showing it' : 'over the range set in its pop-up';
+    const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => rampAt(sh.ramp, sh.flip ? 1 - x : x));
+    const how = 'over the range set in its pop-up';
     return `<span title="${who}: air ${WORD[sh.field]}, ${how}${sh.field === 'speed' ? ', on a log scale' : ''}">${ramp(stops, 48)}${who}: ${WORD[sh.field]} ${figure(sh.field, sh.range[0])} … ${figure(sh.field, sh.range[1])} ${UNIT[sh.field]}</span>`;
   };
   for (const q of shownPlanes) {
@@ -1885,8 +1933,19 @@ let stepping = false, gridAirTime = 0, gridPace = null, gridState = null; // the
 let play = null; // while playing: { H (hours since 1 January 00:00), H1 (the end), Hfrom, next (the next weather step), mode, air0, H0 }
 let playAt = null; // the moment the conditions are for while playing: { H, outdoor }
 const pad2 = (h) => String(h).padStart(2, '0');
-const PLAY_STEPS = [10, 15, 20, 30, 60]; // minutes
-const playStepH = () => PLAY_STEPS[Number($('play-step').value)] / 60;
+const PLAY_STEPS = [null, 10, 15, 20, 30, 60]; // minutes; null: Auto
+const SETTLE_AIR = 90; // s of air the room air takes to settle (grid-worker.js)
+// The weather step (h). Auto: following, the finest; settling, the shortest the air can settle in at
+// this speed (its wall-clock time, at the pace the computer runs the air, gives 90 s of air), else
+// the longest (the clock then waits for the air).
+function playStepMin() {
+  const set = PLAY_STEPS[Number($('play-step').value)];
+  if (set) return set;
+  if ($('room-air').value !== 'grid' || playMode() === 'follow') return 10;
+  const pace = gridPace ?? 1, k = playSpeed();
+  return PLAY_STEPS.slice(1).find((m) => (m * 60 / k) * pace >= SETTLE_AIR * 1.2) ?? 60; // a margin: the pace varies
+}
+const playStepH = () => playStepMin() / 60;
 const playSpeed = () => 3600 ** (Number($('play-speed').value) / 1000); // seconds of the day a second
 // the speed named as an hour of the day in so long: 1 h in 1 h … 1 h in 1 s
 function speedLabel(k) {
@@ -1895,7 +1954,8 @@ function speedLabel(k) {
 }
 const SPEED_STOPS = [1, 6, 60, 360, 3600].map((k) => (1000 * Math.log(k)) / Math.log(3600));
 function playControls() {
-  $('play-step-value').textContent = `${PLAY_STEPS[Number($('play-step').value)]} min`;
+  const set = PLAY_STEPS[Number($('play-step').value)];
+  $('play-step-value').textContent = set ? `${set} min` : `Auto (${play?.stepMin ?? playStepMin()} min)`;
   const k = playSpeed();
   $('play-speed-value').textContent = `${speedLabel(k)} (${k < 10 ? +k.toFixed(1) : Math.round(k)}×)`;
 }
@@ -1975,12 +2035,19 @@ function playFrame(now) {
     if (mode === 'follow') worker.postMessage({ type: 'target', air: P.air0 + (P.H - P.H0) * 3600 });
   }
   playClock(P.H);
+  (P.track ||= []).push([now, P.H]);
+  while (P.track.length > 2 && now - P.track[0][0] > 10000) P.track.shift();
+  const [w0, h0] = P.track[0];
+  P.effective = now - w0 > 2000 ? ((P.H - h0) * 3600) / ((now - w0) / 1000) : null;
   playStatus(sim ? P.mode : null);
   P.raf = requestAnimationFrame(playFrame);
 }
 // A weather step: the conditions at its moment, as if the time were picked by hand.
 function playStep() {
-  const P = play, stepH = playStepH(), Hs = Math.floor(P.H / stepH + 1e-9) * stepH;
+  const t0 = performance.now();
+  const P = play;
+  P.stepMin = playStepMin();
+  const stepH = P.stepMin / 60, Hs = Math.floor(P.H / stepH + 1e-9) * stepH;
   P.next = Hs + stepH;
   P.stepAt = performance.now();
   const day = Math.floor(Hs / 24) + 1, hour = Math.floor(Hs - (day - 1) * 24);
@@ -2000,6 +2067,7 @@ function playStep() {
   solveAir();
   drawRose();
   if (model) showInfo(current());
+  P.stepMs = performance.now() - t0; // the page's own work at a step
 }
 // The day's clock, to the minute.
 function playClock(H) {
@@ -2010,7 +2078,11 @@ function playClock(H) {
 const duration = (s) => (s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${+(s / 3600).toFixed(1)} h`);
 function playStatus(mode) {
   const k = playSpeed(), speed = `${k < 10 ? +k.toFixed(1) : Math.round(k)}×`;
-  let text = speed, tip = `${speedLabel(k)}; weather step ${PLAY_STEPS[Number($('play-step').value)]} min.`;
+  let text = speed, tip = `${speedLabel(k)}; weather step ${play?.stepMin ?? playStepMin()} min${PLAY_STEPS[Number($('play-step').value)] ? '' : ' (Auto)'}.`;
+  // waiting for the air slows the day: what it plays at, over the last ten seconds
+  const eff = play?.effective;
+  if (eff && eff < 0.9 * k) { text = `${speed} set, ~${eff < 10 ? +eff.toFixed(1) : Math.round(eff)}×`; tip += ` Waiting for the air to settle at each step, the day plays at about ${Math.round(eff)}× over the last ten seconds.`; }
+  playControls();
   if (!mode) { text += ' · ideal flow'; tip += ' Ideal flow keeps up at any speed: it has no time of its own (no buoyancy or momentum).'; }
   else if (mode === 'follow') {
     const behind = gridState?.behind || 0;
