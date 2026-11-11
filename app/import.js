@@ -365,6 +365,7 @@ function startGrid(m) {
     const paceNow = Number($('play-cap').value) / Math.max(1e-3, data.ms / 1000);
     gridPace = gridPace ? gridPace * 0.85 + paceNow * 0.15 : paceNow;
     gridState = { behind: data.behind, settled: data.settled, at: performance.now() };
+    airCorner();
     grid.FV.set(data.FV);
     grid.T.set(data.T);
     if (data.C) grid.C.set(data.C);
@@ -376,10 +377,25 @@ function startGrid(m) {
     $('room-air-status').title = `Simulated air time ${fmt(data.time, 0)} s; this step ${fmt(data.ms, 0)} ms for ${fmt(data.dt, 2)} s of air, ${data.iterations} pressure iterations. `
       + (walls ? `Walls, floors and windows warm or cool the air at the inside temperatures of the results (${walls} surfaces).` : 'Surfaces neither warm nor cool the air: the results have no surface temperatures; a rerun adds them.');
   };
-  worker.postMessage({ type: 'model', epjson: m.epjson });
+  worker.postMessage({ type: 'model', epjson: m.epjson, cell: roomCell() });
+  worker.postMessage({ type: 'live', mode: 'free', settle: settleAir() });
   gridPace = null; gridState = null;
   if (play) play.mode = null; // the new worker told how to keep up
 }
+// How far the simulated room air has settled under its conditions, in the view's corner under the
+// frame rate (and why: a change of conditions, or still air).
+const airBox = document.createElement('div');
+airBox.className = 'fpsbox airbox';
+$('viewer').appendChild(airBox);
+function airCorner() {
+  const on = $('room-air').value === 'grid' && worker && gridState;
+  airBox.hidden = !on;
+  if (!on) return;
+  const k = gridState.settled ?? 0, text = k >= 1 ? 'air settled' : `air settling ${Math.round(k * 100)}%`;
+  if (airBox.textContent !== text) airBox.textContent = text;
+  airBox.title = `The simulated room air under the conditions shown: settled once it has had ${settleAir()} s of air since they last changed (three times that from still air, as after loading or restarting). Set in Play day's menu, Settle for. ${gridAirTime ? `Air time ${Math.round(gridAirTime)} s.` : ''}`;
+}
+
 // Windows opened or closed one by one (by window name) or room by room (by zone), over the Windows setting.
 const windowSet = new Map(), roomSet = new Map();
 // Sashes set window by window ({ type, hinge }), over the Sashes setting.
@@ -1215,7 +1231,7 @@ function planeRows(p) {
     `<span class="popkv"><span class="tipped" title="Fill the cut where it passes through rooms with the air's temperature, speed or CO2, at the opacity beside (drag it left or right, or type it). Point at the cut to read the values there, and its zone's averages.">Clip fill</span><span class="popv"><select class="popsel" data-air="field">${opt(fields, a.field)}</select>${a.field ? ` <input class="popnum short scrubnum" data-air="fillOpacity" data-min="5" data-max="100" value="${Math.round((a.fillOpacity ?? 0.82) * 100)}" title="Opacity: drag left or right, or type">%` : ''}</span></span>`,
     ...(a.field ? gradientRows('fill', a.field, p.shown?.fill) : []),
     popSec('Particle data', 'Particles moving with the air within this plane, trailing, as in a 2D section: its own, apart from the 3D particles'),
-    `<span class="popkv"><span class="tipped" title="Particles in this plane, coloured by the air's temperature, speed or CO2 where each is, or plain black; None: no particles in it">Clip particles</span><select class="popsel" data-air="color">${opt([['none', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['plain', 'Plain (black)']], a.particles ? a.color : 'none')}</select></span>`,
+    `<span class="popkv"><span class="tipped" title="Particles in this plane, coloured by the air's temperature, speed or CO2 where each is, or plain black, at the opacity beside (drag it left or right, or type it); None: no particles in it">Clip particles</span><span class="popv"><select class="popsel" data-air="color">${opt([['none', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['plain', 'Plain (black)']], a.particles ? a.color : 'none')}</select>${a.particles ? ` <input class="popnum short scrubnum" data-air="partOpacity" data-min="5" data-max="100" value="${Math.round((a.partOpacity ?? 1) * 100)}" title="Opacity: drag left or right, or type">%` : ''}</span></span>`,
     ...(a.particles && a.color !== 'plain' ? gradientRows('part', a.color, p.shown?.part) : []),
     ...(a.particles ? [
       `<span class="popkv"><span class="tipped" title="How many particles for the same area of air">Density</span><span class="popv"><input type="range" data-air="density" min="-2" max="2" step="0.5" value="${Math.log2(a.density)}"> <output>${TIMES(a.density)}</output></span></span>`,
@@ -1242,6 +1258,7 @@ function onAir(e) {
     a[rk] = r[0] <= r[1] ? r : [r[1], r[0]];
   } else if (key === 'color') { a.color = t.value; a.particles = t.value !== 'none'; a.partRange = null; }
   else if (key === 'field') { a.field = t.value; a.fillRange = null; } // another kind of data: its own range
+  else if (key === 'partOpacity') { const v = Number(String(t.value).replace(',', '.')); if (Number.isFinite(v)) a.partOpacity = Math.max(0.05, Math.min(1, v / 100)); return; } // the particles take it as they move
   else if (key === 'fillOpacity') {
     const v = Number(String(t.value).replace(',', '.'));
     if (Number.isFinite(v)) a.fillOpacity = Math.max(0.05, Math.min(1, v / 100));
@@ -1787,6 +1804,17 @@ function restartAir() {
   solveAir();
 }
 $('room-air').addEventListener('change', restartAir);
+// The cells' size: the rooms divided again, and the air started again on them.
+const roomCell = () => Number($('room-cell').value);
+$('room-cell').addEventListener('change', () => {
+  if (!model || !net) return;
+  rooms = prepareRoomFlow(voxelize(model, { cell: roomCell() }), net, model);
+  air.setGrid(rooms.g, Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0));
+  restartAir();
+  if (play) play.mode = null;
+});
+const settleAir = () => Number($('play-settle').value);
+$('play-settle').addEventListener('change', () => { worker?.postMessage({ type: 'live', mode: play?.mode || 'free', settle: settleAir() }); if (play) play.mode = null; playControls(); });
 $('restart-air').addEventListener('click', restartAir);
 $('window-depth').addEventListener('change', (e) => view.setWindowDepth(e.target.value));
 view.windowDepth = $('window-depth').value;
@@ -1934,7 +1962,6 @@ let play = null; // while playing: { H (hours since 1 January 00:00), H1 (the en
 let playAt = null; // the moment the conditions are for while playing: { H, outdoor }
 const pad2 = (h) => String(h).padStart(2, '0');
 const PLAY_STEPS = [null, 10, 15, 20, 30, 60]; // minutes; null: Auto
-const SETTLE_AIR = 90; // s of air the room air takes to settle (grid-worker.js)
 // The weather step (h). Auto: following, the finest; settling, the shortest the air can settle in at
 // this speed (its wall-clock time, at the pace the computer runs the air, gives 90 s of air), else
 // the longest (the clock then waits for the air).
@@ -1943,7 +1970,7 @@ function playStepMin() {
   if (set) return set;
   if ($('room-air').value !== 'grid' || playMode() === 'follow') return 10;
   const pace = gridPace ?? 1, k = playSpeed();
-  return PLAY_STEPS.slice(1).find((m) => (m * 60 / k) * pace >= SETTLE_AIR * 1.2) ?? 60; // a margin: the pace varies
+  return PLAY_STEPS.slice(1).find((m) => (m * 60 / k) * pace >= settleAir() * 1.2) ?? 60; // a margin: the pace varies
 }
 const playStepH = () => playStepMin() / 60;
 const playSpeed = () => 3600 ** (Number($('play-speed').value) / 1000); // seconds of the day a second
@@ -1993,7 +2020,7 @@ function setPlaying(on) {
   $('play').classList.toggle('on', on);
   $('play').textContent = on ? '❚❚ Pause' : '▶ Play day';
   if (!on) {
-    worker?.postMessage({ type: 'live', mode: 'free' });
+    worker?.postMessage({ type: 'live', mode: 'free', settle: settleAir() });
     $('play-status').textContent = '';
     if (was) applyHour(); // the hour as picked, whole
     return;
@@ -2029,7 +2056,7 @@ function playFrame(now) {
     const mode = playMode();
     if (mode !== P.mode) {
       P.mode = mode;
-      worker.postMessage({ type: 'live', mode, cap: Number($('play-cap').value) });
+      worker.postMessage({ type: 'live', mode, cap: Number($('play-cap').value), settle: settleAir() });
       if (mode === 'follow') { P.air0 = gridAirTime; P.H0 = P.H; }
     }
     if (mode === 'follow') worker.postMessage({ type: 'target', air: P.air0 + (P.H - P.H0) * 3600 });
@@ -2092,7 +2119,7 @@ function playStatus(mode) {
     const done = gridState?.settled ?? 0;
     text += play?.waiting ? ` · waiting for the air, ${Math.round(done * 100)}%` : done >= 1 ? ' · air settled' : ` · air settling ${Math.round(done * 100)}%`;
     if (play?.waiting) tip += ' The clock waits at each weather step until the air has settled, so the day plays slower than the speed set.';
-    tip += ` At each weather step the room air is run until it settles for the new conditions (${$('play-cap').value} s steps), then holds: the pattern at each moment, not its history. The computer can run about ${gridPace ? Math.round(gridPace) : '?'} s of air a second.`;
+    tip += ` At each weather step the room air is run for ${settleAir()} s of air to settle under the new conditions (${$('play-cap').value} s steps), then runs on under them: the pattern at each moment, not its history. The computer can run about ${gridPace ? Math.round(gridPace) : '?'} s of air a second.`;
   }
   if ($('play-status').textContent !== text) $('play-status').textContent = text;
   $('play-status').title = tip;
@@ -2272,7 +2299,7 @@ function render(m) {
   ws.reset(); // a new model: the 3D view alone again
   hover.clear();
   net = buildNetwork(m);
-  rooms = prepareRoomFlow(voxelize(m), net, m);
+  rooms = prepareRoomFlow(voxelize(m, { cell: roomCell() }), net, m);
   field = null;
   startGrid(m);
   $('restart-air').disabled = false;
@@ -2338,7 +2365,7 @@ function refreshModel(geometry = true) {
   hover.clear();
   if (geometry) {
     net = buildNetwork(m);
-    rooms = prepareRoomFlow(voxelize(m), net, m);
+    rooms = prepareRoomFlow(voxelize(m, { cell: roomCell() }), net, m);
   }
   field = null;
   startGrid(m);

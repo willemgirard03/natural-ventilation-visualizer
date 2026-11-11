@@ -471,3 +471,4 @@ body.bartucked .calcbar>.ribbon{display:none}
 .pick-info .flipsw{width:46px; height:14px; padding:0; margin:0; border:1px solid var(--rule); border-radius:2px; color:#fff; font-size:10px; line-height:12px; text-shadow:0 0 2px rgba(0,0,0,.6); cursor:pointer; vertical-align:middle}
 .pick-info .scrubnum{cursor:ew-resize}
 .rampmenu{z-index:120; box-shadow:0 6px 18px rgba(0,0,0,.14)}
+.airbox{top:22px}

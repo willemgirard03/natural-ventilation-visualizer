@@ -41,7 +41,7 @@ export function rampTemperature(t, lo, hi, out = new THREE.Color()) {
 // gradient (fillRamp, partRamp: a name in ramps.js, null for the data's own; fillFlip, partFlip: run
 // high to low), its range (fillRange, partRange: [lo, hi], or null for the data's own default, as
 // 19 to 23 degC; Sync in the pop-up sets it to what the cut shows) and the fill's opacity.
-export const AIR_DEFAULT = { field: 'temperature', fillRamp: null, fillFlip: false, fillRange: null, fillOpacity: 0.82, particles: true, color: 'temperature', partRamp: null, partFlip: false, partRange: null, density: 1, speed: 1, beyond: false };
+export const AIR_DEFAULT = { field: 'temperature', fillRamp: null, fillFlip: false, fillRange: null, fillOpacity: 0.82, particles: true, color: 'temperature', partRamp: null, partFlip: false, partRange: null, partOpacity: 1, density: 1, speed: 1, beyond: false };
 // a plane's fill or particles' gradient, its own or its data's
 export const rampOf = (a, which) => (which === 'fill' ? a.fillRamp || DEFAULT_RAMP[a.field] : a.partRamp || DEFAULT_RAMP[a.color]) || 'coolwarm';
 
@@ -355,7 +355,7 @@ export class FieldSlices {
         }
       }
       // Segments from the head back, fading out along the trail and in as a particle starts.
-      const fadeIn = Math.min(1, t.age[k] / 0.6);
+      const fadeIn = Math.min(1, t.age[k] / 0.6) * (t.p.air.partOpacity ?? 1);
       hpos[k * 3] = base.x + f.u.x * uv[at] + f.v.x * uv[at + 1];
       hpos[k * 3 + 1] = base.y + f.u.y * uv[at] + f.v.y * uv[at + 1];
       hpos[k * 3 + 2] = base.z + f.u.z * uv[at] + f.v.z * uv[at + 1];
