@@ -457,3 +457,7 @@ body.bartucked .calcbar>.ribbon{display:none}
 .playmenu input[type=range]{width:120px; vertical-align:middle}
 .playmenu .opv{display:inline-block; min-width:11ch; font-variant-numeric:tabular-nums}
 #play-status{min-width:24ch; white-space:nowrap}
+.fpsbox{position:absolute; left:10px; top:8px; z-index:5; font:10px var(--mono); color:var(--ink3); pointer-events:auto; user-select:none}
+.rampsw{display:inline-block; width:46px; height:9px; border-radius:2px; vertical-align:middle; border:1px solid var(--rule)}
+.pick-info .popnum.short{width:4.2em}
+.probetag .probezone{color:var(--ink3); font-weight:400}

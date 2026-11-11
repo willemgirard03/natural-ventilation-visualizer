@@ -422,7 +422,23 @@ export class View3D {
       this.renderer.render(this.scene, this.camera);
       this.cube?.render();
       this.onRender?.();
+      this.frames = (this.frames || 0) + 1;
     });
+  }
+  // Frames drawn a second, in the view's top left corner (the view draws only when something
+  // changes or moves: idle, none).
+  showFrameRate() {
+    const box = document.createElement('div');
+    box.className = 'fpsbox';
+    box.title = 'Frames drawn a second. The view draws only when something changes or moves, so a still view draws none.';
+    this.container.appendChild(box);
+    let last = performance.now();
+    setInterval(() => {
+      const now = performance.now(), fps = ((this.frames || 0) * 1000) / (now - last);
+      this.frames = 0; last = now;
+      const text = fps >= 0.5 ? `${Math.round(fps)} fps` : 'idle';
+      if (box.textContent !== text) box.textContent = text;
+    }, 1000);
   }
 
   // The parallel camera's frustum for a half height (m, before its zoom), at the view's proportions.
@@ -1057,11 +1073,9 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       const k = key(q), list = at.get(k) || at.set(k, []).get(k), same = list.find((g) => g.n[0] * f.n[0] + g.n[1] * f.n[1] + g.n[2] * f.n[2] > 0.99);
       if (same) same.t = Math.max(same.t, f.t); else list.push({ n: f.n, t: f.t });
     }
-    const moved = (q) => {
-      const r = [q[0] - o[0], q[1] - o[1], q[2] - o[2]];
-      for (const g of at.get(key(q))) for (let j = 0; j < 3; j++) r[j] += g.n[j] * g.t;
-      return r;
-    };
+    // On the zone's own surfaces (its room's faces), hugging it: pushing each corner out by its faces'
+    // solids overshot where faces meet at angles (a hipped roof's eaves) and in thick models.
+    const moved = (q) => [q[0] - o[0], q[1] - o[1], q[2] - o[2]];
     // The edges where faces meet at an angle, and the open ones: the zone's box, without its openings.
     const edges = new Map();
     for (const f of info) {

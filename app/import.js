@@ -16,7 +16,7 @@ import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './p
 import { SkyDome, VENT_BANDS, ventBandLabels } from './skydome.js';
 import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
-import { readZoneResultsStream, zoneAt, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
+import { readZoneResultsStream, zoneAt, zoneAt as zoneAt_, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
 import { unitNormal } from '../src/model/geometry.js';
@@ -29,6 +29,7 @@ import {
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 import { WallEnds3D } from './wallends.js';
+import { RAMPS, rampAt, rampCss, UNITS } from './ramps.js';
 import {
   massing0, massingBlank, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
@@ -62,6 +63,7 @@ function cell(v, digits) {
 let model = null;
 $('version').textContent = MODEL_VERSION;
 const view = new View3D($('viewer'), { onSelect: showInfo });
+view.showFrameRate();
 const air = new AirflowParticles(view);
 const slices = new FieldSlices(view);
 // The layer settings as the page opens them.
@@ -307,9 +309,38 @@ function drawSlices(now = false) {
   const temperature = simulated ? (x, y, z) => grid.temperatureAt(x, y, z) : (x, y, z) => airflow.conditions.zones[g.zones[g.zone[cellAt(g, [x, y, z])]]]?.t ?? 20;
   const co2 = (x, y, z) => co2Near([x, y, z]);
   const value = (kind, x, y, z) => (kind === 'speed' ? Math.hypot(...velocity(x, y, z)) : kind === 'co2' ? co2(x, y, z) : temperature(x, y, z));
-  const co2Ramp = (v, [lo, hi]) => co2Color(CO2_SCALE[0] + ((v - lo) / Math.max(1, hi - lo)) * (CO2_SCALE[2] - CO2_SCALE[0]));
-  const colour = (kind, v, range) => (kind === 'speed' ? speedColor(v) : kind === 'co2' ? co2Ramp(v, range) : rampTemperature(v, range[0], range[1]));
-  sliceRanges = slices.update({ inside: fluid, value, velocity, temperature, co2 }, colour, g);
+  // The zone a point is in, and each zone's air on average (all of it, not just the cut), worked out
+  // once per drawing when first asked; and what is known of the zone: its temperature as the results
+  // (or the Indoor setting) give it, its CO2 by the results where they report it, and by the tool's own
+  // balance.
+  const zoneAt = (x, y, z) => { const c = cellAt(g, [x, y, z]); return c >= 0 && g.zone[c] >= 0 ? g.zone[c] : -1; };
+  let means = null;
+  const zoneMean = (zi) => {
+    if (!means) {
+      const n = new Float64Array(g.zones.length), T = new Float64Array(g.zones.length), S = new Float64Array(g.zones.length), C = new Float64Array(g.zones.length);
+      for (let c = 0; c < g.zone.length; c++) {
+        const zi2 = g.zone[c];
+        if (zi2 < 0) continue;
+        n[zi2]++;
+        if (simulated) {
+          let v2 = 0;
+          for (let a = 0; a < 3; a++) { const u = 0.5 * (grid.FV[c * 6 + 2 * a] + grid.FV[c * 6 + 2 * a + 1]); v2 += u * u; }
+          S[zi2] += Math.sqrt(v2); T[zi2] += grid.T[c]; if (grid.co2) C[zi2] += grid.C[c];
+        } else S[zi2] += Math.hypot(field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]);
+      }
+      means = g.zones.map((name, i) => ({
+        name, speed: S[i] / (n[i] || 1),
+        temperature: simulated ? T[i] / (n[i] || 1) : airflow.conditions.zones[name]?.t,
+        co2: simulated && grid.co2 ? C[i] / (n[i] || 1) : airflow.co2?.[name] ?? null,
+      }));
+    }
+    return means[zi];
+  };
+  const zoneKnown = (name) => {
+    const H = airflow.hourAt, r = results && zoneAt_(results, name, H);
+    return { t: airflow.conditions.zones[name]?.t ?? null, fromResults: !!r, co2Results: r?.co2 ?? null, co2Tool: airflow.co2?.[name] ?? null };
+  };
+  sliceRanges = slices.update({ inside: fluid, value, velocity, temperature, co2, zoneAt, zoneMean, zoneKnown }, null, g);
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
@@ -333,7 +364,7 @@ function startGrid(m) {
     // how much air it could run a second at the largest air step (for Auto), and how it is keeping up
     const paceNow = Number($('play-cap').value) / Math.max(1e-3, data.ms / 1000);
     gridPace = gridPace ? gridPace * 0.85 + paceNow * 0.15 : paceNow;
-    gridState = { behind: data.behind, settled: data.settled };
+    gridState = { behind: data.behind, settled: data.settled, at: performance.now() };
     grid.FV.set(data.FV);
     grid.T.set(data.T);
     if (data.C) grid.C.set(data.C);
@@ -1144,6 +1175,20 @@ function popContent(kind, item) {
   return { title, rows };
 }
 
+// A plane's fill or particles: their gradient, and their range (set, or Auto: the data's lowest to
+// highest on the cuts showing it), the range this plane's data spans suggested.
+function gradientRows(which, field, shown) {
+  const p = view.sections.selected, a = p.air, key = which === 'fill' ? 'fillRamp' : 'partRamp', rangeKey = which === 'fill' ? 'fillRange' : 'partRange';
+  const now = a[key] || shown?.ramp || 'coolwarm', set = a[rangeKey], unit = UNITS[field], d = field === 'co2' ? 0 : field === 'speed' ? 3 : 1;
+  const f = (v) => (v === null || v === undefined ? '' : String(+Number(v).toFixed(d)));
+  const sug = shown?.suggest, used = shown?.range, data = shown?.data;
+  return [
+    `<span class="popkv"><span class="tipped" title="The colours the values run through, low to high">Gradient</span><span class="popv"><select class="popsel" data-air="${key}">${Object.entries(RAMPS).map(([k, r]) => `<option value="${k}"${k === now ? ' selected' : ''}>${r.name}</option>`).join('')}</select> <i class="rampsw" style="background:${rampCss(now)}"></i></span></span>`,
+    `<span class="popkv"><span class="tipped" title="The values at the two ends of the gradient. Auto: the lowest to the highest on the cuts showing this data, as the air changes. Type a figure to hold the range (Tab takes the one suggested: this plane's lowest or highest, rounded); Auto lets it follow the air again.${field === 'speed' ? ' Speed runs on a log scale.' : ''}">Range</span><span class="popv"><input class="popnum short" data-air="${which}Lo" value="${set ? f(set[0]) : ''}" placeholder="${f(set ? sug?.[0] : used?.[0] ?? sug?.[0])}"> – <input class="popnum short" data-air="${which}Hi" value="${set ? f(set[1]) : ''}" placeholder="${f(set ? sug?.[1] : used?.[1] ?? sug?.[1])}"> ${unit} <button type="button" class="pbtn${set ? '' : ' on'}" data-air-auto="${rangeKey}" title="The range follows the air: its lowest to its highest on the cuts">Auto</button></span></span>`,
+    data ? `<span class="muted">On this cut now: ${f(data[0])} … ${f(data[1])} ${unit}</span>` : '',
+  ].filter(Boolean);
+}
+
 // A clipping plane's own view of the air: what its cut is coloured by, and its particles (their
 // colour, density and speed), so planes can show different things. Moving it is its gumball's job.
 const TIMES = (k) => `×${k < 1 ? k.toFixed(2).replace(/0$/, '') : k}`;
@@ -1155,15 +1200,17 @@ function planeRows(p) {
   return [
     ...made.map((v) => `<span class="popkv"><span class="tipped" title="A ${v.kind} view made from this plane, linked to it: moving either moves the other">View</span><button type="button" class="pbtn" data-plview-open="${v.id}" title="Show it">${esc(v.name)}</button></span>`),
     `<div class="poprow"><input class="popname" data-plview-name placeholder="${esc(suggest)}" title="The view's name (Tab takes the suggestion)"><button type="button" class="pbtn" data-plview title="A ${kindWord} view of this cut, named and linked to this plane: show it from its name here, or pick it in a plan or section view">Create ${kindWord} view</button></div>`,
-    `<label class="chk" title="Switch the plane's cut off without removing it: the building, the air and the particles show whole; switch it on again to cut as before"><input type="checkbox" data-air="on"${p.off ? '' : ' checked'}> Cut on</label>`,
-    `<span class="popkv"><span class="tipped" title="Colour the cut where it passes through rooms: the air's temperature, speed or CO2. Point at the cut to read the values there.">Cut colour</span><select class="popsel" data-air="field">${opt(fields, a.field)}</select></span>`,
-    `<label class="chk" title="Particles moving with the air within this plane, trailing, as in a 2D section: their own, apart from the 3D particles"><input type="checkbox" data-air="particles"${a.particles ? ' checked' : ''}> Particles in the cut</label>`,
-    `<label class="chk" title="The 3D airflow particles seen through this cut: off, only the cut's own particles show there. Each plane decides for what is seen through it."><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`,
+    `<label class="chk" title="Switch the plane's clipping off without removing it: the building, the air and the particles show whole; switch it on again to clip as before"><input type="checkbox" data-air="on"${p.off ? '' : ' checked'}> Clip on</label>`,
+    `<span class="popkv"><span class="tipped" title="Fill the cut where it passes through rooms with the air's temperature, speed or CO2. Point at the cut to read the values there, and its zone's averages.">Clip fill</span><select class="popsel" data-air="field">${opt(fields, a.field)}</select></span>`,
+    ...(a.field ? gradientRows('fill', a.field, p.shown?.fill) : []),
+    popSec('Particle data', 'Particles moving with the air within this plane, trailing, as in a 2D section: its own, apart from the 3D particles'),
+    `<span class="popkv"><span class="tipped" title="Particles in this plane, coloured by the air's temperature, speed or CO2 where each is, or plain black; None: no particles in it">Clip particles</span><select class="popsel" data-air="color">${opt([['none', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['plain', 'Plain (black)']], a.particles ? a.color : 'none')}</select></span>`,
+    ...(a.particles && a.color !== 'plain' ? gradientRows('part', a.color, p.shown?.part) : []),
     ...(a.particles ? [
-      `<span class="popkv"><span>Colour</span><select class="popsel" data-air="color">${opt([['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['none', 'None (black)']], a.color)}</select></span>`,
       `<span class="popkv"><span class="tipped" title="How many particles for the same area of air">Density</span><span class="popv"><input type="range" data-air="density" min="-2" max="2" step="0.5" value="${Math.log2(a.density)}"> <output>${TIMES(a.density)}</output></span></span>`,
       `<span class="popkv"><span class="tipped" title="How much faster than real time they move">Speed</span><span class="popv"><input type="range" data-air="speed" min="1" max="60" value="${a.speed}"> <output>${TIMES(a.speed)}</output></span></span>`,
     ] : []),
+    `<label class="chk" title="The 3D airflow particles seen through this cut: off, only the cut's own particles show there. Each plane decides for what is seen through it."><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`,
   ];
 }
 // Its settings changed: the cut redrawn (density and speed as the slider moves).
@@ -1173,6 +1220,17 @@ function onAir(e) {
   const a = p.air;
   if (key === 'on') { p.off = !t.checked; view.sections.changed(); drawSlices(true); showInfo(current()); legend(); return; }
   if (key === 'particles') a.particles = t.checked;
+  else if (/^(fill|part)(Lo|Hi)$/.test(key)) {
+    // a range's end typed: held there, the other end as shown
+    if (e.type !== 'change') return;
+    const which = key.startsWith('fill') ? 'fill' : 'part', rk = `${which}Range`, sh = p.shown?.[which];
+    const v = Number(String(t.value).replace(',', '.'));
+    if (t.value.trim() === '' || !Number.isFinite(v)) { showInfo(current()); return; }
+    const r = [...(a[rk] || sh?.range || [v, v])];
+    r[key.endsWith('Lo') ? 0 : 1] = v;
+    a[rk] = r[0] <= r[1] ? r : [r[1], r[0]];
+  } else if (key === 'color') { a.color = t.value; a.particles = t.value !== 'none'; }
+  else if (key === 'field') { a.field = t.value; a.fillRange = null; } // another kind of data: its own range
   else if (key === 'beyond') { a.beyond = t.checked; view.sections.changed(); }
   else if (key === 'density') a.density = 2 ** Number(t.value);
   else if (key === 'speed') a.speed = Number(t.value);
@@ -1183,6 +1241,13 @@ function onAir(e) {
   legend();
 }
 $('info').addEventListener('input', onAir);
+// Auto: a range follows the air again
+$('info').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-air-auto]'), p = view.sections.selected;
+  if (!b || !p) return;
+  p.air[b.dataset.airAuto] = null;
+  drawSlices(true); showInfo(current()); legend();
+});
 $('info').addEventListener('click', (e) => {
   const p = view.sections.selected, b = e.target.closest('[data-plview], [data-plview-open]');
   if (!b || !p) return;
@@ -1192,6 +1257,8 @@ $('info').addEventListener('click', (e) => {
 });
 $('info').addEventListener('keydown', (e) => {
   const t = e.target;
+  if (t.matches?.('input.popnum[data-air]') && e.key === 'Tab' && !t.value && t.placeholder) { t.value = t.placeholder; e.preventDefault(); t.dispatchEvent(new Event('change', { bubbles: true })); return; }
+  if (t.matches?.('input.popnum[data-air]') && e.key === 'Enter') { t.blur(); e.stopPropagation(); return; }
   if (!t.matches?.('[data-plview-name]')) return;
   if (e.key === 'Tab' && !t.value) { t.value = t.placeholder; e.preventDefault(); }
   if (e.key === 'Enter') { e.preventDefault(); t.nextElementSibling.click(); }
@@ -1627,18 +1694,20 @@ function legend() {
     items.push('<span title="Every daylit hour of the weather file, as a dot where the sun stood then, by whether the windows may open">Weather hours:</span>');
     for (const b of VENT_BANDS) items.push(chip(b.color, names[b.key][0], names[b.key][1]));
   }
-  // The cuts: each field one of them is coloured by, over its range there.
-  if (slices.visible && sliceRanges.co2) {
-    const [lo, hi] = sliceRanges.co2;
-    items.push(`<span title="Cuts: CO2 in the room air, from the grid solver (each room's mean held at its balance figure) or, with ideal flow, each room's own level. Coloured from the lowest to the highest on the cuts, so the pattern within rooms shows; the colours do not mean the same levels as Colour by CO2.">${ramp([co2Color(CO2_SCALE[0]), co2Color(CO2_SCALE[1]), co2Color(CO2_SCALE[2])], 48)}Cuts: CO₂ ${fmt(lo, 0)} … ${fmt(hi, 0)} ppm</span>`);
-  }
-  if (slices.visible && sliceRanges.speed) {
-    const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => speedColor(SPEED_RANGE[0] * (SPEED_RANGE[1] / SPEED_RANGE[0]) ** x));
-    items.push(`<span title="Cuts: air speed on a log scale">${ramp(stops, 48)}Cuts: speed ${SPEED_RANGE[0]} … ${SPEED_RANGE[1]} m/s</span>`);
-  }
-  if (slices.visible && sliceRanges.temperature) {
-    const [lo, hi] = sliceRanges.temperature;
-    items.push(`<span title="Cuts: air temperature, from the lowest to the highest on the cuts coloured by it">${ramp([rampTemperature(lo, lo, hi), rampTemperature((lo + hi) / 2, lo, hi), rampTemperature(hi, lo, hi)], 48)}Cuts: ${fmt(lo, 1)} … ${fmt(hi, 1)} °C</span>`);
+  // The cuts: each plane's fill and its particles, by their gradient over their range.
+  const shownPlanes = slices.visible ? view.sections.planes.filter((q) => q.shown && !q.off) : [];
+  const UNIT = { temperature: '°C', speed: 'm/s', co2: 'ppm' }, WORD = { temperature: 'temperature', speed: 'speed', co2: 'CO₂' };
+  const figure = (k, v) => (k === 'speed' ? +v.toPrecision(2) : k === 'co2' ? Math.round(v) : fmt(v, 1));
+  const cutKey = (sh, who) => {
+    const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => rampAt(sh.ramp, x));
+    const how = sh.auto ? 'over the lowest to the highest on the cuts showing it' : 'over the range set in its pop-up';
+    return `<span title="${who}: air ${WORD[sh.field]}, ${how}${sh.field === 'speed' ? ', on a log scale' : ''}">${ramp(stops, 48)}${who}: ${WORD[sh.field]} ${figure(sh.field, sh.range[0])} … ${figure(sh.field, sh.range[1])} ${UNIT[sh.field]}</span>`;
+  };
+  for (const q of shownPlanes) {
+    const who = shownPlanes.length > 1 ? q.name : 'Cut';
+    if (q.shown.fill) items.push(cutKey(q.shown.fill, who));
+    if (q.shown.part) items.push(cutKey(q.shown.part, `${who} particles`));
+    else if (q.air.particles && q.air.color === 'plain') items.push(chip('#000000', `${who} particles: plain`));
   }
   // Particles: the 3D ones and those in the cuts, each by its own colour setting; one entry when they agree.
   const particleKey = (mode, who) => {
@@ -1650,12 +1719,7 @@ function legend() {
     if (mode === 'none') return chip('#000000', `${who}: black`);
     return `<span title="${who} colour: the temperature of the air they carry">${ramp([temperatureColor(14), temperatureColor(22), temperatureColor(30)])}${who}: 14–30 °C</span>`;
   };
-  const cutColours = [...new Set(view.sections.planes.filter((q) => q.air.particles).map((q) => q.air.color))];
-  if ($('show-air').checked && cutColours.length === 1 && $('air-color').value === cutColours[0]) items.push(particleKey($('air-color').value, 'Particles'));
-  else {
-    if ($('show-air').checked) items.push(particleKey($('air-color').value, 'Particles'));
-    for (const c of cutColours) items.push(particleKey(c, 'In the cuts'));
-  }
+  if ($('show-air').checked) items.push(particleKey($('air-color').value, 'Particles'));
   if (view.problems.length) items.push(chip(PROBLEM, 'Geometry fault', 'A surface a model check finds standing wrong: facing the wrong way, not closing its zone, out of line with its partner. Red on both sides; its arrow points the way EnergyPlus takes as its outside, from the order of its corner points. The checks are listed under Model details.'));
   $('legend').innerHTML = items.join('');
 }
@@ -1885,14 +1949,22 @@ function playFrame(now) {
   if (!P) return;
   const dt = Math.min(1, Math.max(0, (now - P.last) / 1000)); // slow frames keep the day's pace; a pause (a hidden tab) does not jump it
   P.last = now;
+  const sim = $('room-air').value === 'grid' && worker;
+  const settling = sim && playMode() === 'settle';
   P.H += (dt * playSpeed()) / 3600;
+  // Settling: no weather step is skipped, and the clock waits at each until the air has settled for
+  // the one before
+  P.waiting = false;
+  if (settling && P.H >= P.next) {
+    if (gridState?.at > P.stepAt && gridState.settled >= 1) P.H = Math.min(P.H, P.next);
+    else { P.H = P.next - 1e-7; P.waiting = true; }
+  }
   if (P.H >= P.H1) {
     if (!$('play-loop').checked) { setPlaying(false); return; }
     P.H = P.Hfrom; P.next = P.Hfrom; P.mode = null;
   }
   if (P.H >= P.next) playStep();
   // the room air: the worker told how to keep up, and how much of the day has passed
-  const sim = $('room-air').value === 'grid' && worker;
   if (sim) {
     const mode = playMode();
     if (mode !== P.mode) {
@@ -1910,6 +1982,7 @@ function playFrame(now) {
 function playStep() {
   const P = play, stepH = playStepH(), Hs = Math.floor(P.H / stepH + 1e-9) * stepH;
   P.next = Hs + stepH;
+  P.stepAt = performance.now();
   const day = Math.floor(Hs / 24) + 1, hour = Math.floor(Hs - (day - 1) * 24);
   stepping = true;
   $('day').value = day; $('hour').value = hour + 1;
@@ -1945,7 +2018,8 @@ function playStatus(mode) {
     tip += ` The room air runs in step with the day's clock, in steps of up to ${$('play-cap').value} s.` + (behind > 10 ? ' The computer cannot keep up at this speed: the air shown is that long behind the clock. Slow the day, take longer air steps, or let it Settle.' : '');
   } else {
     const done = gridState?.settled ?? 0;
-    text += done >= 1 ? ' · air settled' : ` · air settling ${Math.round(done * 100)}%`;
+    text += play?.waiting ? ` · waiting for the air, ${Math.round(done * 100)}%` : done >= 1 ? ' · air settled' : ` · air settling ${Math.round(done * 100)}%`;
+    if (play?.waiting) tip += ' The clock waits at each weather step until the air has settled, so the day plays slower than the speed set.';
     tip += ` At each weather step the room air is run until it settles for the new conditions (${$('play-cap').value} s steps), then holds: the pattern at each moment, not its history. The computer can run about ${gridPace ? Math.round(gridPace) : '?'} s of air a second.`;
   }
   if ($('play-status').textContent !== text) $('play-status').textContent = text;
