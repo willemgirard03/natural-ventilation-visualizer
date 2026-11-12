@@ -477,3 +477,6 @@ body.bartucked .calcbar>.ribbon{display:none}
 .playmenu #play-step-value{min-width:13ch; text-align:right}
 .playmenu #play-max{white-space:normal; max-width:310px; min-height:2.6em}
 .playmenu .layrow:first-child{justify-content:flex-start; gap:14px}
+/* the play menu keeps its size as its figures and the estimate change */
+.ddmenu.playmenu{width:360px; min-width:360px; box-sizing:border-box}
+.playmenu #play-max{display:block; width:100%; max-width:none; height:2.8em; overflow:hidden}
