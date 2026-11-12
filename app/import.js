@@ -376,9 +376,9 @@ function startGrid(m) {
     drawSlices();
     if (!gridLive && airflow) { gridLive = true; air.clear(); air.setField(grid, airflow.conditions); }
     const pace = data.dt / (data.ms / 1000);
-    $('room-air-status').textContent = `${fmt(grid.fluid.length / 1000, 0)}k cells · ${pace.toFixed(1).padStart(4, ' ')}× real time`;
+    $('room-air-status').textContent = `${fmt(grid.fluid.length / 1000, 0)}k cells · computes ${pace.toFixed(1).padStart(4, ' ')}× real time`;
     const walls = Object.keys(airflow?.conditions.surfaceT || {}).length;
-    $('room-air-status').title = `Simulated air time ${fmt(data.time, 0)} s; this step ${fmt(data.ms, 0)} ms for ${fmt(data.dt, 2)} s of air, ${data.iterations} pressure iterations. `
+    $('room-air-status').title = `How fast this computer works the room air out: seconds of air a second, at the step it is taking now (not a playback speed: held at an hour, the settled air runs in real time; as the day plays, see Speed). Simulated air time ${fmt(data.time, 0)} s; this step ${fmt(data.ms, 0)} ms for ${fmt(data.dt, 2)} s of air, ${data.iterations} pressure iterations. `
       + (walls ? `Walls, floors and windows warm or cool the air at the inside temperatures of the results (${walls} surfaces).` : 'Surfaces neither warm nor cool the air: the results have no surface temperatures; a rerun adds them.');
   };
   worker.postMessage({ type: 'model', epjson: m.epjson, cell: roomCell() });
@@ -405,9 +405,9 @@ function airCorner() {
   else if (P?.warming) { how = 'Settling'; tip = 'The room air settling under the first weather step before the day starts.'; }
   else if (P && playRegime() === 'settle') { how = 'Steady state at each step'; tip = 'At each weather step the room air is run (by the same transient solver, in 2 s steps, as fast as the computer can) until it stops changing: a steady state for that step\'s conditions; between steps it runs on under them.'; }
   else if (P) { how = 'Transient'; tip = 'The room air runs in step with the day: each second of the day, a second of air physics.'; }
-  else { how = 'Hour held'; tip = 'The room air runs on at its own steps under the hour picked: it settles to the flow those conditions give (steady on average), then wanders about it as real air does, so the cuts change a little from moment to moment.'; }
+  else { how = 'Hour held'; tip = 'The room air under the hour picked, at its own steps: it settles as fast as the computer can to the flow those conditions give (steady on average), then runs on in real time, wandering about it as real air does, so the cuts change a little from moment to moment.'; }
   const speed = P ? ` · ${P.played !== null && P.played !== undefined && P.played < 0.9 * playSpeed() ? `${times(P.played)} of ${times(playSpeed())}` : times(playSpeed())}` : '';
-  const settle = !sim || P?.warming ? '' : gridState.settled ? ' · settled' : ` · settling ${Math.round(gridState.settling ?? 0)} s`;
+  const settle = !sim || P?.warming ? '' : gridState.settled ? (P ? ' · settled' : ' · settled · real time') : ` · settling ${Math.round(gridState.settling ?? 0)} s`;
   const text = how + speed + settle;
   if (airBox.textContent !== text) airBox.textContent = text;
   airBox.title = `${tip}${sim ? ' Settling: the air still changing towards the flow its conditions give (the figure is the air time since they changed); settled once its change has stopped falling, what is left being the flow\'s own wandering.' : ''} Every view of the air reads this one simulation.${gridAirTime && sim ? ` Air time in all ${Math.round(gridAirTime)} s.` : ''}`;

@@ -3,8 +3,9 @@
 // temperatures, which the page's copy of the grid reads for the particles.
 //
 // How it steps (set by 'live' messages, as the day plays or not):
-//  - free: on and on at the solver's own steps (the air moves at most a cell a step), as fast as it
-//    can: the air shown is the hour picked, held.
+//  - free: the hour picked, held, at the solver's own steps (the air moves at most a cell a step): as
+//    fast as it can until the air has settled, then in real time (a second of air a second), so what
+//    is seen moving is the air's own pace.
 //  - follow: the air keeps the day's clock. The page says how much air time has passed (target);
 //    the solver catches up in steps of up to `cap` seconds and waits when it is level.
 //  - settle: on and on in steps of up to `cap` seconds, as fast as it can, under the conditions given
@@ -31,6 +32,7 @@ let live = { mode: 'free', cap: 2 }, target = 0;
 // settling under the last conditions: the air time they came at, from still air or not, the last
 // snapshot of the flow and the changes measured since, and whether it has settled
 let since = 0, still = true, snap = null, nextSnap = 0, changes = [], settled = false;
+let clock = null; // held and settled: { wall (ms), air (s) } it runs in real time from
 
 self.onmessage = ({ data: m }) => {
   if (m.type === 'model') {
@@ -80,6 +82,13 @@ function loop() {
     if (need < 0.05) { setTimeout(loop, 15); return; } // level with the day: wait
     dt = Math.min(need, Math.max(grid.stableDt(), live.cap));
   } else if (live.mode === 'settle') dt = Math.max(grid.stableDt(), live.cap);
+  else if (settled) {
+    // held and settled: no faster than real time
+    clock ||= { wall: performance.now(), air: grid.time };
+    const ahead = grid.time - clock.air - (performance.now() - clock.wall) / 1000;
+    if (ahead > 0) { setTimeout(loop, Math.min(100, ahead * 1000)); return; }
+  }
+  if (live.mode !== 'free' || !settled) clock = null;
   const t0 = performance.now();
   dt = grid.step(dt ?? undefined);
   watch();
