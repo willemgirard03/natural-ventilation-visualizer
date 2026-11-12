@@ -362,9 +362,10 @@ function startGrid(m) {
     if (data.type !== 'state' || !grid) return;
     gridAirTime = data.time;
     // how much air it could run a second at the largest air step (for Auto), and how it is keeping up
-    const paceNow = Number($('play-cap').value) / Math.max(1e-3, data.ms / 1000);
+    const paceNow = quality().cap / Math.max(1e-3, data.ms / 1000); // air it could run a second at the longest step
     gridPace = gridPace ? gridPace * 0.85 + paceNow * 0.15 : paceNow;
-    gridState = { behind: data.behind, settled: data.settled, at: performance.now() };
+    if (data.settled && !gridState?.settled && play) play.settledAir = data.settling; // the air this step took
+    gridState = { behind: data.behind, settled: data.settled, settling: data.settling, still: data.still, at: performance.now() };
     airCorner();
     grid.FV.set(data.FV);
     grid.T.set(data.T);
@@ -378,9 +379,9 @@ function startGrid(m) {
       + (walls ? `Walls, floors and windows warm or cool the air at the inside temperatures of the results (${walls} surfaces).` : 'Surfaces neither warm nor cool the air: the results have no surface temperatures; a rerun adds them.');
   };
   worker.postMessage({ type: 'model', epjson: m.epjson, cell: roomCell() });
-  worker.postMessage({ type: 'live', mode: 'free', settle: settleAir() });
+  worker.postMessage({ type: 'live', mode: 'free' });
   gridPace = null; gridState = null;
-  if (play) play.mode = null; // the new worker told how to keep up
+  if (play) { play.regime = null; play.warming = true; } // the new worker told how to keep up, its air settled first
 }
 // How far the simulated room air has settled under its conditions, in the view's corner under the
 // frame rate (and why: a change of conditions, or still air).
@@ -391,9 +392,10 @@ function airCorner() {
   const on = $('room-air').value === 'grid' && worker && gridState;
   airBox.hidden = !on;
   if (!on) return;
-  const k = gridState.settled ?? 0, text = k >= 1 ? 'air settled' : `air settling ${Math.round(k * 100)}%`;
+  if ($('play-dd').open) playControls(); // the most the day can play at without waiting, as the pace is known
+  const text = gridState.settled ? 'air settled' : `air settling · ${Math.round(gridState.settling ?? 0)} s`;
   if (airBox.textContent !== text) airBox.textContent = text;
-  airBox.title = `The simulated room air under the conditions shown: settled once it has had ${settleAir()} s of air since they last changed (three times that from still air, as after loading or restarting). Set in Play day's menu, Settle for. ${gridAirTime ? `Air time ${Math.round(gridAirTime)} s.` : ''}`;
+  airBox.title = `The simulated room air under the conditions shown: settling while it is still changing towards the flow they give, settled once its change has stopped falling (what is left is the flow's own wandering). The figure is the air time since the conditions last changed. ${gridAirTime ? `Air time in all ${Math.round(gridAirTime)} s.` : ''}`;
 }
 
 // Windows opened or closed one by one (by window name) or room by room (by zone), over the Windows setting.
@@ -1804,17 +1806,6 @@ function restartAir() {
   solveAir();
 }
 $('room-air').addEventListener('change', restartAir);
-// The cells' size: the rooms divided again, and the air started again on them.
-const roomCell = () => Number($('room-cell').value);
-$('room-cell').addEventListener('change', () => {
-  if (!model || !net) return;
-  rooms = prepareRoomFlow(voxelize(model, { cell: roomCell() }), net, model);
-  air.setGrid(rooms.g, Object.values(model.zones).reduce((s, z) => s + z.volume.value, 0));
-  restartAir();
-  if (play) play.mode = null;
-});
-const settleAir = () => Number($('play-settle').value);
-$('play-settle').addEventListener('change', () => { worker?.postMessage({ type: 'live', mode: play?.mode || 'free', settle: settleAir() }); if (play) play.mode = null; playControls(); });
 $('restart-air').addEventListener('click', restartAir);
 $('window-depth').addEventListener('change', (e) => view.setWindowDepth(e.target.value));
 view.windowDepth = $('window-depth').value;
@@ -1947,44 +1938,71 @@ for (const el of document.querySelectorAll('.barval[data-for]')) {
 // The sliders' names drag them too: a day or an hour for every 4 px.
 for (const [id, per] of [['day', 0.25], ['hour', 0.25]]) scrubbable($(id).previousElementSibling, $(id), { per, min: Number($(id).min), max: Number($(id).max) });
 
-// Play day: the day's clock runs from From to To at the speed set (Speed: an hour of the day in an hour,
-// down to an hour in a second). At each weather step (10 min to 1 h) the conditions change: the weather
-// between the weather file's hours (a straight line; the wind as a vector, so it turns the short way),
-// the rooms' temperatures between the results' hours, the windows as the results or the keyframes have
-// them; the network is solved again and the room air takes the new flows. The room air (the grid
-// solver, in its worker) keeps up as Room air says: Follow runs it in step with the clock, in steps of
-// up to the Largest air step, falling behind where the computer cannot keep up (the lag shown);
-// Settle runs it at each weather step until it settles, then holds; Auto follows while the computer
-// keeps up and settles beyond. Everything else (orbit, cuts, picking) goes on as it plays. Changing
-// the date or time by hand pauses it.
-let stepping = false, gridAirTime = 0, gridPace = null, gridState = null; // the worker's latest: air time, air seconds it can run a second at the largest step, behind / settled
-let play = null; // while playing: { H (hours since 1 January 00:00), H1 (the end), Hfrom, next (the next weather step), mode, air0, H0 }
+// Play day: the day's clock runs from From to To at the speed asked (Speed: an hour of the day in an
+// hour, down to an hour in a second). At each weather step the conditions change: the weather between
+// the weather file's hours (a straight line; the wind as a vector, so it turns the short way), the
+// rooms' temperatures and CO2 between the results' hours, the windows as the results or the keyframes
+// have them; the network is solved again and the room air takes the new flows.
+//
+// The simulated room air keeps up one of two ways, chosen by the speed and how fast this computer runs
+// the air at the Quality set (its pace, air seconds a second):
+//  - following (the speed within the pace): the air runs in step with the clock, its physics in time
+//    with the day;
+//  - settling (faster): at each weather step the air runs, as fast as the computer can, until it has
+//    settled under the new conditions (the worker's test: its change has stopped falling), then on.
+//    The clock slows, smoothly, as it nears a step the air has not settled for, so it never passes
+//    one unsettled: the speed asked is played where the computer allows, and the speed played is shown.
+// Before the clock starts, the air settles under the first step (Settling). The rooms' averages (their
+// temperature and CO2) are the results' throughout, settled or not: settling is the pattern within them.
+let stepping = false, gridAirTime = 0, gridPace = null, gridState = null; // the worker's latest: air time, air seconds it can run a second, its settling
+let play = null; // while playing: { H (hours since 1 January 00:00), H1, Hfrom, next (the next weather step), regime, air0, H0, warming }
 let playAt = null; // the moment the conditions are for while playing: { H, outdoor }
+let settleAirTypical = 120; // s of air steps have taken to settle lately (Example 02: 90-190)
 const pad2 = (h) => String(h).padStart(2, '0');
+// The span of the day played, From to To (hours), named on its menu.
+function playSpan() {
+  const from = Number($('play-from').value), to = Math.max(from + 1, Number($('play-to').value));
+  $('play-span').textContent = `${pad2(from)}:00–${pad2(to)}:00`;
+  return [from, to];
+}
+// Quality: the room air's cells and the longest step it is carried in as the day plays faster than
+// its own steps (Example 02 at 2 s steps: 1 m cells 86x real time, 0.75 m 28x, 0.5 m 11x)
+const QUALITY = { fast: { cell: 1, cap: 2 }, balanced: { cell: 0.75, cap: 2 }, detailed: { cell: 0.5, cap: 1 } };
+const quality = () => QUALITY[$('play-quality').value] || QUALITY.balanced;
+const roomCell = () => quality().cell;
 const PLAY_STEPS = [null, 10, 15, 20, 30, 60]; // minutes; null: Auto
-// The weather step (h). Auto: following, the finest; settling, the shortest the air can settle in at
-// this speed (its wall-clock time, at the pace the computer runs the air, gives 90 s of air), else
-// the longest (the clock then waits for the air).
+const playSpeed = () => 3600 ** (Number($('play-speed').value) / 1000); // seconds of the day a second, asked
+const simulating = () => $('room-air').value === 'grid' && !!worker;
+// following or settling: following while the speed asked is within the computer's pace
+const playRegime = () => (!simulating() ? null : playSpeed() <= 0.8 * (gridPace ?? 1) ? 'follow' : 'settle');
+// The weather step (min). Auto: following, the finest; settling, the shortest that lets the air
+// settle at the speed asked (its time on screen, at the computer's pace, gives the air it typically
+// needs), else the longest.
 function playStepMin() {
   const set = PLAY_STEPS[Number($('play-step').value)];
   if (set) return set;
-  if ($('room-air').value !== 'grid' || playMode() === 'follow') return 10;
+  if (playRegime() !== 'settle') return 10;
   const pace = gridPace ?? 1, k = playSpeed();
-  return PLAY_STEPS.slice(1).find((m) => (m * 60 / k) * pace >= settleAir() * 1.2) ?? 60; // a margin: the pace varies
+  return PLAY_STEPS.slice(1).find((m) => (m * 60 / k) * pace >= settleAirTypical * 1.2) ?? 60;
 }
-const playStepH = () => playStepMin() / 60;
-const playSpeed = () => 3600 ** (Number($('play-speed').value) / 1000); // seconds of the day a second
+// The fastest the day can play without waiting for the air, at this Quality and weather step.
+function playMax() {
+  if (!simulating() || !gridPace) return null;
+  return Math.max(gridPace, ((play?.stepMin ?? playStepMin()) * 60 * gridPace) / settleAirTypical);
+}
 // the speed named as an hour of the day in so long: 1 h in 1 h … 1 h in 1 s
 function speedLabel(k) {
   const per = 3600 / k, r = (x) => +x.toFixed(x < 10 ? 1 : 0);
   return `1 h in ${per >= 3599 ? '1 h' : per >= 60 ? `${r(per / 60)} min` : `${r(per)} s`}`;
 }
+const times = (k) => `${k < 10 ? +k.toFixed(1) : Math.round(k)}×`;
 const SPEED_STOPS = [1, 6, 60, 360, 3600].map((k) => (1000 * Math.log(k)) / Math.log(3600));
 function playControls() {
   const set = PLAY_STEPS[Number($('play-step').value)];
   $('play-step-value').textContent = set ? `${set} min` : `Auto (${play?.stepMin ?? playStepMin()} min)`;
-  const k = playSpeed();
-  $('play-speed-value').textContent = `${speedLabel(k)} (${k < 10 ? +k.toFixed(1) : Math.round(k)}×)`;
+  const k = playSpeed(), max = playMax();
+  $('play-speed-value').textContent = `${speedLabel(k)} (${times(k)})`;
+  $('play-max').textContent = max ? `Up to about ${times(max)} without waiting for the air, at this quality and weather step` : '';
 }
 $('play-speed').addEventListener('input', (e) => {
   // close to a round speed (an hour in an hour, 10 min, 1 min, 10 s, 1 s), it takes it
@@ -1992,8 +2010,19 @@ $('play-speed').addEventListener('input', (e) => {
   if (near !== undefined) e.target.value = String(Math.round(near));
   playControls();
 });
-$('play-step').addEventListener('input', () => { playControls(); if (play) play.next = Math.floor(play.H / playStepH() + 1e-9) * playStepH() + playStepH(); });
-for (const id of ['play-air', 'play-cap']) $(id).addEventListener('change', () => { if (play) play.mode = null; });
+$('play-step').addEventListener('input', () => { playControls(); if (play) play.next = Math.min(play.next, Math.floor(play.H * 60 / playStepMin() + 1e-9) * playStepMin() / 60 + playStepMin() / 60); });
+// Quality: the rooms divided again at its cells, and the air started again on them (the two lists,
+// in the play menu and on the Run tab, are one setting)
+function setQuality(v) {
+  for (const id of ['play-quality', 'room-quality']) $(id).value = v;
+  if (!model || !net) return;
+  rooms = prepareRoomFlow(voxelize(model, { cell: roomCell() }), net, model);
+  air.setGrid(rooms.g, Object.values(model.zones).reduce((sum, z) => sum + z.volume.value, 0));
+  restartAir();
+  if (play) { play.regime = null; play.warming = true; }
+  playControls();
+}
+for (const id of ['play-quality', 'room-quality']) $(id).addEventListener('change', (e) => setQuality(e.target.value));
 playControls();
 
 // The weather at H (hours since 1 January 00:00): the file's hours read at the moments they end,
@@ -2007,12 +2036,8 @@ function weatherAtTime(H) {
   const dir = Math.hypot(u, v) > 1e-6 ? ((Math.atan2(u, v) / R) + 360) % 360 : a.windDirection;
   return { t: mix(a.t, b.t), w: mix(a.w, b.w), pressure: mix(a.pressure, b.pressure), windSpeed: mix(a.windSpeed, b.windSpeed), windDirection: dir };
 }
-// The room air's way of keeping up: follow (in step with the clock) or settle (at each weather step).
-function playMode() {
-  const want = $('play-air').value;
-  if (want !== 'auto') return want;
-  return playSpeed() <= 0.8 * (gridPace ?? 1) ? 'follow' : 'settle';
-}
+// whether the air has settled under the conditions of the step now (a report of the worker's since)
+const airSettled = () => !!(gridState?.at > play?.stepAt && gridState.settled);
 function setPlaying(on) {
   if (play) cancelAnimationFrame(play.raf);
   const was = !!play;
@@ -2020,59 +2045,66 @@ function setPlaying(on) {
   $('play').classList.toggle('on', on);
   $('play').textContent = on ? '❚❚ Pause' : '▶ Play day';
   if (!on) {
-    worker?.postMessage({ type: 'live', mode: 'free', settle: settleAir() });
+    worker?.postMessage({ type: 'live', mode: 'free' });
     $('play-status').textContent = '';
     if (was) applyHour(); // the hour as picked, whole
     return;
   }
   const [from, to] = playSpan(), D = (Number($('day').value) - 1) * 24, start = Number($('hour').value) - 1;
   const h0 = start >= from && start < to ? start : from; // from the hour shown, unless it is outside the span
-  play = { H: D + h0, H1: D + to, Hfrom: D + from, next: D + h0, mode: null, air0: gridAirTime, H0: D + h0, last: performance.now() };
+  play = { H: D + h0, H1: D + to, Hfrom: D + from, next: D + h0, regime: null, air0: gridAirTime, H0: D + h0, last: performance.now(), warming: simulating(), shown: 0 };
   playStep();
   play.raf = requestAnimationFrame(playFrame);
 }
 function playFrame(now) {
   const P = play;
   if (!P) return;
-  const dt = Math.min(1, Math.max(0, (now - P.last) / 1000)); // slow frames keep the day's pace; a pause (a hidden tab) does not jump it
+  const dt = Math.min(1, Math.max(0, (now - P.last) / 1000)); // a pause (a hidden tab) does not jump the day
   P.last = now;
-  const sim = $('room-air').value === 'grid' && worker;
-  const settling = sim && playMode() === 'settle';
-  P.H += (dt * playSpeed()) / 3600;
-  // Settling: no weather step is skipped, and the clock waits at each until the air has settled for
-  // the one before
-  P.waiting = false;
-  if (settling && P.H >= P.next) {
-    if (gridState?.at > P.stepAt && gridState.settled >= 1) P.H = Math.min(P.H, P.next);
-    else { P.H = P.next - 1e-7; P.waiting = true; }
+  const sim = simulating();
+  // first, the air settles under the step (Settling: at the start, or on air started again), as fast as it can
+  if (P.warming && sim && P.warmWorker !== worker) { worker.postMessage({ type: 'live', mode: 'settle', cap: quality().cap }); P.warmWorker = worker; }
+  if (P.warming && (!sim || airSettled())) { P.warming = false; P.regime = null; }
+  let rate = P.warming ? 0 : playSpeed(); // seconds of the day a second
+  // settling: slower as the clock nears a step the air has not settled for, never past it
+  if (!P.warming && sim && playRegime() === 'settle' && !airSettled()) {
+    const leftDay = (P.next - P.H) * 3600, airLeft = Math.max(SAMPLE_AIR, settleAirTypical - (gridState?.settling ?? 0));
+    rate = Math.min(rate, Math.max(0, leftDay / (airLeft / (gridPace ?? 1))));
+    if (P.H + (dt * rate) / 3600 >= P.next) rate = 0;
   }
+  P.H += (dt * rate) / 3600;
+  P.rate = rate;
   if (P.H >= P.H1) {
     if (!$('play-loop').checked) { setPlaying(false); return; }
-    P.H = P.Hfrom; P.next = P.Hfrom; P.mode = null;
+    P.H = P.Hfrom; P.next = P.Hfrom; P.regime = null;
   }
-  if (P.H >= P.next) playStep();
+  if (P.H >= P.next - 1e-9) playStep();
   // the room air: the worker told how to keep up, and how much of the day has passed
-  if (sim) {
-    const mode = playMode();
-    if (mode !== P.mode) {
-      P.mode = mode;
-      worker.postMessage({ type: 'live', mode, cap: Number($('play-cap').value), settle: settleAir() });
-      if (mode === 'follow') { P.air0 = gridAirTime; P.H0 = P.H; }
+  if (sim && !P.warming) {
+    const regime = playRegime();
+    if (regime !== P.regime) {
+      P.regime = regime;
+      worker.postMessage({ type: 'live', mode: regime, cap: quality().cap });
+      if (regime === 'follow') { P.air0 = gridAirTime; P.H0 = P.H; }
     }
-    if (mode === 'follow') worker.postMessage({ type: 'target', air: P.air0 + (P.H - P.H0) * 3600 });
+    if (regime === 'follow') worker.postMessage({ type: 'target', air: P.air0 + (P.H - P.H0) * 3600 });
   }
-  playClock(P.H);
+  // the speed played, over the last few seconds
   (P.track ||= []).push([now, P.H]);
-  while (P.track.length > 2 && now - P.track[0][0] > 10000) P.track.shift();
+  while (P.track.length > 2 && now - P.track[0][0] > 5000) P.track.shift();
   const [w0, h0] = P.track[0];
-  P.effective = now - w0 > 2000 ? ((P.H - h0) * 3600) / ((now - w0) / 1000) : null;
-  playStatus(sim ? P.mode : null);
+  P.played = now - w0 > 1000 ? ((P.H - h0) * 3600) / ((now - w0) / 1000) : null;
+  playClock(P.H);
+  playStatus();
   P.raf = requestAnimationFrame(playFrame);
 }
+const SAMPLE_AIR = 10; // s of air the worker measures the air's change over
 // A weather step: the conditions at its moment, as if the time were picked by hand.
 function playStep() {
-  const t0 = performance.now();
   const P = play;
+  // the air the step before took to settle, for the steps to come
+  if (P.stepAt && gridState?.settled && gridState.at > P.stepAt && !gridState.still) settleAirTypical = settleAirTypical * 0.7 + Math.min(300, P.settledAir ?? gridState.settling) * 0.3;
+  P.settledAir = null;
   P.stepMin = playStepMin();
   const stepH = P.stepMin / 60, Hs = Math.floor(P.H / stepH + 1e-9) * stepH;
   P.next = Hs + stepH;
@@ -2094,41 +2126,31 @@ function playStep() {
   solveAir();
   drawRose();
   if (model) showInfo(current());
-  P.stepMs = performance.now() - t0; // the page's own work at a step
 }
 // The day's clock, to the minute.
 function playClock(H) {
   const m = Math.floor((H - Math.floor(H)) * 60), h = Math.floor(H) % 24;
   $('when').textContent = `${pad2(h)}:${pad2(m)}`;
 }
-// How the room air is keeping up, beside the play button.
-const duration = (s) => (s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${+(s / 3600).toFixed(1)} h`);
-function playStatus(mode) {
-  const k = playSpeed(), speed = `${k < 10 ? +k.toFixed(1) : Math.round(k)}×`;
-  let text = speed, tip = `${speedLabel(k)}; weather step ${play?.stepMin ?? playStepMin()} min${PLAY_STEPS[Number($('play-step').value)] ? '' : ' (Auto)'}.`;
-  // waiting for the air slows the day: what it plays at, over the last ten seconds
-  const eff = play?.effective;
-  if (eff && eff < 0.9 * k) { text = `${speed} set, ~${eff < 10 ? +eff.toFixed(1) : Math.round(eff)}×`; tip += ` Waiting for the air to settle at each step, the day plays at about ${Math.round(eff)}× over the last ten seconds.`; }
-  playControls();
-  if (!mode) { text += ' · ideal flow'; tip += ' Ideal flow keeps up at any speed: it has no time of its own (no buoyancy or momentum).'; }
-  else if (mode === 'follow') {
-    const behind = gridState?.behind || 0;
-    text += behind > 10 ? ` · air following, ${duration(behind)} behind` : ' · air following';
-    tip += ` The room air runs in step with the day's clock, in steps of up to ${$('play-cap').value} s.` + (behind > 10 ? ' The computer cannot keep up at this speed: the air shown is that long behind the clock. Slow the day, take longer air steps, or let it Settle.' : '');
-  } else {
-    const done = gridState?.settled ?? 0;
-    text += play?.waiting ? ` · waiting for the air, ${Math.round(done * 100)}%` : done >= 1 ? ' · air settled' : ` · air settling ${Math.round(done * 100)}%`;
-    if (play?.waiting) tip += ' The clock waits at each weather step until the air has settled, so the day plays slower than the speed set.';
-    tip += ` At each weather step the room air is run for ${settleAir()} s of air to settle under the new conditions (${$('play-cap').value} s steps), then runs on under them: the pattern at each moment, not its history. The computer can run about ${gridPace ? Math.round(gridPace) : '?'} s of air a second.`;
+// How the day is playing, beside the play button: Settling before it starts; the speed asked, and the
+// speed played where waiting for the air holds it back.
+function playStatus() {
+  const P = play, k = playSpeed();
+  let text, tip = `${speedLabel(k)} asked; weather step ${P.stepMin} min${PLAY_STEPS[Number($('play-step').value)] ? '' : ' (Auto)'}.`;
+  if (P.warming) { text = 'Settling'; tip += ' The room air is settling under the first step before the clock starts.'; }
+  else if (!simulating()) { text = times(k); tip += ' Ideal flow keeps up at any speed: it has no time of its own (no buoyancy or momentum).'; }
+  else {
+    const regime = playRegime(), played = P.played;
+    text = played !== null && played < 0.9 * k ? `${times(played)} of ${times(k)}` : times(k);
+    tip += regime === 'follow'
+      ? ' The room air runs in step with the day: its physics in time with it.'
+      : ` At each weather step the room air settles under the new conditions as fast as the computer can (about ${gridPace ? Math.round(gridPace) : '?'} s of air a second at this Quality); the clock slows where it must so as not to pass a step before its air has settled (lately ${Math.round(settleAirTypical)} s of air a step).`;
+    if (played !== null && played < 0.9 * k) tip += ` Playing at about ${times(played)}: faster than this, the air could not settle at each step. A faster Quality, or a longer weather step, plays faster.`;
   }
   if ($('play-status').textContent !== text) $('play-status').textContent = text;
   $('play-status').title = tip;
 }
-function playSpan() {
-  const from = Number($('play-from').value), to = Math.max(from + 1, Number($('play-to').value));
-  $('play-span').textContent = `${pad2(from)}:00–${pad2(to)}:00`;
-  return [from, to];
-}
+
 // ---------- window keyframes ----------
 // The windows and doors kept at an hour (◆ Keyframe): the Windows, Doors and Sashes settings and every
 // window or room set one by one. From each keyframe's hour until the next they hold, as the day plays,
