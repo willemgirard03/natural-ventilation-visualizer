@@ -20,7 +20,7 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/ja
 // outside the repository (see .gitignore); only this local development server reads them.
 const A2 = path.resolve(ROOT, '..');
 const EXAMPLES = [
-  { id: 'example02', label: 'Example 02', file: path.join(A2, 'Example 02', 'Results', '2226_Emmenweid.epJSON') },
+  { id: 'example02', label: 'Emmenweid 2226', file: path.join(A2, 'Example 02', 'Results', '2226_Emmenweid.epJSON') },
   { id: 'example01', label: 'Example 01', file: path.join(A2, 'Example 01', 'CS Results', 'Willem_Girard_CS_V3.epJSON') },
 ];
 

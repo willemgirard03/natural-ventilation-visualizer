@@ -66,6 +66,9 @@ const view = new View3D($('viewer'), { onSelect: showInfo });
 view.showFrameRate();
 const air = new AirflowParticles(view);
 const slices = new FieldSlices(view);
+// the cuts' particles as dense and as fast as the 3D particles (Layers ▸ Airflow particles)
+slices.density = () => air.densityScale ?? 1;
+slices.speed = () => air.speed ?? 1;
 // The layer settings as the page opens them.
 air.setVisible($('show-air').checked);
 view.setProjection($('projection').querySelector('[aria-pressed="true"]').dataset.proj);
@@ -388,14 +391,26 @@ function startGrid(m) {
 const airBox = document.createElement('div');
 airBox.className = 'fpsbox airbox';
 $('viewer').appendChild(airBox);
+// The room air in the view's corner, under the frame rate: how it is being worked out (Transient: in
+// step with the day, or with the hour held; Steady state: settled at each weather step), the speed the
+// day plays at, and whether it has settled under the conditions shown. Every view of the air (the
+// cuts' fills and particles, the 3D particles) reads this one simulation.
 function airCorner() {
-  const on = $('room-air').value === 'grid' && worker && gridState;
-  airBox.hidden = !on;
-  if (!on) return;
-  if ($('play-dd').open) playControls(); // the most the day can play at without waiting, as the pace is known
-  const text = gridState.settled ? 'air settled' : `air settling · ${Math.round(gridState.settling ?? 0)} s`;
+  const sim = $('room-air').value === 'grid' && worker && gridState, P = play;
+  airBox.hidden = !model;
+  if (!model) return;
+  if ($('play-dd').open && sim) playControls(); // the most the day can play at without waiting, as the pace is known
+  let how, tip;
+  if (!sim) { how = 'Ideal flow · steady'; tip = 'Ideal flow: the smoothest path between the openings, worked out at once for each set of conditions; it has no time of its own.'; }
+  else if (P?.warming) { how = 'Settling'; tip = 'The room air settling under the first weather step before the day starts.'; }
+  else if (P && playRegime() === 'settle') { how = 'Steady state at each step'; tip = 'At each weather step the room air is run (by the same transient solver, in 2 s steps, as fast as the computer can) until it stops changing: a steady state for that step\'s conditions; between steps it runs on under them.'; }
+  else if (P) { how = 'Transient'; tip = 'The room air runs in step with the day: each second of the day, a second of air physics.'; }
+  else { how = 'Transient · hour held'; tip = 'The room air runs on, in real time at its own steps, under the hour picked.'; }
+  const speed = P ? ` · ${P.played !== null && P.played !== undefined && P.played < 0.9 * playSpeed() ? `${times(P.played)} of ${times(playSpeed())}` : times(playSpeed())}` : '';
+  const settle = !sim || P?.warming ? '' : gridState.settled ? ' · settled' : ` · settling ${Math.round(gridState.settling ?? 0)} s`;
+  const text = how + speed + settle;
   if (airBox.textContent !== text) airBox.textContent = text;
-  airBox.title = `The simulated room air under the conditions shown: settling while it is still changing towards the flow they give, settled once its change has stopped falling (what is left is the flow's own wandering). The figure is the air time since the conditions last changed. ${gridAirTime ? `Air time in all ${Math.round(gridAirTime)} s.` : ''}`;
+  airBox.title = `${tip}${sim ? ' Settling: the air still changing towards the flow its conditions give (the figure is the air time since they changed); settled once its change has stopped falling, what is left being the flow\'s own wandering.' : ''} Every view of the air reads this one simulation.${gridAirTime && sim ? ` Air time in all ${Math.round(gridAirTime)} s.` : ''}`;
 }
 
 // Windows opened or closed one by one (by window name) or room by room (by zone), over the Windows setting.
@@ -599,6 +614,7 @@ $('air-density').addEventListener('input', (e) => {
   $('air-density-value').textContent = `×${k < 1 ? k.toFixed(2).replace(/0$/, '') : k}`;
   air.densityScale = k;
   air.clear();
+  drawSlices(true); // the cuts' particles too
   solveAir(); // refills the view at the new density
 });
 
@@ -951,10 +967,14 @@ async function loadResults(name, stream, size, blobOf = null) {
   }
 }
 let resultFiles = [];
-fetch('/results/').then((r) => (r.ok ? r.json() : [])).then((list) => {
+// the bundled example, its results and weather file (data/index.json), for the web copy
+const bundled = fetch('../data/index.json').then((r) => (r.ok ? r.json() : null)).catch(() => null);
+Promise.all([fetch('/results/').then((r) => (r.ok ? r.json() : [])).catch(() => []), bundled]).then(([own, data]) => {
+  const list = [...own];
+  for (const e of data?.examples || []) if (e.results && !list.some((x) => x.label === e.label)) list.push({ id: e.id, label: e.label, file: e.results.file, url: e.results.url });
   resultFiles = list;
   for (const f of list) $('results-file').add(new Option(`${f.label}: ${f.file}`, f.url));
-}).catch(() => {});
+});
 // After an example loads, its own ClimateStudio results are read too.
 function offerResults(id) {
   const f = resultFiles.find((x) => x.id === id);
@@ -981,8 +1001,8 @@ for (const id of ['day', 'hour']) $(id).addEventListener('input', applyHour);
 $('weather-file').addEventListener('change', (e) => {
   const name = e.target.value;
   if (!name) return setWeather(null);
-  const local = e.target.selectedOptions[0].file;
-  loadWeather(name, local ? () => local.text() : () => fetch(`${runnerBase}/weather/${encodeURIComponent(name)}`).then((r) => r.text()));
+  const opt = e.target.selectedOptions[0], local = opt.file;
+  loadWeather(name, local ? () => local.text() : opt.url ? () => fetch(opt.url).then((r) => r.text()) : () => fetch(`${runnerBase}/weather/${encodeURIComponent(name)}`).then((r) => r.text()));
 });
 $('weather-load').addEventListener('change', (e) => {
   const file = e.target.files[0];
@@ -1008,7 +1028,18 @@ async function findRunner() {
   const pick = files.find((f) => f.includes('TDY-CWEC2020v2'));
   if (pick && !weather) { $('weather-file').value = pick; $('weather-file').dispatchEvent(new Event('change')); }
 }
-findRunner();
+findRunner().then(async () => {
+  // no server offering weather files (the web copy): the bundled ones, the first picked
+  if (runner) return;
+  const data = await bundled;
+  for (const w of data?.weather || []) {
+    if ([...$('weather-file').options].some((o) => o.value === w.name)) continue;
+    const o = new Option(w.name, w.name);
+    o.url = w.url;
+    $('weather-file').add(o);
+  }
+  if (!weather && data?.weather?.length) { $('weather-file').value = data.weather[0].name; $('weather-file').dispatchEvent(new Event('change')); }
+});
 // A runner started after the page opened is found when the page is next looked at.
 addEventListener('focus', () => { if (!runner || runnerBase) findRunner(); });
 
@@ -1033,8 +1064,12 @@ async function loadText(name, read) {
   render(model);
 }
 
-// The dev server offers the course examples when they are on this computer (see tools/serve.mjs).
-fetch('/examples/').then((r) => (r.ok ? r.json() : [])).then((list) => {
+// The examples: the bundled ones (data/index.json: a model, its results and a weather file, so the
+// web copy has something to open), and the dev server's when they are on this computer (see
+// tools/serve.mjs), each once.
+Promise.all([fetch('/examples/').then((r) => (r.ok ? r.json() : [])).catch(() => []), bundled]).then(([own, data]) => {
+  const list = [...own];
+  for (const e of data?.examples || []) if (!list.some((x) => x.label === e.label)) list.push({ id: e.id, label: e.label, file: e.file, url: e.url });
   if (!list.length) return;
   $('examples').hidden = false;
   $('examples').innerHTML = list.map((e, i) => `<button class="minibtn" data-i="${i}" title="${esc(e.file)}">${esc(e.label)}</button>`).join(' ');
@@ -1235,10 +1270,7 @@ function planeRows(p) {
     popSec('Particle data', 'Particles moving with the air within this plane, trailing, as in a 2D section: its own, apart from the 3D particles'),
     `<span class="popkv"><span class="tipped" title="Particles in this plane, coloured by the air's temperature, speed or CO2 where each is, or plain black, at the opacity beside (drag it left or right, or type it); None: no particles in it">Clip particles</span><span class="popv"><select class="popsel" data-air="color">${opt([['none', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['plain', 'Plain (black)']], a.particles ? a.color : 'none')}</select>${a.particles ? ` <input class="popnum short scrubnum" data-air="partOpacity" data-min="5" data-max="100" value="${Math.round((a.partOpacity ?? 1) * 100)}" title="Opacity: drag left or right, or type">%` : ''}</span></span>`,
     ...(a.particles && a.color !== 'plain' ? gradientRows('part', a.color, p.shown?.part) : []),
-    ...(a.particles ? [
-      `<span class="popkv"><span class="tipped" title="How many particles for the same area of air">Density</span><span class="popv"><input type="range" data-air="density" min="-2" max="2" step="0.5" value="${Math.log2(a.density)}"> <output>${TIMES(a.density)}</output></span></span>`,
-      `<span class="popkv"><span class="tipped" title="How much faster than real time they move">Speed</span><span class="popv"><input type="range" data-air="speed" min="1" max="60" value="${a.speed}"> <output>${TIMES(a.speed)}</output></span></span>`,
-    ] : []),
+    ...(a.particles ? ['<span class="muted">Density and speed: as all the particles, in Layers ▸ Airflow particles</span>'] : []),
     `<label class="chk" title="The 3D airflow particles seen through this cut: off, only the cut's own particles show there. Each plane decides for what is seen through it."><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`,
   ];
 }
@@ -2100,6 +2132,7 @@ function playFrame(now) {
   const [w0, h0] = P.track[0];
   P.played = now - w0 > 1000 ? ((P.H - h0) * 3600) / ((now - w0) / 1000) : null;
   playClock(P.H);
+  airCorner();
   sky.setTime(Math.floor(P.H / 24) + 1, P.H - Math.floor(P.H / 24) * 24); // the sun to the minute
   playStatus();
   P.raf = requestAnimationFrame(playFrame);
@@ -2340,6 +2373,7 @@ function render(m) {
   view.cube.setNorth(-m.site.northAxis);
   sky.turned = null;
   setResults(null); // results belong to the previous model; this also solves the network
+  queueMicrotask(airCorner);
   if ($('show-air').checked) air.play();
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);

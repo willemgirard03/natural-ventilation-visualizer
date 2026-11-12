@@ -64,3 +64,6 @@ node_modules/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# The example, its results and a weather file the web copy offers (data/index.json)
+!data/*.eso

@@ -1,0 +1,9 @@
+{
+  "examples": [
+    { "id": "emmenweid2226", "label": "Emmenweid 2226", "file": "Emmenweid 2226.epJSON", "url": "../data/Emmenweid%202226.epJSON",
+      "results": { "file": "Emmenweid 2226.eso", "url": "../data/Emmenweid%202226.eso" } }
+  ],
+  "weather": [
+    { "name": "CAN_BC_Vancouver.Intl.AP.718920_TDY-CWEC2020v2.epw", "url": "../data/CAN_BC_Vancouver.Intl.AP.718920_TDY-CWEC2020v2.epw" }
+  ]
+}

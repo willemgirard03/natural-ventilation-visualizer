@@ -270,7 +270,8 @@ export class FieldSlices {
     const key = [f.o.x, f.o.y, f.o.z, p.q.x, p.q.y, p.q.z, p.q.w, p.flip, ...p.b].map((x) => (typeof x === 'number' ? x.toFixed(3) : x)).join(',');
     let t = this.trails.get(p);
     if (t && t.key !== key) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
-    const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY * p.air.density));
+    // as many as all the particles' density asks (Layers ▸ Airflow particles), for the same area of air
+    const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY * (this.density?.() ?? 1)));
     if (t && t.n !== n) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
     if (!t) {
       const segs = n * (HISTORY - 1);
@@ -306,7 +307,8 @@ export class FieldSlices {
       if (!this.trails.size) { this.running = false; return; }
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
-      for (const t of this.trails.values()) this.advance(t, dt * t.p.air.speed); // each plane at its own speed
+      const k = this.speed?.() ?? 1; // as fast as all the particles move (Layers ▸ Airflow particles)
+      for (const t of this.trails.values()) this.advance(t, dt * k);
       this.view.render();
       requestAnimationFrame(frame);
     };
