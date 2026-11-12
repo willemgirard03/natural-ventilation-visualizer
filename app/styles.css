@@ -480,3 +480,6 @@ body.bartucked .calcbar>.ribbon{display:none}
 /* the play menu keeps its size as its figures and the estimate change */
 .ddmenu.playmenu{width:360px; min-width:360px; box-sizing:border-box}
 .playmenu #play-max{display:block; width:100%; max-width:none; height:2.8em; overflow:hidden}
+/* Run ▸ Playback: the speed's figure and the estimate keep their width */
+#play-speed-value{display:inline-block; min-width:19ch; text-align:right; font-variant-numeric:tabular-nums}
+.ribbon #play-max{display:inline-block; width:46ch; white-space:normal; line-height:1.25}

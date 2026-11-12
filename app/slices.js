@@ -271,7 +271,7 @@ export class FieldSlices {
     let t = this.trails.get(p);
     if (t && t.key !== key) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
     // as many as all the particles' density asks (Layers ▸ Airflow particles), for the same area of air
-    const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY * (this.density?.() ?? 1)));
+    const n = Math.min(MAX_PER_PLANE, Math.round((where.length / 2) * step * step * DENSITY * (this.density?.() ?? 1) * Math.min(1, p.air.density ?? 1)));
     if (t && t.n !== n) { this.clearTrails(new Set(this.view.sections.planes.filter((q) => q !== p))); t = null; }
     if (!t) {
       const segs = n * (HISTORY - 1);

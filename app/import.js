@@ -399,13 +399,13 @@ function airCorner() {
   const sim = $('room-air').value === 'grid' && worker && gridState, P = play;
   airBox.hidden = !model;
   if (!model) return;
-  if ($('play-dd').open && sim) playControls(); // the most the day can play at without waiting, as the pace is known
+  if (sim) playControls(); // the most the day can play at without waiting, as the pace is known
   let how, tip;
   if (!sim) { how = 'Ideal flow · steady'; tip = 'Ideal flow: the smoothest path between the openings, worked out at once for each set of conditions; it has no time of its own.'; }
   else if (P?.warming) { how = 'Settling'; tip = 'The room air settling under the first weather step before the day starts.'; }
   else if (P && playRegime() === 'settle') { how = 'Steady state at each step'; tip = 'At each weather step the room air is run (by the same transient solver, in 2 s steps, as fast as the computer can) until it stops changing: a steady state for that step\'s conditions; between steps it runs on under them.'; }
   else if (P) { how = 'Transient'; tip = 'The room air runs in step with the day: each second of the day, a second of air physics.'; }
-  else { how = 'Transient · hour held'; tip = 'The room air runs on, in real time at its own steps, under the hour picked.'; }
+  else { how = 'Hour held'; tip = 'The room air runs on at its own steps under the hour picked: it settles to the flow those conditions give (steady on average), then wanders about it as real air does, so the cuts change a little from moment to moment.'; }
   const speed = P ? ` · ${P.played !== null && P.played !== undefined && P.played < 0.9 * playSpeed() ? `${times(P.played)} of ${times(playSpeed())}` : times(playSpeed())}` : '';
   const settle = !sim || P?.warming ? '' : gridState.settled ? ' · settled' : ` · settling ${Math.round(gridState.settling ?? 0)} s`;
   const text = how + speed + settle;
@@ -1270,7 +1270,7 @@ function planeRows(p) {
     popSec('Particle data', 'Particles moving with the air within this plane, trailing, as in a 2D section: its own, apart from the 3D particles'),
     `<span class="popkv"><span class="tipped" title="Particles in this plane, coloured by the air's temperature, speed or CO2 where each is, or plain black, at the opacity beside (drag it left or right, or type it); None: no particles in it">Clip particles</span><span class="popv"><select class="popsel" data-air="color">${opt([['none', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['plain', 'Plain (black)']], a.particles ? a.color : 'none')}</select>${a.particles ? ` <input class="popnum short scrubnum" data-air="partOpacity" data-min="5" data-max="100" value="${Math.round((a.partOpacity ?? 1) * 100)}" title="Opacity: drag left or right, or type">%` : ''}</span></span>`,
     ...(a.particles && a.color !== 'plain' ? gradientRows('part', a.color, p.shown?.part) : []),
-    ...(a.particles ? ['<span class="muted">Density and speed: as all the particles, in Layers ▸ Airflow particles</span>'] : []),
+    ...(a.particles ? [`<span class="popkv"><span class="tipped" title="How many particles in this plane: a share of all the particles' density (Layers ▸ Airflow particles), which with their speed is set there for every view alike">Density</span><span class="popv"><input type="range" data-air="density" min="0" max="1" step="0.05" value="${Math.min(1, a.density ?? 1)}"> <output>×${+Math.min(1, a.density ?? 1).toFixed(2)}</output></span></span>`] : []),
     `<label class="chk" title="The 3D airflow particles seen through this cut: off, only the cut's own particles show there. Each plane decides for what is seen through it."><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`,
   ];
 }
@@ -1299,10 +1299,10 @@ function onAir(e) {
     if (e.type === 'input') { slices.setOpacity?.(p, a.fillOpacity); return; } // as it is dragged: the fill alone
   }
   else if (key === 'beyond') { a.beyond = t.checked; view.sections.changed(); }
-  else if (key === 'density') a.density = 2 ** Number(t.value);
+  else if (key === 'density') a.density = Math.max(0, Math.min(1, Number(t.value)));
   else if (key === 'speed') a.speed = Number(t.value);
   else a[key] = t.value;
-  if (key === 'density' || key === 'speed') t.nextElementSibling.textContent = TIMES(a[key]);
+  if (key === 'density') t.nextElementSibling.textContent = `×${+a.density.toFixed(2)}`;
   if (key !== 'speed') drawSlices(true);
   if (e.type === 'change' && key !== 'density' && key !== 'speed') showInfo(current());
   legend();
@@ -2000,8 +2000,7 @@ function playSpan() {
 // Resolution: the room air's cells (Example 02 at 2 s steps: 1 m cells 86x real time, 0.75 m 28x,
 // 0.5 m 11x). As the day plays faster than the air's own steps, it is carried in steps of up to 2 s
 // (close to its own steps: PLAN.md).
-const AIR_STEP = 2;
-const quality = () => ({ cell: Number($('play-quality').value) || 0.75, cap: AIR_STEP });
+const quality = () => ({ cell: Number($('room-quality').value) || 0.75, cap: Number($('air-step').value) || 2 });
 const roomCell = () => quality().cell;
 const PLAY_STEPS = [null, 10, 15, 20, 30, 60]; // minutes; null: Auto
 const playSpeed = () => 3600 ** (Number($('play-speed').value) / 1000); // seconds of the day a second, asked
@@ -2050,7 +2049,7 @@ $('play-step').addEventListener('input', () => { playControls(); if (play) play.
 // Resolution: the rooms divided again at its cells, and the air started again on them (the two lists,
 // in the play menu and on the Run tab, are one setting)
 function setQuality(v) {
-  for (const id of ['play-quality', 'room-quality']) $(id).value = v;
+  $('room-quality').value = v;
   if (!model || !net) return;
   rooms = prepareRoomFlow(voxelize(model, { cell: roomCell() }), net, model);
   air.setGrid(rooms.g, Object.values(model.zones).reduce((sum, z) => sum + z.volume.value, 0));
@@ -2058,7 +2057,9 @@ function setQuality(v) {
   if (play) { play.regime = null; play.warming = true; }
   playControls();
 }
-for (const id of ['play-quality', 'room-quality']) $(id).addEventListener('change', (e) => setQuality(e.target.value));
+$('room-quality').addEventListener('change', (e) => setQuality(e.target.value));
+// the air step: the worker told at once, and the pace measured afresh
+$('air-step').addEventListener('change', () => { gridPace = null; if (play) play.regime = null; else worker?.postMessage({ type: 'live', mode: 'free', cap: quality().cap }); playControls(); });
 playControls();
 
 // The weather at H (hours since 1 January 00:00): the file's hours read at the moments they end,

@@ -10,7 +10,7 @@ Not in scope: annual energy simulation, HVAC, or validated quantitative CFD.
 
 **Web demo: <https://willemgirard03.github.io/natural-ventilation-visualizer/>**
 
-Open a model's `.epJSON`, and optionally its EnergyPlus results (`.eso`) and a weather file (`.epw`); ClimateStudio writes the first two into its results folder. Nothing is uploaded: the files stay in the browser. The web demo has no example models, and Run EnergyPlus is off there: running EnergyPlus needs the tool on your own computer (see Development below), with EnergyPlus 23.1 installed.
+Open a model's `.epJSON`, and optionally its EnergyPlus results (`.eso`) and a weather file (`.epw`); ClimateStudio writes the first two into its results folder. Nothing is uploaded: the files stay in the browser. To try it without files of your own: File ▸ Emmenweid 2226 (an example model with its EnergyPlus results; a Vancouver weather file is picked for you), or File ▸ New massing. Run EnergyPlus needs the tool's helper on your own computer (`npm run serve`, see Development below) and EnergyPlus 23.1 at `C:\EnergyPlus-23.1.0`; with the helper running, the web demo uses it too. Other versions of EnergyPlus are not supported yet.
 
 ## Status
 
