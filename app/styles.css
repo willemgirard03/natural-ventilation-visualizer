@@ -472,3 +472,8 @@ body.bartucked .calcbar>.ribbon{display:none}
 .pick-info .scrubnum{cursor:ew-resize}
 .rampmenu{z-index:120; box-shadow:0 6px 18px rgba(0,0,0,.14)}
 .airbox{top:22px}
+/* figures beside sliders keep their width, so the sliders do not move as they change */
+.playmenu #play-speed-value{min-width:19ch; text-align:right}
+.playmenu #play-step-value{min-width:13ch; text-align:right}
+.playmenu #play-max{white-space:normal; max-width:310px; min-height:2.6em}
+.playmenu .layrow:first-child{justify-content:flex-start; gap:14px}

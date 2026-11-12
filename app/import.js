@@ -1945,7 +1945,7 @@ for (const [id, per] of [['day', 0.25], ['hour', 0.25]]) scrubbable($(id).previo
 // have them; the network is solved again and the room air takes the new flows.
 //
 // The simulated room air keeps up one of two ways, chosen by the speed and how fast this computer runs
-// the air at the Quality set (its pace, air seconds a second):
+// the air at the Resolution set (its pace, air seconds a second):
 //  - following (the speed within the pace): the air runs in step with the clock, its physics in time
 //    with the day;
 //  - settling (faster): at each weather step the air runs, as fast as the computer can, until it has
@@ -1965,10 +1965,11 @@ function playSpan() {
   $('play-span').textContent = `${pad2(from)}:00–${pad2(to)}:00`;
   return [from, to];
 }
-// Quality: the room air's cells and the longest step it is carried in as the day plays faster than
-// its own steps (Example 02 at 2 s steps: 1 m cells 86x real time, 0.75 m 28x, 0.5 m 11x)
-const QUALITY = { fast: { cell: 1, cap: 2 }, balanced: { cell: 0.75, cap: 2 }, detailed: { cell: 0.5, cap: 1 } };
-const quality = () => QUALITY[$('play-quality').value] || QUALITY.balanced;
+// Resolution: the room air's cells (Example 02 at 2 s steps: 1 m cells 86x real time, 0.75 m 28x,
+// 0.5 m 11x). As the day plays faster than the air's own steps, it is carried in steps of up to 2 s
+// (close to its own steps: PLAN.md).
+const AIR_STEP = 2;
+const quality = () => ({ cell: Number($('play-quality').value) || 0.75, cap: AIR_STEP });
 const roomCell = () => quality().cell;
 const PLAY_STEPS = [null, 10, 15, 20, 30, 60]; // minutes; null: Auto
 const playSpeed = () => 3600 ** (Number($('play-speed').value) / 1000); // seconds of the day a second, asked
@@ -1985,7 +1986,7 @@ function playStepMin() {
   const pace = gridPace ?? 1, k = playSpeed();
   return PLAY_STEPS.slice(1).find((m) => (m * 60 / k) * pace >= settleAirTypical * 1.2) ?? 60;
 }
-// The fastest the day can play without waiting for the air, at this Quality and weather step.
+// The fastest the day can play without waiting for the air, at this Resolution and weather step.
 function playMax() {
   if (!simulating() || !gridPace) return null;
   return Math.max(gridPace, ((play?.stepMin ?? playStepMin()) * 60 * gridPace) / settleAirTypical);
@@ -2002,7 +2003,10 @@ function playControls() {
   $('play-step-value').textContent = set ? `${set} min` : `Auto (${play?.stepMin ?? playStepMin()} min)`;
   const k = playSpeed(), max = playMax();
   $('play-speed-value').textContent = `${speedLabel(k)} (${times(k)})`;
-  $('play-max').textContent = max ? `Up to about ${times(max)} without waiting for the air, at this quality and weather step` : '';
+  // the most the day can play at without waiting for the air: estimated once the air has settled
+  // under its conditions (how fast it runs, and how much air a step takes)
+  const est = simulating() && (!gridState?.settled || !gridPace) ? 'Estimating maximum playback speed for these settings…' : max ? `Estimated maximum playback speed for these settings: about ${times(max)}` : '';
+  if ($('play-max').textContent !== est) $('play-max').textContent = est;
 }
 $('play-speed').addEventListener('input', (e) => {
   // close to a round speed (an hour in an hour, 10 min, 1 min, 10 s, 1 s), it takes it
@@ -2011,7 +2015,7 @@ $('play-speed').addEventListener('input', (e) => {
   playControls();
 });
 $('play-step').addEventListener('input', () => { playControls(); if (play) play.next = Math.min(play.next, Math.floor(play.H * 60 / playStepMin() + 1e-9) * playStepMin() / 60 + playStepMin() / 60); });
-// Quality: the rooms divided again at its cells, and the air started again on them (the two lists,
+// Resolution: the rooms divided again at its cells, and the air started again on them (the two lists,
 // in the play menu and on the Run tab, are one setting)
 function setQuality(v) {
   for (const id of ['play-quality', 'room-quality']) $(id).value = v;
@@ -2051,7 +2055,8 @@ function setPlaying(on) {
     return;
   }
   const [from, to] = playSpan(), D = (Number($('day').value) - 1) * 24, start = Number($('hour').value) - 1;
-  const h0 = start >= from && start < to ? start : from; // from the hour shown, unless it is outside the span
+  // from the hour shown, unless it is outside the span or Play from beginning is on
+  const h0 = !$('play-start').checked && start >= from && start < to ? start : from;
   play = { H: D + h0, H1: D + to, Hfrom: D + from, next: D + h0, regime: null, air0: gridAirTime, H0: D + h0, last: performance.now(), warming: simulating(), shown: 0 };
   playStep();
   play.raf = requestAnimationFrame(playFrame);
@@ -2095,6 +2100,7 @@ function playFrame(now) {
   const [w0, h0] = P.track[0];
   P.played = now - w0 > 1000 ? ((P.H - h0) * 3600) / ((now - w0) / 1000) : null;
   playClock(P.H);
+  sky.setTime(Math.floor(P.H / 24) + 1, P.H - Math.floor(P.H / 24) * 24); // the sun to the minute
   playStatus();
   P.raf = requestAnimationFrame(playFrame);
 }
@@ -2144,8 +2150,8 @@ function playStatus() {
     text = played !== null && played < 0.9 * k ? `${times(played)} of ${times(k)}` : times(k);
     tip += regime === 'follow'
       ? ' The room air runs in step with the day: its physics in time with it.'
-      : ` At each weather step the room air settles under the new conditions as fast as the computer can (about ${gridPace ? Math.round(gridPace) : '?'} s of air a second at this Quality); the clock slows where it must so as not to pass a step before its air has settled (lately ${Math.round(settleAirTypical)} s of air a step).`;
-    if (played !== null && played < 0.9 * k) tip += ` Playing at about ${times(played)}: faster than this, the air could not settle at each step. A faster Quality, or a longer weather step, plays faster.`;
+      : ` At each weather step the room air settles under the new conditions as fast as the computer can (about ${gridPace ? Math.round(gridPace) : '?'} s of air a second at this Resolution); the clock slows where it must so as not to pass a step before its air has settled (lately ${Math.round(settleAirTypical)} s of air a step).`;
+    if (played !== null && played < 0.9 * k) tip += ` Playing at about ${times(played)}: faster than this, the air could not settle at each step. A coarser Resolution, or a longer weather step, plays faster.`;
   }
   if ($('play-status').textContent !== text) $('play-status').textContent = text;
   $('play-status').title = tip;

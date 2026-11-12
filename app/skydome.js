@@ -122,6 +122,9 @@ export class SkyDome {
     this.group.rotation.z = north * D2R;
   }
   update(state) {
+    // a time to the minute (from the sun dragged, or the day playing) holds while it is within the
+    // hour picked; another hour picked puts the sun at that hour's middle
+    if (this.at !== null && this.at !== undefined && (state.doy !== this.atDoy || Math.floor(this.at) + 1 !== state.hour)) this.at = null;
     this.state = state;
     if (!this.drag) this.turnTo(state.north);
     this.build();
@@ -199,8 +202,17 @@ export class SkyDome {
     const c = v.clone().project(this.view.camera);
     return c.z > 1 ? null : [s.x, s.y];
   };
+  // The sun at a time to the minute: at (hours since midnight, standard time) on day doy. The weather
+  // and the airflow keep their hour (or weather step); only the sun, its shadows and its labels move.
+  setTime(doy, at) {
+    if (!this.state || (this.atDoy === doy && Math.abs((this.at ?? -1) - at) < 1 / 120)) return;
+    this.at = at; this.atDoy = doy;
+    if (doy !== this.state.doy) { this.state = { ...this.state, doy, hour: Math.min(24, Math.floor(at) + 1) }; this.build(); }
+    this.castShadows();
+    this.view.render();
+  }
   sunAt() {
-    const s = this.state, p = solarPosition(s.doy, s.hour - 0.5, 'std');
+    const s = this.state, p = solarPosition(s.doy, this.at ?? s.hour - 0.5, 'std');
     return { ...p, v: sunVec(p.alt, p.az) };
   }
 
@@ -314,8 +326,10 @@ export class SkyDome {
         // The date and hour whose sun is drawn nearest the pointer, kept on its side of the year.
         const R = this.state.R, got = pickSun(d.doy, 'std', m[0] - d.off[0], m[1] - d.off[1], (v) => this.P(v.map((x) => x * R)));
         if (!got) return;
-        const hour = Math.min(24, Math.max(1, Math.floor(got.hour) + 1));
-        if (got.doy !== d.doy || hour !== d.hour) { d.doy = got.doy; d.hour = hour; this.onTime(got.doy, hour); }
+        // the sun to the minute; the weather hour (and the airflow) only when the minute is in another
+        const at = Math.min(24 - 1 / 60, Math.max(0, Math.round(got.hour * 60) / 60)), hour = Math.min(24, Math.floor(at) + 1);
+        if (got.doy !== d.doy || hour !== d.hour) { d.doy = got.doy; d.hour = hour; this.at = at; this.atDoy = got.doy; this.onTime(got.doy, hour, at); }
+        this.setTime(got.doy, at);
       } else {
         // The building's north follows the pointer: whole degrees, 15° with Shift. The pointer's
         // bearing in the model's axes, plus the turn shown now, is its compass bearing.
