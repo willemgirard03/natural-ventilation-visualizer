@@ -669,6 +669,10 @@ Everything this plan relies on, so each claim can be traced. Statements not trac
 | [MDPI Atmosphere 9(3):113](https://www.mdpi.com/2073-4433/9/3/113) | Pressure coefficients from wind and context; airflow network concept |
 | [Section airflow prototype](https://claude.ai/artifact/V7BKiPBqGzpKDNRDRbCRME) | Phase 1 solver and renderer |
 | Fast Fluid Dynamics papers (Zuo and Chen), FluidX3D, Carbonfly, Eddy3D | Solver approach and validation tools, found by web search earlier in this project |
+| Jin, Zuo and Chen (2012), Improvements of fast fluid dynamics for simulating air flow in buildings, Numerical Heat Transfer B 62(6) (PDF supplied, read 13 Nov 2026) | The three-step FFD scheme, staggered grid, no-slip walls, numerical viscosity in place of a turbulence model; its benchmark cases (Wang and Chen 2009) for validation |
+| Modelica Buildings library, Buildings/Resources/src/FastFluidDynamics (github.com/lbl-srg/modelica-buildings), read 13 Nov 2026 | Chen's zero-equation turbulence model as implemented: constant 0.03874, wall distance, implicit diffusion, Pr_t 0.9 |
+| Chen and Xu (1998), A zero-equation turbulence model for indoor airflow simulation, Energy and Buildings 28(2) | Original of the turbulence model (not read; formula verified in the code above) |
+| METHODS.md (this repository) | The list of every method the simulation uses, with its source and validation status; kept up to date with the code |
 | Carbonfly repository (github.com/RWTH-E3D/carbonfly), read directly | CO2 generation table, breathing defaults, air quality bands, Maas window formula, EN 1991-1-4 pressure coefficients; CO2 validation reference |
 | Persily and de Jonge (2017), Carbon dioxide generation rates for building occupants, Indoor Air 27(5) | Original source of the CO2 generation table (cited by Carbonfly; not yet read directly) |
 | CS\_Results.zip (Willem\_Girard\_CS\_V3 results folder) | ClimateStudio's full EnergyPlus input (.idf, .epJSON) and hourly outputs (.eso) for a simple-airflow run; source of the Findings section |

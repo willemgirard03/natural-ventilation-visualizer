@@ -16,6 +16,8 @@ Open a model's `.epJSON`, and optionally its EnergyPlus results (`.eso`) and a w
 
 Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findings and schedule.
 
+How the air is worked out, where each method comes from and how far it has been checked: [METHODS.md](METHODS.md).
+
 ## Contents
 
 | Path | What it is |
@@ -34,6 +36,7 @@ Early development. See [PLAN.md](PLAN.md) for the full plan, requirements, findi
 | `tools/compare_eso.py` | Compares two EnergyPlus `.eso` result files output by output; used by the alignment test. |
 | `tools/cs_desktop_kit/` | ClimateStudio inspection scripts (see its README). |
 | `PLAN.md` | Project plan; read first at the start of every session. |
+| `METHODS.md` | Methods and sources: every method the simulation uses, its source, and its validation status. |
 | `HANDOFF.md` | Notes from the planning chat. |
 
 ## Development

@@ -1,5 +1,6 @@
 // The grid solver: air movement inside the building on the cells of roomflow.js, by fast fluid
-// dynamics (Zuo and Chen), as in the 2D prototype: each step carries velocity and temperature along
+// dynamics (Zuo and Chen 2009; in three dimensions as Jin, Zuo and Chen, Numerical Heat Transfer B 62,
+// 2012; every source, and what is the tool's own, in METHODS.md): each step carries velocity and temperature along
 // with the air (semi-Lagrangian), adds buoyancy (Boussinesq) and the heat of people, equipment and
 // lights, then corrects pressure so no air piles up or vanishes. Velocities sit on cell faces
 // (a staggered grid). Windows and leaks to outdoors bring in and take out the network's flows; open
