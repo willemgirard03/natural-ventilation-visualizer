@@ -16,7 +16,7 @@ import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './p
 import { SkyDome, VENT_BANDS, ventBandLabels } from './skydome.js';
 import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
-import { readZoneResultsStream, mergeResults, zoneAtTime, windowAtTime, surfaceAtTime, resultsTiming } from '../src/model/results.js';
+import { readZoneResultsStream, mergeResults, zoneAtTime, windowAtTime, ventShare, surfaceAtTime, resultsTiming } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
 import { unitNormal } from '../src/model/geometry.js';
@@ -280,7 +280,7 @@ function updateSky() {
   const { radius, height } = view.extent(), R = 1.45 * Math.max(2 * radius, height, 1);
   view.skyRadius = sky.shown ? R : 0;
   sky.update({ R, north: model.site.northAxis, doy: Number($('day').value), hour: hourEnding(), weather, limits: ventLimits() });
-  if (!play) sky.setTime(Number($('day').value), clockMin() / 60); // the sun at the minute picked
+  if (!play) sky.setTime(Number($('day').value), heldH() - (Number($('day').value) - 1) * 24); // the sun at the minute picked (the hour's middle, not interpolating)
 }
 $('show-sky').addEventListener('change', (e) => { sky.set({ shown: e.target.checked }); updateSky(); legend(); });
 $('show-sun').addEventListener('change', (e) => sky.set({ sunShown: e.target.checked }));
@@ -438,7 +438,9 @@ let esoSource = null; // where the results file in use comes from: { name, blob(
 // H: the moment (hours since 1 January, standard time); hourAt: the hour it falls in, for schedules.
 // The results are read at the moment (src/model/results.js: each hour's or step's mean stands at its
 // middle, values between are interpolated; window openings and ventilation are the step's own).
-function conditionsAt(hourAt, outdoor, site, H = hourAt + 0.5) {
+// span (hours): while playing, the weather step's length: windows open as far as they were on average
+// over it, so a step longer than the results' steps keeps the air they let through.
+function conditionsAt(hourAt, outdoor, site, H = hourAt + 0.5, span = 0) {
   const tIn = Number($('t-in').value), mode = $('windows').value;
   const inside = (z) => (results && zoneAtTime(results, z, H, outdoor.pressure)) || { t: tIn, w: 0.008, vent: null };
   const conditions = {
@@ -448,11 +450,14 @@ function conditionsAt(hourAt, outdoor, site, H = hourAt + 0.5) {
       if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : $('doors').value === 'open') ? l.openFactor : 0];
       // As in results: an airflow network run gives each window's opening; otherwise the zone's ventilation.
       // Each window opens as far as its sash allows towards the fraction asked of it.
-      const reported = mode === 'results' && results ? windowAtTime(results, l.name, H) : null;
+      const reported = mode === 'results' && results ? windowAtTime(results, l.name, H, span) : null;
       if (reported !== null && !windowSet.has(l.name) && !roomSet.has(l.from)) return [l.name, reported > 0 ? sashFor(l, reported).fraction : 0];
-      const base = mode === 'open' || (mode === 'results' && !!inside(l.from).vent);
-      const open = windowSet.has(l.name) ? windowSet.get(l.name) : roomSet.has(l.from) ? roomSet.get(l.from) : base;
-      return [l.name, open ? openFraction(l) : 0];
+      // simple airflow results: open for the share of the step the zone's ventilation ran
+      if (windowSet.has(l.name)) return [l.name, windowSet.get(l.name) ? openFraction(l) : 0];
+      if (roomSet.has(l.from)) return [l.name, roomSet.get(l.from) ? openFraction(l) : 0];
+      if (mode === 'open') return [l.name, openFraction(l)];
+      // simple airflow results: open for the share of the step (or hour) the zone's ventilation ran
+      return [l.name, mode === 'results' && results ? openFraction(l) * (ventShare(results, l.from, H, span) ?? 0) : 0];
     })),
   };
   // Open windows' sashes: a hopper or awning shapes its flow in the network, and every sash spreads
@@ -507,7 +512,7 @@ function solveAir() {
     t: Number($('t-out').value), w: weatherHour?.w ?? 0.008, pressure: weatherHour?.pressure ?? standardPressure(site.elevation),
     windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
   };
-  const conditions = conditionsAt(hourAt, outdoor, site, H);
+  const conditions = conditionsAt(hourAt, outdoor, site, H, playAt ? (play?.stepMin ?? 10) / 60 : 0);
   view.setPeople(peopleNow(hourAt), peopleTop());
   const mode = $('windows').value;
   // Surfaces' inside temperatures this hour, where the results have them (the tool's reruns do).
@@ -722,12 +727,11 @@ async function rerun(year = false) {
   // Hoppers and awnings run as EnergyPlus's pivoted openings, at the angle their opening amount gives.
   const pivoted = Object.fromEntries(net.links.filter((l) => l.control === 'zone' && ['hopper', 'awning'].includes(sashOf(l.name).type))
     .map((l) => [l.name, { type: sashOf(l.name).type, angle: amountOf(l) * maxAngleOf(l) }]));
-  // a week kept at the step asked (EnergyPlus reporting at its timesteps; 15-minute steps need 5-minute
-  // timesteps); a year hourly
+  // a week kept at the step asked (EnergyPlus reporting at its 10-minute timesteps, averaged); a year hourly
   const step = year ? 60 : runStep();
   const epjson = toAirflowNetwork(model, {
     states: linkStates(), openFactors, sashes: pivoted, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true, surfaceTemperatures: true,
-    gradual: $('run-gradual').checked, ...(step < 60 ? { reporting: 'Timestep', timestepsPerHour: step === 15 ? 12 : 6 } : {}),
+    gradual: $('run-gradual').checked, ...(step < 60 ? { reporting: 'Timestep', timestepsPerHour: 6 } : {}),
   });
   rerunning = true;
   updateRun();
@@ -772,9 +776,16 @@ $('stale').addEventListener('click', (e) => { if (e.target.id === 'rerun') rerun
 $('run-period').addEventListener('change', (e) => { yearPicked = e.target.value === 'year'; });
 $('run-eplus').addEventListener('click', () => rerun($('run-period').value === 'year'));
 // The week's results step: 10, 15, 20, 30 or 60 min.
-const RUN_STEPS = [10, 15, 20, 30, 60];
+const RUN_STEPS = [10, 20, 30, 60]; // all from EnergyPlus's 10-minute timesteps
 const runStep = () => RUN_STEPS[Number($('run-step').value)] ?? 60;
 $('run-step').addEventListener('input', () => { $('run-step-value').textContent = `${runStep()} min`; });
+// Interpolate: off, the slider moves in whole hours (to the hour's start); on, in minutes.
+function timeSteps() {
+  const el = $('hour'), on = interpolating(), v = Math.floor(Number(el.value) / 60) * 60; // the hour started (before the step rounds it)
+  el.step = on ? '1' : '60';
+  if (!on) el.value = String(v);
+}
+$('time-interp').addEventListener('change', () => { timeSteps(); applyHour(); });
 
 
 // What is selected now: a section plane, or a surface, window, door or zone.
@@ -916,8 +927,8 @@ function applyHour() {
   // Weather files and results keep standard time; on daylight-saving days the model's schedules
   // (people, lights) run an hour ahead, so the clock reads an hour later.
   const dst = model && daylightSavingDays(model.epjson);
-  const clock = dst && day - 1 >= dst[0] && day - 1 <= dst[1] ? ` (${hm(c + 60)} daylight time)` : '';
-  const when = `${hm(c)}${clock}`;
+  const clock = dst && day - 1 >= dst[0] && day - 1 <= dst[1] ? ` (${interpolating() ? hm(c + 60) : `${hm(c + 60)}–${hm(c + 120)}`} daylight time)` : '';
+  const when = interpolating() ? `${hm(c)}${clock}` : `${hm(c)}–${hm(c + 60)}${clock}`;
   interpolationMark(c);
   $('day-value').textContent = weather || results ? dateOf(day).label : '';
   if (!weather) {
@@ -928,8 +939,9 @@ function applyHour() {
     return;
   }
   // the weather at the minute: a whole hour's row as the file has it, between hours in a straight line
-  weatherHour = c % 60 ? weatherAtTime(heldH()) : outdoorAt(weather, day, c / 60 || 24);
-  if (c === 0) weatherHour = weatherAtTime(heldH()); // midnight: the day before's last row
+  weatherHour = !interpolating() ? outdoorAt(weather, day, hourEnding())
+    : c % 60 ? weatherAtTime(heldH()) : outdoorAt(weather, day, c / 60 || 24);
+  if (interpolating() && c === 0) weatherHour = weatherAtTime(heldH()); // midnight: the day before's last row
   $('t-out').value = +weatherHour.t.toFixed(2);
   $('wind').value = +weatherHour.windSpeed.toFixed(2);
   $('wind-dir').value = Math.round(weatherHour.windDirection);
@@ -944,12 +956,16 @@ function applyHour() {
 // moment shown (the day's clock while it plays).
 function clockMin() { return Number($('hour').value); }
 function hourEnding() { return Math.min(24, Math.floor(clockMin() / 60) + 1); }
-function heldH() { return (Number($('day').value) - 1) * 24 + clockMin() / 60; }
+// Interpolate off: whole hours, each as recorded (the slider holds the hour's start; the moment is its
+// middle, where the results' hourly mean stands; the weather is the file's row for the hour).
+const interpolating = () => $('time-interp').checked;
+function heldH() { return (Number($('day').value) - 1) * 24 + clockMin() / 60 + (interpolating() ? 0 : 0.5); }
 function momentH() { return playAt?.H ?? heldH(); }
 // "interpolated" beside the time when it falls between the data's own times: the weather file's whole
 // hours, and the results' hour (or step) middles; its tooltip says which and between what.
 function interpolationMark(c) {
   const notes = [];
+  if (!interpolating()) { $('interp').hidden = true; return; }
   if (weather && c % 60) notes.push(`Weather: between the file's ${pad2(Math.floor(c / 60))}:00 and ${pad2((Math.floor(c / 60) + 1) % 24)}:00, in a straight line (the wind as a vector).`);
   if (results) {
     const r = resultsTiming(results, heldH());
@@ -1935,7 +1951,8 @@ const parseHour = (t) => {
   const m = t.trim().match(/^(\d{1,2})(?:[:h.](\d{1,2}))?/);
   if (!m) return null;
   const min = Number(m[1]) * 60 + (m[2] ? (t.includes('.') && !t.includes(':') ? Math.round(Number(`0.${m[2]}`) * 60) : Number(m[2])) : 0);
-  return min >= 0 && min < 1440 ? min : null;
+  if (!(min >= 0 && min < 1440)) return null;
+  return interpolating() ? min : Math.floor(min / 60) * 60; // whole hours when not interpolating
 };
 const parseTimes = (t) => { const m = t.replace(',', '.').match(/[\d.]+/); return m ? Number(m[0]) : null; };
 typeable($('day-value'), $('day'), parseDay);

@@ -65,3 +65,22 @@ test('AirflowNetwork export: windows open or shut by default; gradual opening by
   const fine = Object.values(ep['Output:Variable']).filter((v) => v.reporting_frequency === 'Timestep').map((v) => v.variable_name);
   for (const v of ['Zone Mean Air Temperature', 'AFN Surface Venting Window or Door Opening Factor', 'Zone Air CO2 Concentration']) assert.ok(fine.includes(v), v);
 });
+
+test('AirflowNetwork export: each zone opens at its own "Windows open above" temperature', { skip: existsSync(EMMENWEID) ? false : 'example not here' }, () => {
+  const epjson = JSON.parse(readFileSync(EMMENWEID, 'utf8'));
+  for (const v of Object.values(epjson['ZoneVentilation:WindandStackOpenArea'])) if (v.zone_or_space_name === '2F_Office_8') v.minimum_indoor_temperature = 23;
+  const model = importEpJSON(epjson), ep = toAirflowNetwork(model, { gradual: true });
+  const zone = (n) => Object.values(ep['AirflowNetwork:MultiZone:Zone']).find((z) => z.zone_name === n);
+  const setpoint = (n) => ep['Schedule:Constant'][zone(n).ventilation_control_zone_temperature_setpoint_schedule_name].hourly_value;
+  assert.equal(setpoint('2F_Office_8'), 23);
+  assert.equal(setpoint('GF_Office_1_0'), 25);
+  assert.ok(ep['EnergyManagementSystem:Program'].AFN_Gradual.lines.some((l) => l.program_line.includes('- 23) /')), 'gradual opening from the zone\'s own temperature');
+});
+
+test('results over a weather step: a window\'s mean opening, and the share of it ventilation ran', async () => {
+  const { ventShare } = await import('../src/model/results.js');
+  const r = year(); // window open (1) in odd hours, ventilation in odd hours
+  near(windowAtTime(r, 'W', 100.5, 1), 0.5, 0.02, 'half of 100:30-101:30 open');
+  near(ventShare(r, 'Z', 100, 2), 0.5, 0.02, 'one of two hours ventilated');
+  assert.equal(windowAtTime(r, 'W', 101.5), 1, 'no span: the moment\'s own');
+});

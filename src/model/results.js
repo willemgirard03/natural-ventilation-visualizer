@@ -185,10 +185,24 @@ export function zoneAtTime(results, zone, H, pressure = 101325) {
     co2: z.co2 || f?.co2 ? lerpAt(results, z.co2, f?.co2, H) : null,
   };
 }
-// How far a window or door was open at moment H (0 to 1), or null if not reported.
-export function windowAtTime(results, name, H) {
+// How far a window or door was open at moment H (0 to 1), or null if not reported. span (hours): the
+// mean over [H, H + span) instead, so a weather step longer than the results' steps keeps the air a
+// window let through in them (a 30-minute step holding one 10-minute step at 0.8 gives 0.27).
+const overSpan = (H, span, at) => {
+  if (!(span > 0)) return at(H);
+  let s = 0, n = 0;
+  for (let t = H + 1 / 120; t < H + span; t += 1 / 60) { const v = at(t); if (v === null) return at(H); s += Number(v); n++; }
+  return n ? s / n : at(H);
+};
+export function windowAtTime(results, name, H, span = 0) {
   const N = String(name).toUpperCase();
-  return meanAt(results, results.windows?.[N], results.fine?.windows?.[N], H);
+  return overSpan(H, span, (t) => meanAt(results, results.windows?.[N], results.fine?.windows?.[N], t));
+}
+// The share of [H, H + span) a zone's ventilation ran (0 to 1), or null if not reported.
+export function ventShare(results, zone, H, span = 0) {
+  const z = results.zones[zone], f = results.fine?.zones?.[zone];
+  if (!z?.vent && !f?.vent) return null;
+  return overSpan(H, span, (t) => meanAt(results, z?.vent, f?.vent, t));
 }
 // A surface's inside temperature at moment H (degC), or null if not reported.
 export function surfaceAtTime(results, name, H) {

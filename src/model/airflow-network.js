@@ -180,7 +180,12 @@ export function toAirflowNetwork(model, options = {}) {
     },
   };
   ep.ScheduleTypeLimits = { ...ep.ScheduleTypeLimits, 'AFN Temperature': { lower_limit_value: -60, upper_limit_value: 200, numeric_type: 'Continuous', unit_type: 'Temperature' } };
-  ep['Schedule:Constant'] = { ...ep['Schedule:Constant'], 'AFN Vent Setpoint': { schedule_type_limits_name: 'AFN Temperature', hourly_value: o.ventSetpoint } };
+  // Each zone opens its windows above its own temperature ("Windows open above": the simple airflow's
+  // minimum indoor temperature), else the default; one constant schedule per temperature.
+  const setpointOf = (z) => z.ventilation?.controls?.minIndoorTemperature?.value ?? o.ventSetpoint;
+  const setpoints = {};
+  for (const z of Object.values(model.zones)) if (z.ventilation) setpoints[`AFN Vent Setpoint ${setpointOf(z)}`] = { schedule_type_limits_name: 'AFN Temperature', hourly_value: setpointOf(z) };
+  ep['Schedule:Constant'] = { ...ep['Schedule:Constant'], ...setpoints };
   ep['AirflowNetwork:MultiZone:ReferenceCrackConditions'] = {
     'AFN Reference Conditions': { reference_temperature: 20, reference_barometric_pressure: 101325, reference_humidity_ratio: 0 },
   };
@@ -192,7 +197,7 @@ export function toAirflowNetwork(model, options = {}) {
       ? {
         zone_name: z.name,
         ventilation_control_mode: 'Temperature',
-        ventilation_control_zone_temperature_setpoint_schedule_name: 'AFN Vent Setpoint',
+        ventilation_control_zone_temperature_setpoint_schedule_name: `AFN Vent Setpoint ${setpointOf(z)}`,
         // 1: no modulation by the inside-outside difference (EnergyPlus Solver.cpp, venting_control,
         // narrows the opening whenever this factor is not 1), so the control is open or shut
         minimum_venting_open_factor: 1,
@@ -241,7 +246,7 @@ export function toAirflowNetwork(model, options = {}) {
     };
   }
   if (doors.length) writeDoors(ep, doors);
-  if (o.gradual) gradualVenting(ep, model, links, surfaces, o.ventSetpoint);
+  if (o.gradual) gradualVenting(ep, model, links, surfaces, setpointOf);
   ep['AirflowNetwork:MultiZone:Surface:Crack'] = cracks;
   ep['AirflowNetwork:MultiZone:Component:SimpleOpening'] = openings;
   if (Object.keys(detailed).length) ep['AirflowNetwork:MultiZone:Component:DetailedOpening'] = detailed;
@@ -276,18 +281,18 @@ export function toAirflowNetwork(model, options = {}) {
 }
 
 // Gradual opening (options.gradual): an EMS program run at the start of every timestep sets each
-// zone-controlled window's opening factor to its full factor x (T_zone - setpoint) / GRADUAL_BAND,
+// zone-controlled window's opening factor to its full factor x (T_zone - its zone's setpoint) / GRADUAL_BAND,
 // kept within 0 and 1, and 0 when the zone is no warmer than outdoors or its venting schedule is 0.
 // The zone temperature is the last timestep's, as EnergyPlus's own venting control reads it.
 export const GRADUAL_BAND = 2; // K above the setpoint at which windows are fully open (the tool's own choice)
-function gradualVenting(ep, model, links, surfaces, setpoint) {
+function gradualVenting(ep, model, links, surfaces, setpointOf) {
   const sensors = {}, actuators = {}, lines = [];
   sensors.AFN_Tout = { output_variable_or_output_meter_index_key_name: 'Environment', output_variable_or_output_meter_name: 'Site Outdoor Air Drybulb Temperature' };
   Object.values(model.zones).forEach((z, i) => {
     const wins = links.filter((l) => !l.door && l.type !== 'crack' && l.control === 'zone' && l.from === z.name);
     if (!z.ventilation || !wins.length) return;
     sensors[`AFN_T${i}`] = { output_variable_or_output_meter_index_key_name: z.name, output_variable_or_output_meter_name: 'Zone Mean Air Temperature' };
-    lines.push(`SET AFN_f = (AFN_T${i} - ${setpoint}) / ${GRADUAL_BAND}`, 'IF AFN_f > 1', 'SET AFN_f = 1', 'ENDIF', 'IF AFN_f < 0', 'SET AFN_f = 0', 'ENDIF',
+    lines.push(`SET AFN_f = (AFN_T${i} - ${setpointOf(z)}) / ${GRADUAL_BAND}`, 'IF AFN_f > 1', 'SET AFN_f = 1', 'ENDIF', 'IF AFN_f < 0', 'SET AFN_f = 0', 'ENDIF',
       `IF AFN_T${i} <= AFN_Tout`, 'SET AFN_f = 0', 'ENDIF');
     if (z.ventilation.schedule) {
       sensors[`AFN_A${i}`] = { output_variable_or_output_meter_index_key_name: z.ventilation.schedule, output_variable_or_output_meter_name: 'Schedule Value' };
