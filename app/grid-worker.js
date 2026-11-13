@@ -3,9 +3,9 @@
 // temperatures, which the page's copy of the grid reads for the particles.
 //
 // How it steps (set by 'live' messages, as the day plays or not):
-//  - free: the hour picked, held, at the solver's own steps (the air moves at most a cell a step): as
-//    fast as it can until the air has settled, then in real time (a second of air a second), so what
-//    is seen moving is the air's own pace.
+//  - free: the hour picked, held, at the solver's own steps (the air moves at most a cell a step): at
+//    the speed asked (rate: seconds of air a second, or null for as fast as it can) until the air has
+//    settled, then in real time (a second of air a second), so what is seen moving is the air's own pace.
 //  - follow: the air keeps the day's clock. The page says how much air time has passed (target);
 //    the solver catches up in steps of up to `cap` seconds and waits when it is level.
 //  - settle: on and on in steps of up to `cap` seconds, as fast as it can, under the conditions given
@@ -28,17 +28,18 @@ const SAMPLE = 10; // s of air between the snapshots the change is measured over
 const SETTLE_MAX = 300; // s of air: settled at the latest
 
 let grid = null, net = null, running = false;
-let live = { mode: 'free', cap: 2 }, target = 0;
+let live = { mode: 'free', cap: 2, rate: null }, target = 0;
 // settling under the last conditions: the air time they came at, from still air or not, the last
 // snapshot of the flow and the changes measured since, and whether it has settled
 let since = 0, still = true, snap = null, nextSnap = 0, changes = [], settled = false;
-let clock = null; // held and settled: { wall (ms), air (s) } it runs in real time from
+let clock = null; // held, at a set speed: { wall (ms), air (s), rate } it runs from
 
 self.onmessage = ({ data: m }) => {
   if (m.type === 'model') {
     const model = importEpJSON(m.epjson);
     net = buildNetwork(model);
     grid = new GridFlow(prepareRoomFlow(voxelize(model, { cell: m.cell ?? 0.5 }), net, model), model);
+    grid.turbulence = !!m.turbulence;
     running = false;
     still = true;
   } else if (m.type === 'conditions' && grid) {
@@ -49,8 +50,14 @@ self.onmessage = ({ data: m }) => {
     if (!running) { running = true; loop(); }
   } else if (m.type === 'co2' && grid) {
     grid.setCO2(m.co2);
+  } else if (m.type === 'turbulence' && grid) {
+    // the model switched: the air settles again under it, from the flow it has
+    grid.turbulence = !!m.on;
+    if (grid.time > 0) still = false;
+    since = grid.time; snap = null; nextSnap = grid.time; changes = []; settled = false;
   } else if (m.type === 'live') {
-    live = { mode: m.mode, cap: m.cap ?? live.cap };
+    live = { mode: m.mode, cap: m.cap ?? live.cap, rate: m.rate !== undefined ? m.rate : live.rate };
+    clock = null;
     if (m.mode === 'follow') target = grid ? grid.time : 0;
   } else if (m.type === 'target') {
     target = m.air;
@@ -82,13 +89,17 @@ function loop() {
     if (need < 0.05) { setTimeout(loop, 15); return; } // level with the day: wait
     dt = Math.min(need, Math.max(grid.stableDt(), live.cap));
   } else if (live.mode === 'settle') dt = Math.max(grid.stableDt(), live.cap);
-  else if (settled) {
-    // held and settled: no faster than real time
-    clock ||= { wall: performance.now(), air: grid.time };
-    const ahead = grid.time - clock.air - (performance.now() - clock.wall) / 1000;
-    if (ahead > 0) { setTimeout(loop, Math.min(100, ahead * 1000)); return; }
+  else {
+    // held: settling at the speed asked, settled in real time
+    const rate = settled ? 1 : live.rate;
+    if (rate) {
+      if (!clock || clock.rate !== rate) clock = { wall: performance.now(), air: grid.time, rate };
+      const ahead = grid.time - clock.air - (rate * (performance.now() - clock.wall)) / 1000;
+      if (ahead > 0) { setTimeout(loop, Math.min(100, (ahead * 1000) / rate)); return; }
+      if (ahead < -1) clock = { wall: performance.now(), air: grid.time, rate }; // fallen behind: no sprint to catch up
+    } else clock = null;
   }
-  if (live.mode !== 'free' || !settled) clock = null;
+  if (live.mode !== 'free') clock = null;
   const t0 = performance.now();
   dt = grid.step(dt ?? undefined);
   watch();

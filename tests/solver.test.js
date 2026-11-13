@@ -216,6 +216,42 @@ test('grid solver: time-lapse steps of seconds stay stable, keep the plume and c
   }
 });
 
+test('grid solver with turbulence (zero-equation): walls measured, the plume mixed but still rising, stable at long steps, air conserved', async () => {
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { voxelize, prepareRoomFlow, cellCentre } = await import('../src/solver/roomflow.js');
+  const { GridFlow, CHEN_A } = await import('../src/solver/grid.js');
+  const model = twoRooms();
+  const g = voxelize(model, { cell: 0.25 }), net = buildNetwork(model, { doors: false });
+  const cond = { site: { elevation: 0, latitude: 45 }, open: { 'Room:s:w': 0, 'Hall:s:w': 0 }, zones: { Room: { t: 22, w: 0.008 }, Hall: { t: 22, w: 0.008 } }, outdoor: { t: 22, w: 0.008, pressure: 101325, windSpeed: 0, windDirection: 0 } };
+  const run = (turbulence, dt) => {
+    const grid = new GridFlow(prepareRoomFlow(g, net), model);
+    grid.turbulence = turbulence;
+    grid.projectTolerance = 1e-6;
+    grid.setConditions(flowStreams(net, solveNetwork(net, cond), cond), cond);
+    const hot = [...grid.fluid].filter((c) => { const [x, y, z] = cellCentre(g, c); return x > 1.5 && x < 2.5 && y > 1.5 && y < 2.5 && z < 0.3; });
+    grid.sources = grid.sources.map((s, i) => ({ ...s, occupied: i === 0 ? Int32Array.from(hot) : s.occupied, lower: i === 0 ? 500 : 0, upper: 0 }));
+    for (let t = 0; t < 60;) t += grid.step(dt ?? Math.min(0.5, grid.stableDt()));
+    return grid;
+  };
+  const off = run(false), on = run(true);
+  // a cell against the floor is half a cell from the nearest wall; the viscosity follows Chen's formula
+  const corner = on.fluid.find((c) => cellCentre(g, c)[2] < 0.2);
+  near(on.turb.L[corner], 0.125, 1e-6, 'half a cell from the floor');
+  let s = 0;
+  for (let a = 0; a < 3; a++) { const v = 0.5 * (on.faceVal(corner, 2 * a) + on.faceVal(corner, 2 * a + 1)); s += v * v; }
+  near(on.turb.nu[corner], 1.5e-5 + CHEN_A * 0.125 * Math.sqrt(s), 0.002, 'its viscosity from its distance and speed'); // speed then, before the last step's mixing
+  const up = (grid) => grid.velocityAt([2, 2, 1.5])[2], layer = (grid) => grid.temperatureAt(2, 2, 2.6) - grid.temperatureAt(0.5, 3.5, 0.3);
+  assert.ok(up(on) > 0.15, `a plume still rises above the heat (${up(on).toFixed(2)} m/s)`);
+  assert.ok(up(on) < up(off), `mixing slows it (${up(on).toFixed(2)} against ${up(off).toFixed(2)} m/s)`);
+  assert.ok(layer(on) > 1 && layer(on) < layer(off), `a warm layer, shallower than unmixed (${layer(on).toFixed(1)} against ${layer(off).toFixed(1)} K)`);
+  let worst = 0;
+  for (const c of on.fluid) worst = Math.max(worst, Math.abs(on.divergence(c)));
+  assert.ok(worst < 1e-6, `largest cell imbalance ${worst}`);
+  // long steps (the implicit mixing is stable at any step)
+  const long = run(true, 2);
+  for (const c of long.fluid) for (let a = 0; a < 3; a++) assert.ok(Number.isFinite(long.U[a][c]) && Math.abs(long.U[a][c]) < 5 && Number.isFinite(long.T[c]));
+});
+
 test('sashes: air comes in under an awning and over a hopper', async () => {
   const { flowStreams } = await import('../src/solver/paths.js');
   const { voxelize, prepareRoomFlow, boundaryFluxes, cellCentre } = await import('../src/solver/roomflow.js');

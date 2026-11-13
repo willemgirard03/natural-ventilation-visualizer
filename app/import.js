@@ -381,8 +381,8 @@ function startGrid(m) {
     $('room-air-status').title = `How fast this computer works the room air out: seconds of air a second, at the step it is taking now (not a playback speed: held at an hour, the settled air runs in real time; as the day plays, see Speed). Simulated air time ${fmt(data.time, 0)} s; this step ${fmt(data.ms, 0)} ms for ${fmt(data.dt, 2)} s of air, ${data.iterations} pressure iterations. `
       + (walls ? `Walls, floors and windows warm or cool the air at the inside temperatures of the results (${walls} surfaces).` : 'Surfaces neither warm nor cool the air: the results have no surface temperatures; a rerun adds them.');
   };
-  worker.postMessage({ type: 'model', epjson: m.epjson, cell: roomCell() });
-  worker.postMessage({ type: 'live', mode: 'free' });
+  worker.postMessage({ type: 'model', epjson: m.epjson, cell: roomCell(), turbulence: turbulenceOn() });
+  worker.postMessage({ type: 'live', mode: 'free', rate: heldRate() });
   gridPace = null; gridState = null;
   if (play) { play.regime = null; play.warming = true; } // the new worker told how to keep up, its air settled first
 }
@@ -407,10 +407,10 @@ function airCorner() {
   else if (P) { how = 'Transient'; tip = 'The room air runs in step with the day: each second of the day, a second of air physics.'; }
   else { how = 'Hour held'; tip = 'The room air under the hour picked, at its own steps: it settles as fast as the computer can to the flow those conditions give (steady on average), then runs on in real time, wandering about it as real air does, so the cuts change a little from moment to moment.'; }
   const speed = P ? ` · ${P.played !== null && P.played !== undefined && P.played < 0.9 * playSpeed() ? `${times(P.played)} of ${times(playSpeed())}` : times(playSpeed())}` : '';
-  const settle = !sim || P?.warming ? '' : gridState.settled ? (P ? ' · settled' : ' · settled · real time') : ` · settling ${Math.round(gridState.settling ?? 0)} s`;
+  const settle = !sim || P?.warming ? '' : gridState.settled ? (P ? ' · settled' : ' · settled · real time') : ` · settling ${Math.round(gridState.settling ?? 0)} s${P ? '' : ` · ${heldLabel()}`}`;
   const text = how + speed + settle;
   if (airBox.textContent !== text) airBox.textContent = text;
-  airBox.title = `${tip}${sim ? ' Settling: the air still changing towards the flow its conditions give (the figure is the air time since they changed); settled once its change has stopped falling, what is left being the flow\'s own wandering.' : ''} Every view of the air reads this one simulation.${gridAirTime && sim ? ` Air time in all ${Math.round(gridAirTime)} s.` : ''}`;
+  airBox.title = `${tip}${sim ? ' Settling: the air still changing towards the flow its conditions give (the figure is the air time since they changed); settled once its change has stopped falling, what is left being the flow\'s own wandering.' : ''} Every view of the air reads this one simulation.${sim ? (turbulenceOn() ? ' Turbulence: zero-equation (Chen).' : ' Turbulence: off.') : ''}${gridAirTime && sim ? ` Air time in all ${Math.round(gridAirTime)} s.` : ''}`;
 }
 
 // Windows opened or closed one by one (by window name) or room by room (by zone), over the Windows setting.
@@ -2059,7 +2059,25 @@ function setQuality(v) {
 }
 $('room-quality').addEventListener('change', (e) => setQuality(e.target.value));
 // the air step: the worker told at once, and the pace measured afresh
-$('air-step').addEventListener('change', () => { gridPace = null; if (play) play.regime = null; else worker?.postMessage({ type: 'live', mode: 'free', cap: quality().cap }); playControls(); });
+$('air-step').addEventListener('change', () => { gridPace = null; if (play) play.regime = null; else worker?.postMessage({ type: 'live', mode: 'free', cap: quality().cap, rate: heldRate() }); playControls(); });
+// Turbulence: the worker switches at once, and the air settles again under it
+const turbulenceOn = () => $('turbulence').value === 'chen';
+$('turbulence').addEventListener('change', () => { gridPace = null; worker?.postMessage({ type: 'turbulence', on: turbulenceOn() }); if (play) play.regime = null; airCorner(); });
+// The hour held's speed while its air settles: 1x (real time) to 1000x on a log scale, the end as
+// fast as the computer can (null); settled, it runs in real time.
+function heldRate() {
+  const v = Number($('held-speed').value);
+  return v >= 1000 ? null : 10 ** ((3 * v) / 1000);
+}
+const heldLabel = () => { const r = heldRate(); return r === null ? 'fastest' : r < 1.05 ? 'real time' : `${fmt(r, r < 10 ? 1 : 0)}×`; };
+$('held-speed').addEventListener('input', (e) => {
+  const v = Number(e.target.value), stop = [0, 333.3, 666.7, 1000].find((x) => Math.abs(x - v) < 14); // 1x, 10x, 100x, Fastest
+  if (stop !== undefined) e.target.value = String(Math.round(stop));
+  const label = heldLabel();
+  $('held-speed-value').textContent = label[0].toUpperCase() + label.slice(1);
+  if (!play) worker?.postMessage({ type: 'live', mode: 'free', rate: heldRate() });
+  airCorner();
+});
 playControls();
 
 // The weather at H (hours since 1 January 00:00): the file's hours read at the moments they end,
@@ -2082,7 +2100,7 @@ function setPlaying(on) {
   $('play').classList.toggle('on', on);
   $('play').textContent = on ? '❚❚ Pause' : '▶ Play day';
   if (!on) {
-    worker?.postMessage({ type: 'live', mode: 'free' });
+    worker?.postMessage({ type: 'live', mode: 'free', rate: heldRate() });
     $('play-status').textContent = '';
     if (was) applyHour(); // the hour as picked, whole
     return;

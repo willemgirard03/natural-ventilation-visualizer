@@ -20,6 +20,13 @@ const G = 9.81, RHO = 1.2, CP = 1006; // m/s2, kg/m3, J/kg.K
 const WALL = 0, OPEN = 1, SET = 2; // face kinds: no flow, solved, set by an opening's flow
 export const HOLD_TIME = 30; // s; how quickly a zone's mean temperature is drawn to its known value
 export const SURFACE_COEFFICIENT = 3; // W/m2.K, convection between a surface and the air beside it
+// Turbulence (when on): Chen's zero-equation model for indoor air (Chen and Xu, Energy and Buildings 28,
+// 1998), as the open fast fluid dynamics code applies it (Modelica Buildings library, src/
+// FastFluidDynamics: chen_zero_equ_model.c, diffusion.c, initialization.c, solver_gs.c): a turbulent
+// viscosity of CHEN_A x the cell's distance to the nearest wall along the axes x its speed, diffused
+// implicitly after the carrying step in SWEEPS Gauss-Seidel sweeps, heat and CO2 over a turbulent
+// Prandtl number PR_T.
+export const CHEN_A = 0.03874, PR_T = 0.9, NU_AIR = 1.5e-5, SWEEPS = 5;
 
 export class GridFlow {
   // prep: prepareRoomFlow(voxelize(model), net)
@@ -53,6 +60,8 @@ export class GridFlow {
     this.C = new Float32Array(N); // CO2, ppm
     this.ghostC = new Float32Array(N).fill(NaN);
     this.co2 = null; // { targets, generation, supply, outdoor } by zone, from setCO2
+    this.turbulence = false; // Chen's zero-equation model on (see diffuse)
+    this.turb = null; // its wall distances and stencils, built when first needed after each connect
   }
 
   // CO2 in each zone from the network's balance: targets (ppm) the zones' means are held near,
@@ -176,6 +185,79 @@ export class GridFlow {
     // No flow through faces that are not open.
     for (const c of this.fluid) for (let a = 0; a < 3; a++) if (this.kind[c * 6 + 2 * a + 1] !== OPEN) this.U[a][c] = 0;
     this.inflowGhosts();
+    this.turb = null; // open faces changed: wall distances and stencils again when next needed
+  }
+
+  // For the turbulence model: each cell's distance to the nearest wall, the least along the three axes
+  // both ways (as the open code measures it, there to the domain's walls, here to any face air cannot
+  // cross: walls, floors, ceilings, closed doors, openings), and the stencils of the implicit
+  // diffusion. Velocity: each open face's neighbours along its axis (open faces are unknowns; a face
+  // set by an opening holds its velocity, a wall face holds still air) and across it (the same face of
+  // the cells beside; a wall beside holds still air half a cell away: no slip). Scalars: each cell's
+  // neighbours over open faces; none over walls (surfaces exchange heat apart) or openings.
+  buildTurbulence() {
+    const { g, kind, nbr, fluid } = this, N = g.zone.length, h = g.h;
+    const L = new Float32Array(N).fill(Infinity), D = new Float32Array(N);
+    for (let a = 0; a < 3; a++) {
+      // cells in index order: the cell behind along each axis comes first, the one ahead last
+      for (let i = 0; i < fluid.length; i++) { const c = fluid[i], k = c * 6 + 2 * a; D[c] = kind[k] === OPEN ? D[nbr[k]] + h : h / 2; if (D[c] < L[c]) L[c] = D[c]; }
+      for (let i = fluid.length - 1; i >= 0; i--) { const c = fluid[i], k = c * 6 + 2 * a + 1; D[c] = kind[k] === OPEN ? D[nbr[k]] + h : h / 2; if (D[c] < L[c]) L[c] = D[c]; }
+    }
+    const vel = [0, 1, 2].map((a) => {
+      const faces = [], ahead = [], vars = [], cst = [], wsum = [];
+      for (const c of fluid) {
+        const f = c * 6 + 2 * a + 1;
+        if (kind[f] !== OPEN) continue;
+        const n = nbr[f], row = [-1, -1, -1, -1, -1, -1];
+        let s = 0, w = 0, j = 0;
+        for (const [key, cell] of [[c * 6 + 2 * a, nbr[c * 6 + 2 * a]], [n * 6 + 2 * a + 1, n]]) {
+          w += 1;
+          if (kind[key] === OPEN) row[j++] = cell; else if (kind[key] === SET) s += this.setVel[key];
+        }
+        for (let b = 0; b < 3; b++) if (b !== a) for (let e = 0; e < 2; e++) {
+          const key = c * 6 + 2 * b + e;
+          if (kind[key] === WALL) { w += 2; continue; }
+          const m = nbr[key];
+          if (kind[key] === OPEN && kind[m * 6 + 2 * a + 1] === OPEN) { row[j++] = m; w += 1; }
+        }
+        faces.push(c); ahead.push(n); vars.push(...row); cst.push(s); wsum.push(w);
+      }
+      return { faces: Int32Array.from(faces), ahead: Int32Array.from(ahead), vars: Int32Array.from(vars), cst: Float32Array.from(cst), wsum: Float32Array.from(wsum) };
+    });
+    const sc = new Int32Array(fluid.length * 6).fill(-1);
+    fluid.forEach((c, i) => { let j = 0; for (let d = 0; d < 6; d++) if (kind[c * 6 + d] === OPEN) sc[i * 6 + j++] = nbr[c * 6 + d]; });
+    return { L, nu: new Float32Array(N), vel, sc };
+  }
+
+  // Turbulent mixing over a step (Chen's zero-equation model, see CHEN_A): each cell's turbulent
+  // viscosity from its speed now, then velocity, temperature and CO2 diffused with it, implicitly
+  // (backward in time, so stable at any step), in SWEEPS Gauss-Seidel sweeps.
+  diffuse(dt) {
+    const t = this.turb ||= this.buildTurbulence();
+    const { fluid } = this, nu = t.nu, k = dt / (this.g.h * this.g.h);
+    for (const c of fluid) {
+      let s = 0;
+      for (let a = 0; a < 3; a++) { const v = 0.5 * (this.faceVal(c, 2 * a) + this.faceVal(c, 2 * a + 1)); s += v * v; }
+      nu[c] = NU_AIR + CHEN_A * t.L[c] * Math.sqrt(s);
+    }
+    for (let a = 0; a < 3; a++) {
+      const S = t.vel[a], U = this.U[a], rhs = Float32Array.from(U), n = S.faces.length;
+      for (let it = 0; it < SWEEPS; it++) for (let i = 0; i < n; i++) {
+        const c = S.faces[i], d = k * 0.5 * (nu[c] + nu[S.ahead[i]]);
+        let sum = S.cst[i];
+        for (let j = i * 6, e = j + 6; j < e; j++) { const m = S.vars[j]; if (m < 0) break; sum += U[m]; }
+        U[c] = (rhs[c] + d * sum) / (1 + d * S.wsum[i]);
+      }
+    }
+    for (const F of this.co2 ? [this.T, this.C] : [this.T]) {
+      const rhs = Float32Array.from(F);
+      for (let it = 0; it < SWEEPS; it++) for (let i = 0; i < fluid.length; i++) {
+        const c = fluid[i], d = (k * nu[c]) / PR_T;
+        let sum = 0, w = 0;
+        for (let j = i * 6, e = j + 6; j < e; j++) { const m = t.sc[j]; if (m < 0) break; sum += F[m]; w++; }
+        if (w) F[c] = (rhs[c] + d * sum) / (1 + d * w);
+      }
+    }
   }
 
   // Outdoor air comes in at the outdoor temperature: the cells beyond inflow faces hold it.
@@ -391,6 +473,8 @@ export class GridFlow {
     // Heat to or from surfaces with known temperatures, through the faces they cover.
     const k = 1 - Math.exp(-(SURFACE_COEFFICIENT * dt) / (RHO * CP * h));
     for (const f of this.surfaceFaces || []) this.T[f.c] += (f.t - this.T[f.c]) * k;
+    // Turbulent mixing, when on (otherwise the only spreading is the carrying step's own).
+    if (this.turbulence) this.diffuse(dt);
     // 3. Each zone's mean temperature drawn to its known value; the pattern within it kept.
     const pull = 1 - Math.exp(-dt / HOLD_TIME);
     this.sources.forEach((s, zi) => {
