@@ -86,6 +86,7 @@ export class SkyDome {
     Object.assign(this, { view, onTime, onNorth });
     this.shown = true; this.opacity = 0.5; this.sunShown = true; this.labels = true; this.sunLabels = true; this.shadows = true;
     this.layers = Object.fromEntries(Object.entries(SKY_LAYERS).map(([k, l]) => [k, l.on]));
+    this.layerOpacity = {}; this.sunOpacity = 1; // each layer's opacity (times the sky's), and the sun's
     this.state = null; // { R, north, doy, hour, weather, limits }
     this.group = new THREE.Group();
     this.group.userData.noSection = true;
@@ -182,7 +183,7 @@ export class SkyDome {
     for (const o of this.group.children) {
       const sunLayer = o.userData.layer === 'sun';
       o.visible = sunLayer ? this.sunShown : this.shown && this.layers[o.userData.layer];
-      const k = sunLayer ? 1 : this.opacity;
+      const k = sunLayer ? this.sunOpacity : this.opacity * (this.layerOpacity[o.userData.layer] ?? 1);
       o.traverse((x) => { if (x.material) x.material.opacity = k * (x.userData.strength ?? 1); });
     }
   }
@@ -240,6 +241,7 @@ export class SkyDome {
     if (this.labels && on('paths')) for (const p of this.seasons || []) if (p.noon) tag(p.noon, p.label, { size: 8.5, fill: 'var(--poche)' });
     this.marks = {};
     if (this.sunShown) {
+      out.push(`<g opacity="${this.sunOpacity}">`);
       const { m, d } = monthDayOf(s.doy), mid = this.day?.flat().reduce((a, p) => (p[2] > a[2] ? p : a), [0, 0, -1]);
       if (this.sunLabels && mid && mid[2] > 0) tag(mid, `${MONTHS[m - 1]} ${d} path`, { size: 8.5, fill: 'var(--sun)' });
       const sun = this.sunAt();
@@ -256,6 +258,7 @@ export class SkyDome {
           this.marks.sun = q; this.marks.ray = [q, o];
         }
       }
+      out.push('</g>');
     }
     // The building's own north (its +y): an arrow on the ground out to a knob on the horizon, which
     // turns the building under the sky.

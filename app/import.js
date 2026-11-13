@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { importEpJSON, MODEL_VERSION } from '../src/model/import-epjson.js';
 import { exportEpJSON, serializeEpJSON } from '../src/model/export-epjson.js';
-import { View3D, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE, co2Color, CO2_SCALE, peopleColor } from './view3d.js';
+import { FS_IN, FS_OUT } from './views.js';
+import { frameOf } from './sections.js';
+import { View3D, fade, TYPE_COLORS, PROBLEM, OPEN_WINDOW, zoneColor, pressureColor, NO_PRESSURE, co2Color, CO2_SCALE, peopleColor } from './view3d.js';
 import { footprintAxis, toAirflowNetwork } from '../src/model/airflow-network.js';
 import { interiorDoors, DOOR } from '../src/model/interior-doors.js';
 import { buildNetwork, solveNetwork } from '../src/solver/network.js';
@@ -133,7 +135,7 @@ function edgesOf(c) {
   return pos;
 }
 const hover = new HoverPick(view, { candidatesAt, edgesOf });
-// Pointing at a cut: a crosshair there and the air's values, read from the room air as it is now.
+// Pointing at a cut: its room-air cell outlined and the air's values, read from the room air as it is now.
 {
   const el = view.renderer.domElement;
   let pending = false, last = null;
@@ -213,7 +215,7 @@ const sky = new SkyDome(view, {
   },
 });
 let levelMarks = null, wallEnds = null; // the levels' markers and a free wall's ends in 3D, made with the views below
-view.beforeRender = () => { winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); tools.beforeRender(); levelMarks?.draw(); wallEnds?.draw(); };
+view.beforeRender = () => { fadeLayers(); winEdit.beforeRender(); massEdit.beforeRender(); sky.beforeRender(); tools.beforeRender(); levelMarks?.draw(); wallEnds?.draw(); };
 // The modelling tools (app/modeltools.js): Add zone and Split zone, in the view's bar for a massing.
 const tools = new ModelTools(view, {
   massing: () => massing,
@@ -293,7 +295,23 @@ for (const el of document.querySelectorAll('[data-labels]')) el.addEventListener
   else if (k === 'preview') hover.setLabels(on);
   else if (k === 'rose') { roseLabels = on; drawRose(); }
 });
-$('sky-opacity').addEventListener('input', (e) => { sky.set({ opacity: Number(e.target.value) / 100 }); $('sky-opacity-value').textContent = `${e.target.value}%`; });
+// Each layer's opacity (Layers: a figure to scrub or type, as the shading tool's); a layer's multiplies
+// its group's. The sky's go to the sky; the rest fade their objects as each frame is drawn.
+const opacity = (k) => Math.max(0, Math.min(100, Number($(`op-${k}`)?.value ?? 100))) / 100;
+function layerOpacity() {
+  sky.set({ opacity: opacity('sky'), sunOpacity: opacity('sun'), layerOpacity: Object.fromEntries(['paths', 'hours', 'grid', 'compass', 'dots'].map((k) => [k, opacity(`sky-${k}`)])) });
+  view.render();
+}
+function fadeLayers() {
+  fade(air.heads?.obj, opacity('air')); fade(air.trails?.obj, opacity('air'));
+  fade(view.shading, opacity('shading'));
+  fade(view.skin, opacity('sun') * opacity('shadows')); fade(view.ground, opacity('sun') * opacity('shadows'));
+  fade(view.overlay, opacity('rose'));
+  fade(hover.outline, opacity('labels'));
+  hover.layer.style.opacity = String(opacity('labels'));
+  if (levelMarks?.svg) levelMarks.svg.style.opacity = String(opacity('levels'));
+}
+for (const el of document.querySelectorAll('[id^="op-"]')) el.addEventListener('input', layerOpacity);
 for (const el of document.querySelectorAll('[data-sky]')) el.addEventListener('change', () => { sky.set({ layers: { ...sky.layers, [el.dataset.sky]: el.checked } }); legend(); });
 let sliceRanges = {}, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
@@ -963,16 +981,16 @@ function heldH() { return (Number($('day').value) - 1) * 24 + clockMin() / 60 + 
 function momentH() { return playAt?.H ?? heldH(); }
 // "interpolated" beside the time when it falls between the data's own times: the weather file's whole
 // hours, and the results' hour (or step) middles; its tooltip says which and between what.
+const INTERP_TIP = $('time-interp').parentElement.title;
 function interpolationMark(c) {
-  const notes = [];
-  if (!interpolating()) { $('interp').hidden = true; return; }
+  const notes = [], box = $('time-interp').parentElement;
+  if (!interpolating()) { box.title = INTERP_TIP; return; }
   if (weather && c % 60) notes.push(`Weather: between the file's ${pad2(Math.floor(c / 60))}:00 and ${pad2((Math.floor(c / 60) + 1) % 24)}:00, in a straight line (the wind as a vector).`);
   if (results) {
     const r = resultsTiming(results, heldH());
     if (!r.exact) notes.push(`Room temperatures, CO₂ and surfaces: between two of EnergyPlus's ${r.fine ? `${r.minutes}-minute steps` : 'hours'}, each the mean of its ${r.fine ? 'step' : 'hour'} and so standing at its middle; windows and ventilation as in the ${r.fine ? 'step' : 'hour'} the time falls in.`);
   }
-  $('interp').hidden = !notes.length;
-  $('interp').title = notes.join(' ');
+  box.title = `${INTERP_TIP}${notes.length ? ` Now interpolated: ${notes.join(' ')}` : ' Now: as recorded.'}`;
 }
 async function loadWeather(name, read) {
   try { setWeather(parseEPW(await read(), { fileName: name })); } catch (err) {
@@ -1042,7 +1060,18 @@ $('results-load').addEventListener('change', (e) => {
   $('results-file').add(option);
   loadResults(file.name, file.stream(), file.size, async () => file);
 });
-for (const id of ['day', 'hour']) $(id).addEventListener('input', applyHour);
+$('day').addEventListener('input', applyHour);
+$('hour').addEventListener('input', () => { if (play && !stepping) skipTo((Number($('day').value) - 1) * 24 + clockMin() / 60); else applyHour(); });
+// The wheel over the Time slider steps it: 10 minutes a notch (an hour with Shift, or when not
+// interpolating); as the day plays, it skips the day's clock, as far as its span.
+$('hour').addEventListener('wheel', (e) => {
+  if ($('hour').disabled) return;
+  e.preventDefault();
+  const by = (e.shiftKey || !interpolating() ? 60 : 10) * (e.deltaY < 0 || e.deltaX > 0 ? 1 : -1);
+  if (play) { skipTo(play.H + by / 60); return; }
+  $('hour').value = String(Math.min(1439, Math.max(0, clockMin() + by)));
+  applyHour();
+}, { passive: false });
 $('weather-file').addEventListener('change', (e) => {
   const name = e.target.value;
   if (!name) return setWeather(null);
@@ -1887,6 +1916,17 @@ $('restart-air').addEventListener('click', restartAir);
 $('window-depth').addEventListener('change', (e) => view.setWindowDepth(e.target.value));
 view.windowDepth = $('window-depth').value;
 $('fit').addEventListener('click', () => view.frame());
+// Zoom to selected: the selection (a surface, window, zone or clipping plane) framed from where the
+// camera looks now; the orbit then turns about it.
+$('zoom-sel').addEventListener('click', () => {
+  const c = current();
+  if (c?.kind === 'plane') {
+    const p = c.item, f = frameOf(p);
+    if (f) { const o = view.origin, P = (u, w) => f.o.clone().addScaledVector(f.u, u).addScaledVector(f.v, w).toArray().map((x, k) => x + o[k]); return view.zoomTo([{ vertices: [P(p.b[0], p.b[2]), P(p.b[1], p.b[2]), P(p.b[1], p.b[3]), P(p.b[0], p.b[3])] }]); }
+  }
+  if (view.selectedPolys?.length) view.zoomTo(view.selectedPolys);
+  else popMessage('Select something first: a surface, window, zone or clipping plane.');
+});
 $('projection').addEventListener('click', (e) => {
   const mode = e.target.dataset?.proj;
   if (!mode) return;
@@ -1898,6 +1938,8 @@ function setFull(on) {
   $('view3d').classList.toggle('full', on);
   document.body.classList.toggle('hasfull', on);
   $('full').title = on ? 'Leave full screen' : 'Full screen';
+  $('full').innerHTML = on ? FS_OUT : FS_IN;
+  $('full').setAttribute('aria-label', $('full').title);
   view.resize();
 }
 $('full').addEventListener('click', () => setFull(!$('view3d').classList.contains('full')));
@@ -2320,7 +2362,20 @@ function setHour(h) {
   stepping = false;
 }
 $('play').addEventListener('click', () => setPlaying(!play));
-for (const id of ['day', 'hour']) $(id).addEventListener('input', () => { if (!stepping && play) setPlaying(false); });
+$('day').addEventListener('input', () => { if (!stepping && play) setPlaying(false); }); // another day ends the day played
+// Skips the day played to moment H, kept within its span (From to To): the conditions there at once.
+function skipTo(H) {
+  const P = play;
+  if (!P) return;
+  H = Math.min(P.H1 - 1 / 600, Math.max(P.Hfrom, H));
+  if (Math.abs(H - P.H) < 1 / 3600) { $('hour').value = Math.round((P.H - Math.floor(P.H / 24) * 24) * 60); return; }
+  P.H = H; P.next = H; P.track = []; P.played = null;
+  if (P.regime === 'follow') { P.air0 = gridAirTime; P.H0 = H; worker?.postMessage({ type: 'target', air: P.air0 }); }
+  playStep();
+  playClock(P.H);
+  $('hour').value = Math.round((P.H - Math.floor(P.H / 24) * 24) * 60);
+  sky.setTime(Math.floor(P.H / 24) + 1, P.H - Math.floor(P.H / 24) * 24);
+}
 for (const id of ['play-from', 'play-to']) $(id).addEventListener('input', playSpan);
 playSpan();
 

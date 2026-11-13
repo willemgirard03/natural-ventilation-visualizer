@@ -162,10 +162,12 @@ export class ViewCube {
     uv.needsUpdate = true;
   }
 
-  // The view turned by `angle` (radians) about the upright through its target.
+  // The view turned by `angle` (radians) about the upright through the compass's centre (the site's
+  // origin): the camera and what it looks at both swing round it.
   turn(angle) {
     const v = this.view, t = v.controls.target, up = new THREE.Vector3(0, 0, 1);
-    v.camera.position.sub(t).applyAxisAngle(up, angle).add(t);
+    v.camera.position.applyAxisAngle(up, angle);
+    t.applyAxisAngle(up, angle);
     v.camera.up.applyAxisAngle(up, angle);
     v.camera.lookAt(t);
     v.controls.update?.();

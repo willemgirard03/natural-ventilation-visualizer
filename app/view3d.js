@@ -250,6 +250,19 @@ function crossEdges(solids) {
   return out;
 }
 
+// Fades an object's materials to k of their own opacity (kept the first time), for a layer's opacity.
+export function fade(obj, k) {
+  obj?.traverse?.((o) => {
+    for (const m of Array.isArray(o.material) ? o.material : o.material ? [o.material] : []) {
+      m.userData.op0 ??= m.opacity;
+      m.userData.tr0 ??= m.transparent;
+      m.opacity = m.userData.op0 * k;
+      const tr = m.userData.tr0 || k < 1;
+      if (tr !== m.transparent) { m.transparent = tr; m.needsUpdate = true; }
+    }
+  });
+}
+
 function edgeGeometry(polys, origin) {
   const pos = [];
   for (const { vertices: v } of polys) {
@@ -482,17 +495,20 @@ export class View3D {
 
   // Turns the camera to look at the target from a direction (unit vector, model axes), keeping its
   // distance, over a third of a second. Straight down or up is nudged so north stays at the top.
+  // From the view cube: the view turned to look along dir, about the compass's centre (the site's
+  // origin, where the sky stands): the camera and what it looks at both swing round it.
   lookFrom(dir) {
     const d = dir.clone();
     if (Math.abs(d.z) > 0.999) d.set(0, -1e-3 * Math.sign(d.z), Math.sign(d.z)).normalize();
-    const target = this.controls.target, start = this.camera.position.clone().sub(target);
-    const dist = start.length(), a = start.clone().normalize(), t0 = performance.now();
+    const pivot = new THREE.Vector3(0, 0, 0), target0 = this.controls.target.clone(), pos0 = this.camera.position.clone();
+    const a = pos0.clone().sub(target0).normalize(), t0 = performance.now();
+    const q = new THREE.Quaternion().setFromUnitVectors(a, d);
     const step = (now) => {
       const k = Math.min(1, (now - t0) / 330), e = k * k * (3 - 2 * k);
-      const q = new THREE.Quaternion().setFromUnitVectors(a, d);
-      const v = a.clone().applyQuaternion(new THREE.Quaternion().slerp(q, e));
-      this.camera.position.copy(target).addScaledVector(v, dist);
-      this.camera.lookAt(target);
+      const r = new THREE.Quaternion().slerp(q, e);
+      this.controls.target.copy(target0).sub(pivot).applyQuaternion(r).add(pivot);
+      this.camera.position.copy(pos0).sub(pivot).applyQuaternion(r).add(pivot);
+      this.camera.lookAt(this.controls.target);
       this.controls.update();
       this.render();
       if (k < 1) requestAnimationFrame(step);
@@ -964,6 +980,11 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       this.sashGroup.add(mesh, pick, new THREE.LineSegments(edgeGeometry(panels, this.origin), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.6, clippingPlanes: this.clipping })));
     } else { this.sashMesh = null; this.openingPick = null; }
     this.group.add(this.sashGroup);
+    // a selected window's outline follows its sash
+    if (this.selectedName && this.model.windows[this.selectedName] && (swung.has(this.selectedName) || this.highlightOnSash)) {
+      this.highlightOnSash = swung.has(this.selectedName);
+      this.select(this.selectedName, { quiet: true });
+    }
     // The cuts redraw where they cross glass when sashes swing or close.
     const key = [...swung].map((n) => `${n}:${sashes.get(n)?.type}:${sashes.get(n)?.angle?.toFixed(1)}`).sort().join('|');
     if (!quick && key !== this.sashKey) { this.sashKey = key; if (this.sections?.planes.length) this.caps.update(); }
@@ -1113,13 +1134,19 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
   // Outlines and tints the named surface, window or zone; null clears the selection. With thickness,
   // the solids it is drawn as are tinted and outlined, not just its modelled plane.
   
-  select(name, { frame = false } = {}) {
+  // quiet: only redraw the outline (a sash swinging), telling no one.
+  select(name, { frame = false, quiet = false } = {}) {
     if (this.highlight) {
       this.highlight.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
       this.group.remove(this.highlight);
       this.highlight = null;
     }
-    const found = name ? this.find(name) : null;
+    let found = name ? this.find(name) : null;
+    this.selectedName = name || null;
+    // an open window's outline is its sash, where it has swung to
+    const sash = found?.kind === 'window' && this.swung?.has(name) ? this.lastWindows?.[1]?.get(name) : null;
+    const panel = sash && sashPanel(this.model.windows[name], sash, this.windowOffset(this.model.windows[name]));
+    if (panel) found = { ...found, polys: [{ name, vertices: panel }] };
     this.selectedPolys = found?.polys || null;
     if (found) {
       const h = new THREE.Group(), tint = { color: SELECTED, side: THREE.DoubleSide, transparent: true, opacity: 0.42, depthWrite: false, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 };
@@ -1141,8 +1168,15 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       this.group.add(h);
       if (frame) this.frame(found.polys);
     }
-    this.onSelect(found);
+    if (!quiet) this.onSelect(found);
     this.render();
+  }
+
+  // Closes in on polygons (model coordinates) from where the camera looks now; the orbit then turns
+  // about them.
+  zoomTo(polys) {
+    if (!polys?.length) return;
+    this.frame(polys, this.camera.position.clone().sub(this.controls.target));
   }
 
   // What is under the pointer: { kind, item, point (view coordinates), dir (the ray's), distance (along

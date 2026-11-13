@@ -10,8 +10,8 @@
 // The particles in the planes are their own: moved within each plane by the air's velocity along it,
 // separately from the 3D particles. Each plane has its own settings (p.air: what its slice is coloured
 // by, whether it shows particles, and their colour, density and speed), set in its pop-up, so planes
-// can show different things side by side. Pointing at a slice shows a crosshair there and the values
-// of the air at that point (probe).
+// can show different things side by side. Pointing at a slice outlines the room air's cell there and
+// shows the values of the air at that point (probe).
 
 import * as THREE from 'three';
 import { frameOf, removes as removesPoint } from './sections.js';
@@ -53,7 +53,7 @@ export class FieldSlices {
     this.visible = false;
     this.trails = new Map(); // by plane: its particles, kept across updates while the plane stays put
     this.running = false;
-    // The probe: a crosshair in the plane pointed at, and the values there beside the pointer.
+    // The probe: the room air's cell pointed at, outlined, and the values there beside the pointer.
     this.cross = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#18211F', depthTest: false, transparent: true }));
     this.cross.renderOrder = 30;
     this.cross.visible = false;
@@ -199,12 +199,20 @@ export class FieldSlices {
     return best;
   }
 
-  // Shows the probe at a slice point found by probeAt (or hides it): a crosshair in its plane, and
-  // the plane's own value first, then the others.
+  // Shows the probe at a slice point found by probeAt (or hides it): the edges of the cell it falls in
+  // (the simulation's own cell, so what is averaged there is seen), and the values at the point, the
+  // plane's own first, then the others.
   showProbe(found, e) {
     if (!found) { if (this.cross.visible || !this.tag.hidden) { this.cross.visible = false; this.tag.hidden = true; this.view.render(); } return; }
-    const { f, at, point, plane } = found, s = this.sample, len = this.view.sections.scaleAt(at) * 14;
-    const ends = [at.clone().addScaledVector(f.u, -len), at.clone().addScaledVector(f.u, len), at.clone().addScaledVector(f.v, -len), at.clone().addScaledVector(f.v, len)];
+    const { point, plane } = found, s = this.sample, g = this.grid, o = this.view.origin;
+    const idx = [0, 1, 2].map((k) => Math.floor((point[k] - g.min[k]) / g.h));
+    const lo = idx.map((i, k) => g.min[k] + i * g.h - o[k]), hi = lo.map((x) => x + g.h);
+    const P = (a, b, c) => new THREE.Vector3(a ? hi[0] : lo[0], b ? hi[1] : lo[1], c ? hi[2] : lo[2]);
+    const ends = [];
+    for (const [a, b] of [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]]) {
+      const v = (n) => P(n & 1, (n >> 1) & 1, (n >> 2) & 1);
+      ends.push(v(a), v(b));
+    }
     this.cross.geometry.setFromPoints(ends);
     this.cross.visible = true;
     const [x, y, z] = point, vel = s.velocity(x, y, z);

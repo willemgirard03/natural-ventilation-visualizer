@@ -100,6 +100,10 @@ body.hasfull{overflow:hidden}
 .laygrp:first-child{border-top:0}
 .layhd{display:flex; justify-content:space-between; align-items:center; gap:10px; min-height:24px}
 .layhd b{font-weight:500; color:var(--ink)}
+/* a layer's opacity, at the right of its row */
+.lop{margin-left:auto; font-size:11px}
+.lop .scrub{font-size:11px; color:var(--ink3)}
+.lop .val{min-width:2em}
 .laylab{font-size:11px; color:var(--ink3); margin-left:auto}
 .layitem{padding-left:22px}
 .layrow{display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:26px; white-space:nowrap}
