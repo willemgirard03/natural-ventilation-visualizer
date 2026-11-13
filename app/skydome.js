@@ -81,7 +81,7 @@ function dots(points, color, strength) {
 }
 
 export class SkyDome {
-  // onTime(dayOfYear, hourEnding): the sun was dragged. onNorth(degrees): the north axis was set.
+  // onTime(dayOfYear, hourEnding, at): the sun was dragged (at: hours since midnight, to the minute). onNorth(degrees): the north axis was set.
   constructor(view, { onTime, onNorth }) {
     Object.assign(this, { view, onTime, onNorth });
     this.shown = true; this.opacity = 0.5; this.sunShown = true; this.labels = true; this.sunLabels = true; this.shadows = true;
@@ -326,9 +326,9 @@ export class SkyDome {
         // The date and hour whose sun is drawn nearest the pointer, kept on its side of the year.
         const R = this.state.R, got = pickSun(d.doy, 'std', m[0] - d.off[0], m[1] - d.off[1], (v) => this.P(v.map((x) => x * R)));
         if (!got) return;
-        // the sun to the minute; the weather hour (and the airflow) only when the minute is in another
+        // the sun, and the time picked, to the minute
         const at = Math.min(24 - 1 / 60, Math.max(0, Math.round(got.hour * 60) / 60)), hour = Math.min(24, Math.floor(at) + 1);
-        if (got.doy !== d.doy || hour !== d.hour) { d.doy = got.doy; d.hour = hour; this.at = at; this.atDoy = got.doy; this.onTime(got.doy, hour, at); }
+        if (got.doy !== d.doy || at !== d.at) { d.doy = got.doy; d.hour = hour; d.at = at; this.at = at; this.atDoy = got.doy; this.onTime(got.doy, hour, at); }
         this.setTime(got.doy, at);
       } else {
         // The building's north follows the pointer: whole degrees, 15° with Shift. The pointer's

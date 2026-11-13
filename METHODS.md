@@ -30,6 +30,10 @@ Steps 1 and 2 decide how much air enters and how warm each room is on average. S
 | Saturation vapour pressure | ASHRAE Fundamentals (Hyland and Wexler), as EnergyPlus uses it | cited (EnergyPlus) | `src/model/weather.js` |
 | Two-way flow bands in an opening (neutral plane; rectangle flow law F ∝ h^3/2) | **own**, from the network's neutral plane | — | `src/solver/paths.js` |
 | The AirflowNetwork version of a model for EnergyPlus reruns (discharge coefficient 0.6; open above 25 °C and when warmer than outdoors; cracks for leakage) | ClimateStudio's simple-airflow settings, read from its EnergyPlus input; [ClimateStudio documentation](https://climatestudiodocs.com/docs/thermalZoneSettings.html) | read | `src/model/airflow-network.js` |
+| Default window control in reruns: EnergyPlus's own temperature control, fully open above the setpoint and shut below. The minimum venting open factor is 1, because any other value makes EnergyPlus narrow the opening as the indoor-outdoor difference grows | EnergyPlus 23.1 `Solver.cpp`, `venting_control`; field notes in `Energy+.idd` (AirflowNetwork:MultiZone:Zone) | read (13 Nov 2026) | `toAirflowNetwork` |
+| Gradual opening (Run ▸ EnergyPlus, off by default): an EMS program at the start of each timestep sets each zone-controlled window's opening factor to its full factor × (T_zone − 25 °C) / 2 K, kept within 0 and 1, and 0 when the zone is no warmer than outdoors or venting is not allowed | Actuator "AirFlow Network Window/Door Opening", "Venting Opening Factor": EnergyPlus `Solver.cpp` (it replaces the venting control's factor). The 2 K band is **own** | read; run on Emmenweid 2226 (section 8) | `gradualVenting`, `GRADUAL_BAND` |
+| Tried and not used: EnergyPlus's built-in modulation by indoor-outdoor difference, with the values of its example `AirflowNetwork_MultiZone_SmallOffice.idf` (fully open up to 5 K, 0.3 of open at 10 K) | EnergyPlus 23.1 testfiles, `Solver.cpp` | read and run: it narrowed the openings to 0.3–0.6, but the air still swung 25 → 18 °C | — |
+| Results finer than hourly: a week's rerun reports at EnergyPlus's timesteps (10 min, or 5 min when 15-minute steps are asked), and the reader averages them to the step asked (10–60 min) | **own** use of EnergyPlus timestep reporting | test: `tests/results.test.js` | `zoneResults` (`fine`), `airflow-network.js` (`reporting`, `timestepsPerHour`) |
 
 ## 3. CO₂
 
@@ -73,7 +77,8 @@ Steps 1 and 2 decide how much air enters and how warm each room is on average. S
 | Method | Source | Checked |
 | --- | --- | --- |
 | Weather between the weather file's hours: temperature in a straight line; wind as a vector, so it turns the short way | **own** | — |
-| Room temperatures and CO₂ between results hours: in a straight line between hour midpoints | **own**. EnergyPlus results are hourly averages, so faster changes within an hour are smoothed out (see section 8) | — |
+| Room conditions at any moment, for the time picked and as the day plays alike: each hour's mean, or each finer step's mean in a rerun, stands at the middle of its hour or step. Temperatures, humidity, CO₂ and surface temperatures are interpolated in a straight line between two middles. Window openings and whether ventilation ran are the hour's or step's own. Beside the time, "interpolated" marks a moment that falls between the data's own times | **own**. Hourly results smooth out changes within an hour (see section 8); a rerun at 10-minute steps shows them | test: `tests/results.test.js` |
+| The time picked, to the minute: weather from the file's row on a whole hour, and in a straight line between rows otherwise (the wind as a vector) | **own** (as for the day played) | — |
 | Following the day, or settling at each weather step when the day plays faster than the air can be worked out | **own** | measured (PLAN.md) |
 | Sun position (drawing only): Cooper's declination, Spencer-style equation of time, about 0.1° | as noted in `app/sky.js` | — |
 
@@ -104,3 +109,13 @@ What has not been checked yet:
   4. It vents again roughly every two hours.
 
   The hourly results average this into alternating hours of about 21 °C and 25 °C. Windows that open fully for 10 minutes every two hours are an artefact of the control, not how windows behave. How fast the air recovers is plausible: room air holds little heat next to its surfaces.
+
+  The tool's own AirflowNetwork rerun of the same days behaves the same way. In 2F_Office_8 on 15 July, between 05:00 and 17:00:
+
+  | Window control | Opening when it opens | Air temperature range | Hourly means |
+  | --- | --- | --- | --- |
+  | On/off (default) | 0.80 for one timestep | 16.8–25.1 °C | 21.0–25.0 °C |
+  | EnergyPlus's built-in modulation (not used) | 0.29–0.64 | 17.4–25.0 °C | 21.5–25.0 °C |
+  | Gradual (EMS, proportional) | 0.01–0.12 | 20.1–25.3 °C | 23.3–24.9 °C |
+
+  Gradual opening removes most of the swing but not all of it. The control acts on the last timestep's temperature, and even a 10% opening of this room's windows cools it in one timestep. A shorter EnergyPlus timestep would narrow the swing further (not tried yet).

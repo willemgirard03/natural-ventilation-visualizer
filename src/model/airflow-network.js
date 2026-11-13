@@ -147,7 +147,15 @@ const NETWORK_OUTPUTS = [
 ];
 
 // options beyond NETWORK_DEFAULTS:
-//   reporting: 'Hourly' (default) or 'Timestep' for the network outputs
+//   reporting: 'Hourly' (default) or 'Timestep' for the network outputs (and, at timesteps, the zones'
+//              temperatures, humidity and CO2 too, for results finer than hourly)
+//   timestepsPerHour: EnergyPlus's timesteps an hour, raised to this where the model has fewer
+//   gradual: true opens each zone-controlled window in proportion to how far its zone is above the
+//            venting setpoint: shut at the setpoint, fully open GRADUAL_BAND above it (when warmer
+//            than outdoors and venting is allowed), through EnergyPlus's EMS actuator on the window's
+//            venting opening factor (AirflowNetwork Solver.cpp: "AirFlow Network Window/Door
+//            Opening", "Venting Opening Factor", which replaces the venting control's factor).
+//            Otherwise EnergyPlus's own control: fully open above the setpoint, shut below.
 //   runPeriod: [beginMonth, beginDay, endMonth, endDay] to shorten the run
 //   checkOutputs: true adds the solver's inputs (weather, zone temperatures) at the same frequency
 //   surfaceTemperatures: true adds every surface's inside temperature, hourly (for the grid solver)
@@ -185,7 +193,9 @@ export function toAirflowNetwork(model, options = {}) {
         zone_name: z.name,
         ventilation_control_mode: 'Temperature',
         ventilation_control_zone_temperature_setpoint_schedule_name: 'AFN Vent Setpoint',
-        minimum_venting_open_factor: 0,
+        // 1: no modulation by the inside-outside difference (EnergyPlus Solver.cpp, venting_control,
+        // narrows the opening whenever this factor is not 1), so the control is open or shut
+        minimum_venting_open_factor: 1,
         ...(vent.schedule ? { venting_availability_schedule_name: vent.schedule } : {}),
       }
       : { zone_name: z.name, ventilation_control_mode: 'NoVent' };
@@ -231,6 +241,7 @@ export function toAirflowNetwork(model, options = {}) {
     };
   }
   if (doors.length) writeDoors(ep, doors);
+  if (o.gradual) gradualVenting(ep, model, links, surfaces, o.ventSetpoint);
   ep['AirflowNetwork:MultiZone:Surface:Crack'] = cracks;
   ep['AirflowNetwork:MultiZone:Component:SimpleOpening'] = openings;
   if (Object.keys(detailed).length) ep['AirflowNetwork:MultiZone:Component:DetailedOpening'] = detailed;
@@ -239,11 +250,16 @@ export function toAirflowNetwork(model, options = {}) {
 
   const frequency = o.reporting || 'Hourly';
   const outputs = { ...ep['Output:Variable'] };
-  for (const v of [...NETWORK_OUTPUTS, ...(o.checkOutputs ? CHECK_OUTPUTS : []), ...(o.surfaceTemperatures ? ['Surface Inside Face Temperature'] : [])]) {
+  const zoneFine = frequency === 'Timestep' ? ['Zone Mean Air Temperature', 'Zone Air Humidity Ratio', 'Zone Air CO2 Concentration'] : [];
+  for (const v of new Set([...NETWORK_OUTPUTS, ...(o.checkOutputs ? CHECK_OUTPUTS : []), ...(o.surfaceTemperatures ? ['Surface Inside Face Temperature'] : []), ...zoneFine])) {
     outputs[`AFN check ${v}`] = { key_value: '*', variable_name: v, reporting_frequency: frequency };
   }
   ep['Output:Variable'] = outputs;
   if (o.skipSizing) skipSizing(ep);
+  if (o.timestepsPerHour) {
+    const [name, t] = Object.entries(ep.Timestep || { 'Timestep 1': { number_of_timesteps_per_hour: 6 } })[0];
+    ep.Timestep = { [name]: { ...t, number_of_timesteps_per_hour: Math.max(t.number_of_timesteps_per_hour ?? 6, o.timestepsPerHour) } };
+  }
   if (o.runPeriod) {
     // A shorter run starts on the weekday its first day has in the full year, so weekday schedules
     // (occupancy, lights) line up with the year's: the original run period names 1 January's weekday.
@@ -257,6 +273,37 @@ export function toAirflowNetwork(model, options = {}) {
     ep.RunPeriod = { [name]: { ...rp, begin_month: bm, begin_day_of_month: bd, end_month: em, end_day_of_month: ed, ...(start ? { day_of_week_for_start_day: start } : {}) } };
   }
   return ep;
+}
+
+// Gradual opening (options.gradual): an EMS program run at the start of every timestep sets each
+// zone-controlled window's opening factor to its full factor x (T_zone - setpoint) / GRADUAL_BAND,
+// kept within 0 and 1, and 0 when the zone is no warmer than outdoors or its venting schedule is 0.
+// The zone temperature is the last timestep's, as EnergyPlus's own venting control reads it.
+export const GRADUAL_BAND = 2; // K above the setpoint at which windows are fully open (the tool's own choice)
+function gradualVenting(ep, model, links, surfaces, setpoint) {
+  const sensors = {}, actuators = {}, lines = [];
+  sensors.AFN_Tout = { output_variable_or_output_meter_index_key_name: 'Environment', output_variable_or_output_meter_name: 'Site Outdoor Air Drybulb Temperature' };
+  Object.values(model.zones).forEach((z, i) => {
+    const wins = links.filter((l) => !l.door && l.type !== 'crack' && l.control === 'zone' && l.from === z.name);
+    if (!z.ventilation || !wins.length) return;
+    sensors[`AFN_T${i}`] = { output_variable_or_output_meter_index_key_name: z.name, output_variable_or_output_meter_name: 'Zone Mean Air Temperature' };
+    lines.push(`SET AFN_f = (AFN_T${i} - ${setpoint}) / ${GRADUAL_BAND}`, 'IF AFN_f > 1', 'SET AFN_f = 1', 'ENDIF', 'IF AFN_f < 0', 'SET AFN_f = 0', 'ENDIF',
+      `IF AFN_T${i} <= AFN_Tout`, 'SET AFN_f = 0', 'ENDIF');
+    if (z.ventilation.schedule) {
+      sensors[`AFN_A${i}`] = { output_variable_or_output_meter_index_key_name: z.ventilation.schedule, output_variable_or_output_meter_name: 'Schedule Value' };
+      lines.push(`IF AFN_A${i} <= 0`, 'SET AFN_f = 0', 'ENDIF');
+    }
+    for (const l of wins) {
+      const s = surfaces[`AFN Surface ${l.name}`], name = `AFN_W${Object.keys(actuators).length}`;
+      actuators[name] = { actuated_component_unique_name: l.name, actuated_component_type: 'AirFlow Network Window/Door Opening', actuated_component_control_type: 'Venting Opening Factor' };
+      lines.push(`SET ${name} = ${s.window_door_opening_factor_or_crack_factor} * AFN_f`);
+    }
+  });
+  if (!lines.length) return;
+  ep['EnergyManagementSystem:Sensor'] = { ...ep['EnergyManagementSystem:Sensor'], ...sensors };
+  ep['EnergyManagementSystem:Actuator'] = { ...ep['EnergyManagementSystem:Actuator'], ...actuators };
+  ep['EnergyManagementSystem:Program'] = { ...ep['EnergyManagementSystem:Program'], AFN_Gradual: { lines: lines.map((program_line) => ({ program_line })) } };
+  ep['EnergyManagementSystem:ProgramCallingManager'] = { ...ep['EnergyManagementSystem:ProgramCallingManager'], 'AFN Gradual Venting': { energyplus_model_calling_point: 'BeginTimestepBeforePredictor', programs: [{ program_name: 'AFN_Gradual' }] } };
 }
 
 // Sizing only sets the size of heating and cooling equipment. When every ideal-loads system has both

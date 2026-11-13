@@ -16,7 +16,7 @@ import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './p
 import { SkyDome, VENT_BANDS, ventBandLabels } from './skydome.js';
 import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
-import { readZoneResultsStream, zoneAt, zoneAt as zoneAt_, windowAt, mergeResults, surfaceAt } from '../src/model/results.js';
+import { readZoneResultsStream, mergeResults, zoneAtTime, windowAtTime, surfaceAtTime, resultsTiming } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
 import { unitNormal } from '../src/model/geometry.js';
@@ -205,7 +205,7 @@ function brokenNames() {
 // The sky over the building (app/skydome.js): the sun at the hour picked, dragged to pick another,
 // and true north on the horizon, dragged to set the model's north axis.
 const sky = new SkyDome(view, {
-  onTime: (doy, hour) => { $('day').value = doy; $('hour').value = hour; applyHour(); },
+  onTime: (doy, hour, at) => { $('day').value = doy; $('hour').value = Math.round((at ?? hour - 0.5) * 60); applyHour(); },
   onNorth: (deg) => {
     const name = Object.keys(model.epjson.Building || {})[0];
     if (!name) { popMessage('The model has no Building object to hold a north axis.'); updateSky(); return; }
@@ -279,7 +279,8 @@ function updateSky() {
   sky.setPlace(weather?.location || (loc && { latitude: loc[1].latitude, longitude: loc[1].longitude, timeZone: loc[1].time_zone, name: loc[0] }));
   const { radius, height } = view.extent(), R = 1.45 * Math.max(2 * radius, height, 1);
   view.skyRadius = sky.shown ? R : 0;
-  sky.update({ R, north: model.site.northAxis, doy: Number($('day').value), hour: Number($('hour').value), weather, limits: ventLimits() });
+  sky.update({ R, north: model.site.northAxis, doy: Number($('day').value), hour: hourEnding(), weather, limits: ventLimits() });
+  if (!play) sky.setTime(Number($('day').value), clockMin() / 60); // the sun at the minute picked
 }
 $('show-sky').addEventListener('change', (e) => { sky.set({ shown: e.target.checked }); updateSky(); legend(); });
 $('show-sun').addEventListener('change', (e) => sky.set({ sunShown: e.target.checked }));
@@ -340,7 +341,7 @@ function drawSlices(now = false) {
     return means[zi];
   };
   const zoneKnown = (name) => {
-    const H = airflow.hourAt, r = results && zoneAt_(results, name, H);
+    const H = airflow.hourAt, r = results && zoneAtTime(results, name, airflow.H ?? H + 0.5);
     return { t: airflow.conditions.zones[name]?.t ?? null, fromResults: !!r, co2Results: r?.co2 ?? null, co2Tool: airflow.co2?.[name] ?? null };
   };
   sliceRanges = slices.update({ inside: fluid, value, velocity, temperature, co2, zoneAt, zoneMean, zoneKnown }, null, g);
@@ -405,7 +406,7 @@ function airCorner() {
   else if (P?.warming) { how = 'Settling'; tip = 'The room air settling under the first weather step before the day starts.'; }
   else if (P && playRegime() === 'settle') { how = 'Steady state at each step'; tip = 'At each weather step the room air is run (by the same transient solver, in 2 s steps, as fast as the computer can) until it stops changing: a steady state for that step\'s conditions; between steps it runs on under them.'; }
   else if (P) { how = 'Transient'; tip = 'The room air runs in step with the day: each second of the day, a second of air physics.'; }
-  else { how = 'Hour held'; tip = 'The room air under the hour picked, at its own steps: it settles as fast as the computer can to the flow those conditions give (steady on average), then runs on in real time, wandering about it as real air does, so the cuts change a little from moment to moment.'; }
+  else { how = 'Time held'; tip = 'The room air under the time picked, at its own steps: it settles as fast as the computer can to the flow those conditions give (steady on average), then runs on in real time, wandering about it as real air does, so the cuts change a little from moment to moment.'; }
   const speed = P ? ` · ${P.played !== null && P.played !== undefined && P.played < 0.9 * playSpeed() ? `${times(P.played)} of ${times(playSpeed())}` : times(playSpeed())}` : '';
   const settle = !sim || P?.warming ? '' : gridState.settled ? (P ? ' · settled' : ' · settled · real time') : ` · settling ${Math.round(gridState.settling ?? 0)} s${P ? '' : ` · ${heldLabel()}`}`;
   const text = how + speed + settle;
@@ -434,16 +435,12 @@ let esoSource = null; // where the results file in use comes from: { name, blob(
 
 // The network's conditions at an hour index: the outdoor air given, rooms from the results (or the
 // Inside setting) and windows and doors as set, following the results' own openings where asked.
-function conditionsAt(hourAt, outdoor, site) {
+// H: the moment (hours since 1 January, standard time); hourAt: the hour it falls in, for schedules.
+// The results are read at the moment (src/model/results.js: each hour's or step's mean stands at its
+// middle, values between are interpolated; window openings and ventilation are the step's own).
+function conditionsAt(hourAt, outdoor, site, H = hourAt + 0.5) {
   const tIn = Number($('t-in').value), mode = $('windows').value;
-  const inside = (z) => {
-    const r = results && zoneAt(results, z, hourAt, outdoor.pressure);
-    if (!r) return { t: tIn, w: 0.008, vent: null };
-    // playing: between the results' hours (each the mean of its hour, so read at its middle)
-    if (!playAt) return r;
-    const x = playAt.H - 0.5, j = Math.floor(x), f = x - j, a = zoneAt(results, z, ((j % 8760) + 8760) % 8760, outdoor.pressure), b = zoneAt(results, z, (j + 1) % 8760, outdoor.pressure);
-    return a && b ? { ...r, t: a.t + (b.t - a.t) * f, w: a.w + (b.w - a.w) * f } : r;
-  };
+  const inside = (z) => (results && zoneAtTime(results, z, H, outdoor.pressure)) || { t: tIn, w: 0.008, vent: null };
   const conditions = {
     site, outdoor,
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
@@ -451,7 +448,7 @@ function conditionsAt(hourAt, outdoor, site) {
       if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : $('doors').value === 'open') ? l.openFactor : 0];
       // As in results: an airflow network run gives each window's opening; otherwise the zone's ventilation.
       // Each window opens as far as its sash allows towards the fraction asked of it.
-      const reported = mode === 'results' && results ? windowAt(results, l.name, hourAt) : null;
+      const reported = mode === 'results' && results ? windowAtTime(results, l.name, H) : null;
       if (reported !== null && !windowSet.has(l.name) && !roomSet.has(l.from)) return [l.name, reported > 0 ? sashFor(l, reported).fraction : 0];
       const base = mode === 'open' || (mode === 'results' && !!inside(l.from).vent);
       const open = windowSet.has(l.name) ? windowSet.get(l.name) : roomSet.has(l.from) ? roomSet.get(l.from) : base;
@@ -474,12 +471,9 @@ const CO2_HOURS = 48;
 // CO2 in each zone as the results give it, where they report it for every zone (as temperatures, the
 // rooms' levels are EnergyPlus's; the tool's own balance only stands in where they do not); between the
 // results' hours while the day plays. null where they do not.
-function co2FromResults(hourAt) {
+function co2FromResults(H) {
   if (!results || !net.zones.every((z) => results.zones[z]?.co2)) return null;
-  const at = (z, i) => results.zones[z].co2[((i % 8760) + 8760) % 8760];
-  if (!playAt) return Object.fromEntries(net.zones.map((z) => [z, at(z, hourAt)]));
-  const x = playAt.H - 0.5, j = Math.floor(x), f = x - j;
-  return Object.fromEntries(net.zones.map((z) => [z, at(z, j) + (at(z, j + 1) - at(z, j)) * f]));
+  return Object.fromEntries(net.zones.map((z) => [z, zoneAtTime(results, z, H).co2]));
 }
 function co2History(hourAt, solutionNow, site, outdoorNow) {
   const volumes = net.zones.map((z) => model.zones[z].volume.value);
@@ -508,32 +502,32 @@ function solveAir() {
   // The site comes from the weather file when there is one, else from the model, else sea level.
   const loc = weather?.location || Object.values(model.epjson['Site:Location'] || {})[0] || {};
   const site = { elevation: loc.elevation ?? 0, latitude: loc.latitude ?? 45 };
-  const hourAt = hourIndex(Number($('day').value), Number($('hour').value));
+  const hourAt = hourIndex(Number($('day').value), hourEnding()), H = momentH();
   const outdoor = {
     t: Number($('t-out').value), w: weatherHour?.w ?? 0.008, pressure: weatherHour?.pressure ?? standardPressure(site.elevation),
     windSpeed: Number($('wind').value), windDirection: Number($('wind-dir').value),
   };
-  const conditions = conditionsAt(hourAt, outdoor, site);
+  const conditions = conditionsAt(hourAt, outdoor, site, H);
   view.setPeople(peopleNow(hourAt), peopleTop());
   const mode = $('windows').value;
   // Surfaces' inside temperatures this hour, where the results have them (the tool's reruns do).
   conditions.surfaceT = {};
   if (results?.surfaces) {
     for (const name of [...Object.keys(model.surfaces), ...Object.keys(model.windows)]) {
-      const t = surfaceAt(results, name, hourAt);
+      const t = surfaceAtTime(results, name, H);
       if (t !== null) conditions.surfaceT[name] = t;
     }
   }
   const solution = solveNetwork(net, conditions);
   const flows = flowStreams(net, solution, conditions);
   // CO2 keeps the last figures until its history (up to a few seconds in large models) is redone once the controls settle.
-  airflow = { solution, flows, conditions, co2: airflow?.co2 ?? null, site, outdoor, hourAt };
+  airflow = { solution, flows, conditions, co2: airflow?.co2 ?? null, site, outdoor, hourAt, H };
   clearTimeout(co2Timer);
   co2Timer = setTimeout(() => {
     co2Last = performance.now();
     const now = airflow;
     if (now?.solution !== solution) return;
-    now.co2 = co2FromResults(hourAt) || co2History(hourAt, solution, site, outdoor);
+    now.co2 = co2FromResults(H) || co2History(hourAt, solution, site, outdoor);
     view.setCO2(now.co2);
     // The grid solver carries CO2 within rooms, each zone's mean held at these levels.
     if (grid && worker) {
@@ -578,7 +572,7 @@ function solveAir() {
   if ($('room-air').value === 'grid') {
     // Simulated: the background solver takes the new conditions; the page's copy of the grid follows.
     if (grid && worker) {
-      const hour = hourIndex(Number($('day').value), Number($('hour').value));
+      const hour = hourIndex(Number($('day').value), hourEnding());
       grid.setConditions(flows, conditions, { hour, copy: true });
       worker.postMessage({ type: 'conditions', conditions, hour });
       if (gridLive) air.setField(grid, conditions);
@@ -728,7 +722,13 @@ async function rerun(year = false) {
   // Hoppers and awnings run as EnergyPlus's pivoted openings, at the angle their opening amount gives.
   const pivoted = Object.fromEntries(net.links.filter((l) => l.control === 'zone' && ['hopper', 'awning'].includes(sashOf(l.name).type))
     .map((l) => [l.name, { type: sashOf(l.name).type, angle: amountOf(l) * maxAngleOf(l) }]));
-  const epjson = toAirflowNetwork(model, { states: linkStates(), openFactors, sashes: pivoted, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true, surfaceTemperatures: true });
+  // a week kept at the step asked (EnergyPlus reporting at its timesteps; 15-minute steps need 5-minute
+  // timesteps); a year hourly
+  const step = year ? 60 : runStep();
+  const epjson = toAirflowNetwork(model, {
+    states: linkStates(), openFactors, sashes: pivoted, runPeriod: [da.month, da.day, db.month, db.day], skipSizing: true, surfaceTemperatures: true,
+    gradual: $('run-gradual').checked, ...(step < 60 ? { reporting: 'Timestep', timestepsPerHour: step === 15 ? 12 : 6 } : {}),
+  });
   rerunning = true;
   updateRun();
   $('stale').hidden = false;
@@ -741,13 +741,15 @@ async function rerun(year = false) {
     const out = await res.json();
     if (!res.ok) throw new Error(out.error);
     const esoUrl = runnerBase + out.eso, eso = await fetch(esoUrl);
-    const week = await readZoneResultsStream(eso.body, forModel, null, { hours: (b - a + 1) * 24 });
+    const week = await readZoneResultsStream(eso.body, forModel, null, { hours: (b - a + 1) * 24, step });
     if (model !== forModel) return;
     // A pivoted window reports its opening factor as angle / 90: read it as the share of the window
     // its sash frees at that angle, as the tool's other windows are.
     for (const [name, s] of Object.entries(pivoted)) {
       const series = week.windows[name.toUpperCase()], l = net.links.find((x) => x.name === name);
       if (series && l) week.windows[name.toUpperCase()] = series.map((f) => (f > 0 ? freeFraction(s.type, l.width, l.height, f * 90) : 0));
+      const fine = week.fine?.windows[name.toUpperCase()];
+      if (fine && l) week.fine.windows[name.toUpperCase()] = fine.map((f) => (f > 0 ? freeFraction(s.type, l.width, l.height, f * 90) : 0));
     }
     const merged = year ? week : mergeResults(results, week, hourIndex(a, 1));
     esoSource = { name: `${(forModel.source.fileName || 'model').replace(/\.(epjson|json)$/i, '')}_${year ? 'year' : 'week'}.eso`, blob: () => fetch(esoUrl).then((x) => x.blob()) };
@@ -769,6 +771,10 @@ async function rerun(year = false) {
 $('stale').addEventListener('click', (e) => { if (e.target.id === 'rerun') rerun(); });
 $('run-period').addEventListener('change', (e) => { yearPicked = e.target.value === 'year'; });
 $('run-eplus').addEventListener('click', () => rerun($('run-period').value === 'year'));
+// The week's results step: 10, 15, 20, 30 or 60 min.
+const RUN_STEPS = [10, 15, 20, 30, 60];
+const runStep = () => RUN_STEPS[Number($('run-step').value)] ?? 60;
+$('run-step').addEventListener('input', () => { $('run-step-value').textContent = `${runStep()} min`; });
 
 
 // What is selected now: a section plane, or a surface, window, door or zone.
@@ -893,6 +899,7 @@ function updateRun() {
   // Without results only the whole year can run; the week comes back once there are some, unless a year was picked.
   week.disabled = !results;
   $('run-period').value = results && !yearPicked ? 'week' : 'year';
+  $('run-step').disabled = $('run-period').value === 'year'; // a year is kept hourly
   b.disabled = !runner || !runnerStatus?.energyplus || !model || !weather || rerunning;
   b.title = !runner ? `Running EnergyPlus needs the runner on this computer: in the tool's folder, run npm run serve (with Node.js and EnergyPlus 23.1 installed). This page then finds it at ${RUNNER.replace('http://', '')}.`
     : !runnerStatus?.energyplus ? 'The runner on this computer has no EnergyPlus 23.1: install it, or run tools/run_alignment.py once to set it up.'
@@ -901,16 +908,17 @@ function updateRun() {
 }
 function applyHour() {
   updateRun();
-  if (keyframes.length) followKeyframes(Number($('hour').value) - 1);
+  if (keyframes.length) followKeyframes(hourEnding() - 1);
   for (const id of ['day', 'hour', 'play']) $(id).disabled = !weather && !results;
   if (!weather && !results && $('play').classList.contains('on')) setPlaying(false);
-  const day = Number($('day').value), hour = Number($('hour').value);
-  const hh = (h) => `${String(h).padStart(2, '0')}:00`;
+  const day = Number($('day').value), c = clockMin();
+  const hm = (m) => `${pad2(Math.floor(m / 60) % 24)}:${pad2(m % 60)}`;
   // Weather files and results keep standard time; on daylight-saving days the model's schedules
   // (people, lights) run an hour ahead, so the clock reads an hour later.
   const dst = model && daylightSavingDays(model.epjson);
-  const clock = dst && day - 1 >= dst[0] && day - 1 <= dst[1] ? ` (${hh(hour % 24)}–${hh((hour + 1) % 24)} daylight time)` : '';
-  const when = `${hh(hour - 1)}–${hh(hour)}${clock}`;
+  const clock = dst && day - 1 >= dst[0] && day - 1 <= dst[1] ? ` (${hm(c + 60)} daylight time)` : '';
+  const when = `${hm(c)}${clock}`;
+  interpolationMark(c);
   $('day-value').textContent = weather || results ? dateOf(day).label : '';
   if (!weather) {
     $('when').textContent = results ? when : '';
@@ -919,15 +927,36 @@ function applyHour() {
     if (model) showInfo(current());
     return;
   }
-  weatherHour = outdoorAt(weather, day, hour);
-  $('t-out').value = weatherHour.t;
-  $('wind').value = weatherHour.windSpeed;
-  $('wind-dir').value = weatherHour.windDirection;
+  // the weather at the minute: a whole hour's row as the file has it, between hours in a straight line
+  weatherHour = c % 60 ? weatherAtTime(heldH()) : outdoorAt(weather, day, c / 60 || 24);
+  if (c === 0) weatherHour = weatherAtTime(heldH()); // midnight: the day before's last row
+  $('t-out').value = +weatherHour.t.toFixed(2);
+  $('wind').value = +weatherHour.windSpeed.toFixed(2);
+  $('wind-dir').value = Math.round(weatherHour.windDirection);
   $('when').textContent = when;
   $('when').title = `${weather.location.name}, ${weather.fileName || 'weather file'}: ${weatherHour.t} °C, wind ${weatherHour.windSpeed} m/s from ${weatherHour.windDirection}°, ${(weatherHour.w * 1000).toFixed(1)} g/kg humidity`;
   solveAir();
   drawRose();
   if (model) showInfo(current());
+}
+// The time picked, in minutes after midnight (standard time); the hour it falls in, as the weather file
+// counts hours (1 to 24, the hour ending); the moment it stands for, in hours since 1 January; and the
+// moment shown (the day's clock while it plays).
+function clockMin() { return Number($('hour').value); }
+function hourEnding() { return Math.min(24, Math.floor(clockMin() / 60) + 1); }
+function heldH() { return (Number($('day').value) - 1) * 24 + clockMin() / 60; }
+function momentH() { return playAt?.H ?? heldH(); }
+// "interpolated" beside the time when it falls between the data's own times: the weather file's whole
+// hours, and the results' hour (or step) middles; its tooltip says which and between what.
+function interpolationMark(c) {
+  const notes = [];
+  if (weather && c % 60) notes.push(`Weather: between the file's ${pad2(Math.floor(c / 60))}:00 and ${pad2((Math.floor(c / 60) + 1) % 24)}:00, in a straight line (the wind as a vector).`);
+  if (results) {
+    const r = resultsTiming(results, heldH());
+    if (!r.exact) notes.push(`Room temperatures, CO₂ and surfaces: between two of EnergyPlus's ${r.fine ? `${r.minutes}-minute steps` : 'hours'}, each the mean of its ${r.fine ? 'step' : 'hour'} and so standing at its middle; windows and ventilation as in the ${r.fine ? 'step' : 'hour'} the time falls in.`);
+  }
+  $('interp').hidden = !notes.length;
+  $('interp').title = notes.join(' ');
 }
 async function loadWeather(name, read) {
   try { setWeather(parseEPW(await read(), { fileName: name })); } catch (err) {
@@ -1540,7 +1569,7 @@ const ASM_DEFS = `<defs>
 // day picked, lights, equipment, outdoor air, infiltration and when its windows open.
 function zoneRows(z) {
   const ep = model.epjson, s = zoneSettings(ep, z.name), rows = [];
-  const hourAt = hourIndex(Number($('day').value), Number($('hour').value)), dayStart = hourIndex(Number($('day').value), 1);
+  const hourAt = hourIndex(Number($('day').value), hourEnding()), dayStart = hourIndex(Number($('day').value), 1);
   rows.push(popSec('Occupancy', 'People in the zone: a peak density, and a schedule of the fraction present each hour'));
   rows.push(`${popNum('peoplePerArea', s.peoplePerArea, 'people/m²', 'Peak people per square metre of floor', 4)}`
     + (z.people ? ` · ${fmt(s.peoplePerArea ? 1 / s.peoplePerArea : null, 1)} m²/person` : ''));
@@ -1901,9 +1930,13 @@ function parseDay(t) {
   const i = MONTH_NAMES.indexOf(mon.slice(0, 3));
   return i < 0 ? null : DAYS_BEFORE[i] + Number(day);
 }
-// An hour as "14", "14:00" or "14:00-15:00": the hour starting then, standard time (the slider holds
-// the hour ending).
-const parseHour = (t) => { const m = t.match(/^(\d{1,2})/); return m ? Number(m[1]) + 1 : null; };
+// A time as "14", "14:37" or "14.5": minutes after midnight, standard time.
+const parseHour = (t) => {
+  const m = t.trim().match(/^(\d{1,2})(?:[:h.](\d{1,2}))?/);
+  if (!m) return null;
+  const min = Number(m[1]) * 60 + (m[2] ? (t.includes('.') && !t.includes(':') ? Math.round(Number(`0.${m[2]}`) * 60) : Number(m[2])) : 0);
+  return min >= 0 && min < 1440 ? min : null;
+};
 const parseTimes = (t) => { const m = t.replace(',', '.').match(/[\d.]+/); return m ? Number(m[0]) : null; };
 typeable($('day-value'), $('day'), parseDay);
 typeable($('when'), $('hour'), parseHour);
@@ -1967,8 +2000,8 @@ for (const el of document.querySelectorAll('.barval[data-for]')) {
   const d = el.dataset;
   scrubbable(el.querySelector('.scrub'), $(d.for), { per: Number(d.per), digits: Number(d.digits), min: d.min ? Number(d.min) : -Infinity, max: d.max ? Number(d.max) : Infinity, wrap: Number(d.wrap || 0), show: el.querySelector('.val') });
 }
-// The sliders' names drag them too: a day or an hour for every 4 px.
-for (const [id, per] of [['day', 0.25], ['hour', 0.25]]) scrubbable($(id).previousElementSibling, $(id), { per, min: Number($(id).min), max: Number($(id).max) });
+// The sliders' names drag them too: a day for every 4 px, 2 minutes for every 1 px.
+for (const [id, per] of [['day', 0.25], ['hour', 2]]) scrubbable($(id).previousElementSibling, $(id), { per, min: Number($(id).min), max: Number($(id).max) });
 
 // Play day: the day's clock runs from From to To at the speed asked (Speed: an hour of the day in an
 // hour, down to an hour in a second). At each weather step the conditions change: the weather between
@@ -2063,18 +2096,11 @@ $('air-step').addEventListener('change', () => { gridPace = null; if (play) play
 // Turbulence: the worker switches at once, and the air settles again under it
 const turbulenceOn = () => $('turbulence').value === 'chen';
 $('turbulence').addEventListener('change', () => { gridPace = null; worker?.postMessage({ type: 'turbulence', on: turbulenceOn() }); if (play) play.regime = null; airCorner(); });
-// The hour held's speed while its air settles: 1x (real time) to 1000x on a log scale, the end as
-// fast as the computer can (null); settled, it runs in real time.
-function heldRate() {
-  const v = Number($('held-speed').value);
-  return v >= 1000 ? null : 10 ** ((3 * v) / 1000);
-}
-const heldLabel = () => { const r = heldRate(); return r === null ? 'fastest' : r < 1.05 ? 'real time' : `${fmt(r, r < 10 ? 1 : 0)}×`; };
-$('held-speed').addEventListener('input', (e) => {
-  const v = Number(e.target.value), stop = [0, 333.3, 666.7, 1000].find((x) => Math.abs(x - v) < 14); // 1x, 10x, 100x, Fastest
-  if (stop !== undefined) e.target.value = String(Math.round(stop));
-  const label = heldLabel();
-  $('held-speed-value').textContent = label[0].toUpperCase() + label.slice(1);
+// The held time's speed while its air settles: as fast as the computer can (null), or real time (1);
+// settled, it runs in real time.
+function heldRate() { return $('held-speed').value === 'real' ? 1 : null; }
+const heldLabel = () => (heldRate() ? 'real time' : 'fast');
+$('held-speed').addEventListener('change', () => {
   if (!play) worker?.postMessage({ type: 'live', mode: 'free', rate: heldRate() });
   airCorner();
 });
@@ -2105,7 +2131,7 @@ function setPlaying(on) {
     if (was) applyHour(); // the hour as picked, whole
     return;
   }
-  const [from, to] = playSpan(), D = (Number($('day').value) - 1) * 24, start = Number($('hour').value) - 1;
+  const [from, to] = playSpan(), D = (Number($('day').value) - 1) * 24, start = clockMin() / 60;
   // from the hour shown, unless it is outside the span or Play from beginning is on
   const h0 = !$('play-start').checked && start >= from && start < to ? start : from;
   play = { H: D + h0, H1: D + to, Hfrom: D + from, next: D + h0, regime: null, air0: gridAirTime, H0: D + h0, last: performance.now(), warming: simulating(), shown: 0 };
@@ -2169,7 +2195,7 @@ function playStep() {
   P.stepAt = performance.now();
   const day = Math.floor(Hs / 24) + 1, hour = Math.floor(Hs - (day - 1) * 24);
   stepping = true;
-  $('day').value = day; $('hour').value = hour + 1;
+  $('day').value = day; $('hour').value = Math.round((Hs - (day - 1) * 24) * 60);
   stepping = false;
   $('day-value').textContent = dateOf(day).label;
   if (keyframes.length) followKeyframes(hour);
@@ -2238,7 +2264,7 @@ function followKeyframes(hour) {
   for (const [n, v] of s.amountSet) amountSet.set(n, v);
 }
 function saveKeyframe() {
-  const hour = Number($('hour').value) - 1, state = windowState();
+  const hour = hourEnding() - 1, state = windowState();
   keyframes = keyframes.filter((k) => k.hour !== hour).concat({ hour, state }).sort((a, b) => a.hour - b.hour);
   kfHour = hour;
   showKeyframes();
@@ -2251,7 +2277,7 @@ function keyframeWords(s) {
     `doors ${s.doors}${doors ? `, ${doors} set` : ''}`].filter(Boolean).join(', ');
 }
 function showKeyframes() {
-  const hour = Number($('hour').value) - 1, now = keyframeAt(hour), changed = now && !sameState(now.state, windowState());
+  const hour = hourEnding() - 1, now = keyframeAt(hour), changed = now && !sameState(now.state, windowState());
   $('keyframes').innerHTML = keyframes.length ? keyframes.map((k) => `<div class="kfrow${k === now ? ' on' : ''}"><button type="button" class="linkbtn" data-kf="go" data-h="${k.hour}" title="Go to ${pad2(k.hour)}:00">${pad2(k.hour)}:00</button>`
     + `<span class="muted">${esc(keyframeWords(k.state))}</span><button type="button" class="pbtnx" data-kf="del" data-h="${k.hour}" title="Remove this keyframe">×</button></div>`).join('')
     : '<span class="muted">None: set the windows, then ◆ Keyframe.</span>';
@@ -2265,14 +2291,14 @@ $('keyframes').addEventListener('click', (e) => {
   if (!b) return;
   const h = Number(b.dataset.h);
   if (b.dataset.kf === 'del') { keyframes = keyframes.filter((k) => k.hour !== h); kfHour = null; showKeyframes(); return; }
-  const el = $('hour'); el.value = h + 1; el.dispatchEvent(new Event('input', { bubbles: true }));
+  const el = $('hour'); el.value = h * 60; el.dispatchEvent(new Event('input', { bubbles: true }));
 });
 
 let edits = 0;
 // Moves to the hour starting at h (0 to 23), as the Time slider would.
 function setHour(h) {
   stepping = true;
-  $('hour').value = h + 1;
+  $('hour').value = h * 60;
   $('hour').dispatchEvent(new Event('input', { bubbles: true }));
   stepping = false;
 }
