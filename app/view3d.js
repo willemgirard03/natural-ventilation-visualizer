@@ -358,7 +358,7 @@ export class View3D {
       if (e.button !== 0 || !down) return;
       const moved = Math.hypot(e.clientX - down[0], e.clientY - down[1]);
       down = null;
-      if (moved < 5) this.pickAt(e);
+      if (moved < 5 && !this.placeAt?.(e)) this.pickAt(e); // a placing tool (Window) takes the click first
     });
 
     this.cube = new ViewCube(this, (dir) => this.lookFrom(dir));
@@ -499,7 +499,12 @@ export class View3D {
   // origin, where the sky stands): the camera and what it looks at both swing round it.
   lookFrom(dir) {
     const d = dir.clone();
-    if (Math.abs(d.z) > 0.999) d.set(0, -1e-3 * Math.sign(d.z), Math.sign(d.z)).normalize();
+    // from straight above (or below): true north up the screen, the camera just south of the pole
+    if (Math.abs(d.z) > 0.999) {
+      const n = this.cube?.northVec?.('true') || new THREE.Vector3(0, 1, 0);
+      d.set(-n.x * 1e-3, -n.y * 1e-3, Math.sign(d.z)).normalize();
+      if (this.cube) this.cube.northUp = 'true';
+    }
     const pivot = new THREE.Vector3(0, 0, 0), target0 = this.controls.target.clone(), pos0 = this.camera.position.clone();
     const a = pos0.clone().sub(target0).normalize(), t0 = performance.now();
     const q = new THREE.Quaternion().setFromUnitVectors(a, d);
@@ -1126,24 +1131,33 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
         const e = Math.hypot(a[0] + d[0] * t - q[0], a[1] + d[1] * t - q[1], a[2] + d[2] * t - q[2]);
         if (e < 0.002) cut.push([t, q]);
       }
-      const pts = [a, ...cut.sort((x, y) => x[0] - y[0]).map((c) => c[1]), b];
+      cut.sort((x, y) => x[0] - y[0]);
+      const pts = [[0, a], ...cut, [1, b]];
       return pts.slice(1).map((q, i) => [pts[i], q]);
     };
     const edges = new Map();
     for (const f of info) {
       const v = f.p.vertices;
       for (let i = 0; i < v.length; i++) {
-        for (const [a, b] of pieces(v[i], v[(i + 1) % v.length])) {
+        const a0 = v[i], b0 = v[(i + 1) % v.length];
+        let ma = null, mb = null;
+        for (const [[ta, a], [tb, b]] of pieces(a0, b0)) {
           const ka = key(a), kb = key(b), id = ka < kb ? ka + '|' + kb : kb + '|' + ka;
-          if (!edges.has(id)) edges.set(id, { a, b, on: [] });
+          // drawn along the whole edge as set out at its ends, so a corner of another face lying on it
+          // (where it is split to match) does not kink it
+          if (!edges.has(id)) {
+            ma ??= moved(a0); mb ??= moved(b0);
+            const lerp = (t) => ma.map((x, k) => x + (mb[k] - x) * t);
+            edges.set(id, { A: lerp(ta), B: lerp(tb), on: [] });
+          }
           edges.get(id).on.push(f.n);
         }
       }
     }
     const out = [];
-    for (const { a, b, on } of edges.values()) {
+    for (const { A, B, on } of edges.values()) {
       if (on.length > 1 && on.every((n) => n[0] * on[0][0] + n[1] * on[0][1] + n[2] * on[0][2] > 0.94)) continue;
-      out.push(...moved(a), ...moved(b));
+      out.push(...A, ...B);
     }
     memo.set(name, out);
     return out;

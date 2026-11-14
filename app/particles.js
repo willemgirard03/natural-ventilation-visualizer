@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { Tracer, MAX_AGE, EXIT_TIME } from '../src/solver/tracer.js';
 import { co2Color } from './view3d.js';
-import { rampAt, placeOf } from './ramps.js';
+import { colourOf } from './ramps.js';
 
 const CAPACITY = 20000;
 const TARGET = 6000; // particles in view under the first conditions shown, at density x1
@@ -129,7 +129,7 @@ export class AirflowParticles {
       // the value it carries, placed on the gradient's range (Layers: as the cuts')
       const val = this.colorBy === 'speed' ? Math.hypot(...q.v) : this.colorBy === 'co2' ? (this.co2At ? this.co2At(q.p, q.zone) : 400) : q.t;
       const G = this.gradient;
-      if (G) { const x = placeOf(this.colorBy, val, G.range[0], G.range[1]); rampAt(G.ramp, G.flip ? 1 - x : x, col); }
+      if (G) colourOf(G, this.colorBy, val, col);
       else if (this.colorBy === 'speed') speedColor(val, col);
       else if (this.colorBy === 'co2') co2Color(val, col);
       else temperatureColor(val, col);

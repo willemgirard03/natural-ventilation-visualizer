@@ -19,6 +19,7 @@ import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './p
 import { SkyDome, VENT_BANDS, ventBandLabels } from './skydome.js';
 import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
+import { addWindow, openingProblem, wallExtent } from '../src/model/edit.js';
 import { readZoneResultsStream, mergeResults, zoneAtTime, windowAtTime, ventShare, surfaceAtTime, resultsTiming } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
@@ -32,7 +33,8 @@ import {
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 import { WallEnds3D } from './wallends.js';
-import { RAMPS, rampAt, rampCss, UNITS, niceRange, DEFAULT_RAMP, DEFAULT_RANGE } from './ramps.js';
+import { RAMPS, rampAt, rampCss, UNITS, niceRange, DEFAULT_RAMP, DEFAULT_RANGE, CAP_DEFAULT } from './ramps.js';
+import { openColorPicker } from './colorpick.js';
 import {
   massing0, massingBlank, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
@@ -155,7 +157,7 @@ const hover = new HoverPick(view, { candidatesAt, edgesOf });
 }
 view.offered = (e) => hover.pickFor(e);
 // While a plane's or a window's handle is under the pointer, nothing else is offered.
-view.busy = (e) => !!(tools.active || view.sections.handleAt(e) || winEdit.handleAt(e) || massEdit.handleAt(e) || sky.handleAt(e));
+view.busy = (e) => !!(placing || tools.active || view.sections.handleAt(e) || winEdit.handleAt(e) || massEdit.handleAt(e) || sky.handleAt(e));
 hover.setEnabled($('show-labels').checked);
 $('show-labels').addEventListener('change', (e) => hover.setEnabled(e.target.checked));
 // A window's sill, head and jambs pushed and pulled in the view, and the window dragged across its wall.
@@ -932,8 +934,10 @@ function airGradient(reset = false) {
   $('air-ramp-flip').title = `Flip the gradient: ${g.flip ? 'low to high again' : 'high to low'}`;
   for (const [id, k] of [['air-lo', 0], ['air-hi', 1]]) { $(id).value = String(+g.range[k].toFixed(d)); $(id).dataset.per = field === 'co2' ? 2 : field === 'speed' ? 0.002 : 0.05; $(id).dataset.digits = d; }
   $('air-unit').textContent = UNITS[field];
+  $('air-caps').innerHTML = capRow(g.cap, 'air', 'data-aircap').replace(/^<span class="popkv">|<\/span>$/g, '');
   if (model) legend();
 }
+document.addEventListener('change', (e) => { if (e.target.dataset?.aircap) { air.gradient.cap = { ...CAP_DEFAULT, ...air.gradient.cap, on: e.target.checked }; legend(); } });
 $('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; airGradient(true); });
 $('air-ramp').addEventListener('change', (e) => { air.gradient.ramp = e.target.value; airGradient(); });
 $('air-ramp-flip').addEventListener('click', () => { air.gradient.flip = !air.gradient.flip; airGradient(); });
@@ -1256,13 +1260,15 @@ function showInfo(found) {
   queueMicrotask(() => ws.selection());
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
   if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; popShut = null; view.clicked = false; return; }
-  // picked in a plan a moment ago: the pop-up opens over that plan, beside the pick (kept in the page
-  // itself, fixed, so it never goes with a plan's drawing when that is drawn again)
-  popInPlan = !!(drawnPick && performance.now() - drawnPick.time < 600 && drawnPick.el.isConnected);
-  const host = popInPlan ? document.body : $('viewer');
-  if (box.parentElement !== host) { host.appendChild(box); popKey = null; }
-  box.style.position = popInPlan ? 'fixed' : '';
   const { kind, item } = found, key = `${kind}:${item.name}`;
+  // picked in a plan a moment ago: the pop-up opens over that plan, beside the pick (kept in the page
+  // itself, fixed, so it never goes with a plan's drawing when that is drawn again); redrawn for the
+  // same selection (a button in it pressed), it stays where it is
+  const fresh = !!(drawnPick && performance.now() - drawnPick.time < 600 && drawnPick.el.isConnected);
+  if (fresh || key !== popKey) popInPlan = fresh;
+  const host = popInPlan && drawnPick?.el.isConnected ? document.body : $('viewer');
+  if (box.parentElement !== host) { host.appendChild(box); popKey = null; }
+  box.style.position = host === document.body ? 'fixed' : '';
   // its pop-up closed: the selection stays, the pop-up stays shut until another is selected
   const clicked = view.clicked;
   view.clicked = false;
@@ -1376,6 +1382,7 @@ function popContent(kind, item) {
     const ms = massingSide(kind, item);
     if (ms) title = `Window ${ms.index + 1} of ${ms.n}`;
     if (r && !popInPlan) rows.push(`<button class="pbtn${winEdit.name === item.name ? ' on' : ''}" data-act="winedit" title="${winEdit.name === item.name ? 'Back to the building: the handles go (Esc)' : 'Its sill, head and jambs get handles in the view to push or pull; drag the glass to move it across its wall; click a handle or a figure to type it'}">${winEdit.name === item.name ? 'Done' : 'Edit window in 3D'}</button>`);
+    if (!(massing && massingWindow(massing, item.name))) rows.push(`<div class="poprow"><button type="button" class="pbtn danger" data-act="win-del" data-name="${esc(item.name)}" title="Take this window out of the model (Delete); Ctrl+Z puts it back">Delete window</button></div>`);
     if (ms) rows.push(...sideRows(ms, winEdit.name === item.name));
   } else if (kind === 'wall') {
     const w = massing?.walls?.find((x) => x.id === item.id);
@@ -1425,8 +1432,14 @@ function gradientRows(which, field, shown) {
   return [
     `<span class="popkv"><span class="tipped" title="The colours the values run through, low to high. Click the swatch to run them the other way.">Gradient</span><span class="popv"><details class="dd rampdd"><summary>${RAMPS[now].name}</summary><div class="ddmenu rampmenu">${pick}</div></details> <button type="button" class="rampsw flipsw" data-air-flip="${flipKey}" style="background:${rampCss(now, flip)}" title="Flip the gradient: ${flip ? 'low to high again' : 'high to low'}">⇄</button></span></span>`,
     `<span class="popkv"><span class="tipped" title="The values at the two ends of the gradient: type them, or Sync to set them once to the lowest and highest on this cut now, rounded (they then hold as the air changes).${field === 'speed' ? ' Speed runs on a log scale.' : ''}">Range</span><span class="popv"><input class="popnum short scrubnum" data-air="${which}Lo" data-per="${per}" data-digits="${d}" value="${f(used?.[0])}" title="Drag left or right, or type"> – <input class="popnum short scrubnum" data-air="${which}Hi" data-per="${per}" data-digits="${d}" value="${f(used?.[1])}" title="Drag left or right, or type"> ${unit} <button type="button" class="pbtn" data-air-sync="${rangeKey}" data-field="${field}"${data ? '' : ' disabled'} title="Set the range to this cut's lowest and highest now${data ? `, ${f(shown.suggest[0])} … ${f(shown.suggest[1])} ${unit}` : ''}, once">Sync</button></span></span>`,
+    capRow(a[`${which}Cap`], which, 'data-air'),
     data ? `<span class="muted">On this cut now: ${f(data[0])} … ${f(data[1])} ${unit}</span>` : '',
   ].filter(Boolean);
+}
+// Caps: a toggle and the two colours, below the range and above it (each a swatch opening the picker).
+function capRow(cap, which, attr) {
+  const c = { ...CAP_DEFAULT, ...cap };
+  return `<span class="popkv"><span class="tipped" title="Colour values below the range's low end, and above its high end, in a colour of their own, so what falls outside the range stands out (click a swatch to pick its colour)">Caps</span><span class="popv"><label class="chk"><input type="checkbox" ${attr}="${which}CapOn"${c.on ? ' checked' : ''}> on</label> below <button type="button" class="capsw" data-cap="${which}:lo" style="background:${c.lo}" title="Below the range: ${c.lo}"></button> above <button type="button" class="capsw" data-cap="${which}:hi" style="background:${c.hi}" title="Above the range: ${c.hi}"></button></span></span>`;
 }
 
 // A clipping plane's own view of the air: what its cut is coloured by, and its particles (their
@@ -1467,7 +1480,8 @@ function onAir(e) {
     r[key.endsWith('Lo') ? 0 : 1] = v;
     a[rk] = r[0] <= r[1] ? r : [r[1], r[0]];
     if (e.type !== 'change') { drawSlices(true); legend(); return; }
-  } else if (key === 'color') { a.color = t.value; a.particles = t.value !== 'none'; a.partRange = null; }
+  } else if (/^(fill|part)CapOn$/.test(key)) { const ck = key.replace('On', ''); a[ck] = { ...CAP_DEFAULT, ...a[ck], on: t.checked }; }
+  else if (key === 'color') { a.color = t.value; a.particles = t.value !== 'none'; a.partRange = null; }
   else if (key === 'field') { a.field = t.value; a.fillRange = null; } // another kind of data: its own range
   else if (key === 'partOpacity') { const v = Number(String(t.value).replace(',', '.')); if (Number.isFinite(v)) a.partOpacity = Math.max(0.05, Math.min(1, v / 100)); return; } // the particles take it as they move
   else if (key === 'fillOpacity') {
@@ -1983,7 +1997,8 @@ function legend() {
   const cutKey = (sh, who) => {
     const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => rampAt(sh.ramp, sh.flip ? 1 - x : x));
     const how = sh.how || 'over the range set in its pop-up';
-    return `<span title="${who}: air ${WORD[sh.field]}, ${how}${sh.field === 'speed' ? ', on a log scale' : ''}">${ramp(stops, 48)}${who}: ${WORD[sh.field]} ${figure(sh.field, sh.range[0])} … ${figure(sh.field, sh.range[1])} ${UNIT[sh.field]}</span>`;
+    const cap = sh.cap?.on ? (c) => `<i class="capkey" style="background:${c}"></i>` : () => '';
+    return `<span title="${who}: air ${WORD[sh.field]}, ${how}${sh.field === 'speed' ? ', on a log scale' : ''}${sh.cap?.on ? '; below and above the range in the colours at its ends' : ''}">${cap(sh.cap?.lo)}${ramp(stops, 48)}${cap(sh.cap?.hi)}${who}: ${WORD[sh.field]} ${figure(sh.field, sh.range[0])} … ${figure(sh.field, sh.range[1])} ${UNIT[sh.field]}</span>`;
   };
   for (const q of shownPlanes) {
     const who = shownPlanes.length > 1 ? q.name : 'Cut';
@@ -2626,6 +2641,120 @@ function applyEdit(change, what, { geometry = false } = {}) {
   refreshModel(geometry);
   return true;
 }
+// ---------- the Window tool: a window put on a wall where the pointer is, in 3D or in a plan ----------
+let placing = null, offer3d = null, offerMesh = null;
+// What a window on wall `wall` at model point p would be: { wall, r (its rectangle in the wall's frame),
+// ends (its two jambs at the sill, model points), problem }. Sized as the wall's other windows (else the
+// zone's, else 1200 x 1500 mm), its sill 900 mm above the wall's foot; centred on the pointer, snapped
+// to the wall's middle within 150 mm, else to 50 mm along it.
+function offerAt(wall, p) {
+  const s = model?.surfaces[wall], ext = s && wallExtent(model, wall);
+  if (!ext || (massing && massingTarget({ kind: 'surface', item: s }))) return null;
+  const like = s.windows.map((n) => windowRect(model, n)).find(Boolean) || model.zones[s.zone].windows.map((n) => windowRect(model, n)).find(Boolean);
+  const w = like ? like.s1 - like.s0 : 1.2, h = like ? like.z1 - like.z0 : 1.5, sill = like ? like.z0 - ext.z0 : 0.9;
+  const f = ext.frame, at = p[0] * f.right[0] + p[1] * f.right[1], mid = (ext.s0 + ext.s1) / 2;
+  const c = Math.abs(at - mid) < 0.15 ? mid : Math.round(at / 0.05) * 0.05;
+  const r = { s0: c - w / 2, s1: c + w / 2, z0: ext.z0 + sill, z1: ext.z0 + sill + h };
+  const P = (ss, z) => [f.right[0] * ss + f.out[0] * f.plane, f.right[1] * ss + f.out[1] * f.plane, z];
+  return { wall, r, ends: [P(r.s0, r.z0), P(r.s1, r.z0)], corners: [P(r.s0, r.z0), P(r.s1, r.z0), P(r.s1, r.z1), P(r.s0, r.z1)], out: f.out, problem: openingProblem(model, wall, r) };
+}
+function placeOffer(o) {
+  if (!o || o.problem) return;
+  applyEdit((tx, m) => addWindow(tx, m, o.wall, o.r), `window added on ${o.wall}`, { geometry: true });
+}
+function setPlacing(kind) {
+  placing = kind;
+  $('place-window').setAttribute('aria-pressed', String(kind === 'window'));
+  if (!kind) { offer3d = null; showOffer(null); }
+  if (kind) { view.select(null); tools.stop?.(); }
+  ws.repaint?.();
+}
+// The offered window in 3D: its pane just out from the wall, glass (red where it does not fit).
+function showOffer(o) {
+  if (offerMesh) { offerMesh.traverse((x) => { x.geometry?.dispose(); x.material?.dispose(); }); view.scene.remove(offerMesh); offerMesh = null; }
+  if (o) {
+    const og = view.origin, pts = o.corners.map((q) => new THREE.Vector3(q[0] - og[0] + o.out[0] * 0.04, q[1] - og[1] + o.out[1] * 0.04, q[2] - og[2]));
+    const col = o.problem ? '#C0442B' : '#2F6F68', g = new THREE.BufferGeometry().setFromPoints([pts[0], pts[1], pts[2], pts[0], pts[2], pts[3]]);
+    offerMesh = new THREE.Group();
+    offerMesh.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthTest: false })));
+    offerMesh.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: col, depthTest: false })));
+    offerMesh.renderOrder = 40;
+    offerMesh.userData.noSection = true;
+    view.scene.add(offerMesh);
+  }
+  view.render();
+}
+$('place-window').addEventListener('click', () => setPlacing(placing === 'window' ? null : 'window'));
+view.renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!placing || e.buttons) return;
+  const h = view.hitAt(e), o = view.origin, s = h && (h.kind === 'surface' ? h.item : h.kind === 'window' ? model.surfaces[h.item.parent] : null);
+  offer3d = s ? offerAt(s.name, [h.point.x + o[0], h.point.y + o[1], h.point.z + o[2]]) : null;
+  view.renderer.domElement.style.cursor = offer3d ? 'copy' : 'not-allowed';
+  showOffer(offer3d);
+});
+view.placeAt = () => { if (!placing) return false; placeOffer(offer3d); return true; };
+addEventListener('keydown', (e) => { if (placing && e.key === 'Escape') { setPlacing(null); e.stopImmediatePropagation(); } }, true);
+// A window taken out of an imported model (a massing's windows are its arrays').
+function deleteWindow(name) {
+  if (!model?.windows[name]) return;
+  view.select(null);
+  for (const m of [windowSet, sashSet, amountSet]) m.delete(name);
+  applyEdit((tx) => { tx.remove('FenestrationSurface:Detailed', name); }, `window ${name} deleted`, { geometry: true });
+}
+$('info').addEventListener('click', (e) => { const b = e.target.closest('button[data-act="win-del"]'); if (b) deleteWindow(b.dataset.name); });
+// A cap's swatch: the colour picker, the plane (or the 3D particles) taking the colour as it is picked;
+// one undo step for the whole pick.
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-cap]');
+  if (!b) return;
+  const [which, end] = b.dataset.cap.split(':');
+  if (which === 'air') {
+    const cap = (air.gradient.cap = { ...CAP_DEFAULT, ...air.gradient.cap });
+    openColorPicker(b, cap[end], (hex) => { cap[end] = hex; b.style.background = hex; legend(); });
+    return;
+  }
+  const p = view.sections.selected;
+  if (!p) return;
+  const before = view.sections.state(), ck = `${which}Cap`;
+  openColorPicker(b, ({ ...CAP_DEFAULT, ...p.air[ck] })[end], (hex) => {
+    p.air[ck] = { ...CAP_DEFAULT, ...p.air[ck], [end]: hex };
+    b.style.background = hex; b.title = `${end === 'lo' ? 'Below' : 'Above'} the range: ${hex}`;
+    drawSlices(true); legend();
+  }, () => { if (JSON.stringify(before.map((q) => q.air)) !== JSON.stringify(view.sections.planes.map((q) => q.air))) view.sections.commit(before, 'cap colour picked'); });
+});
+// Undo for the settings in pop-ups: the windows' states and the clipping plane's settings, as they were
+// when the pop-up was pressed, against how they are after a change or a click in it; and the same for
+// the window settings on the Modelling tab.
+let popBefore = null;
+const popSnap = () => ({ win: windowState(), planes: view.sections.selected ? view.sections.state() : null });
+function setWindowState(s) {
+  $('windows').value = s.windows; $('doors').value = s.doors; $('sash-type').value = s.sash;
+  windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();
+  for (const [n, v] of s.windowSet) windowSet.set(n, v);
+  for (const [n, v] of s.roomSet) roomSet.set(n, v);
+  for (const [n, v] of s.sashSet) sashSet.set(n, { ...v });
+  for (const [n, v] of s.amountSet) amountSet.set(n, v);
+  solveAir();
+  if (model) showInfo(current());
+  legend();
+}
+function popCommit() {
+  const b = popBefore;
+  popBefore = null;
+  if (!b || !model) return;
+  const win = windowState();
+  if (!sameState(b.win, win)) {
+    undoStack.push({ undo: () => setWindowState(b.win), redo: () => setWindowState(win), what: 'windows set', view: true });
+    if (undoStack.length > 100) undoStack.shift();
+    redoStack.length = 0;
+  }
+  if (b.planes && JSON.stringify(b.planes.map((p) => p.air)) !== JSON.stringify(view.sections.planes.map((p) => p.air))) view.sections.commit(b.planes, 'clipping plane settings changed');
+}
+for (const el of [$('info'), $('windows'), $('doors'), $('sash-type'), $('windows-reset')]) {
+  el.addEventListener('pointerdown', () => { popBefore = popSnap(); }, true);
+  el.addEventListener('keydown', () => { popBefore ??= popSnap(); }, true);
+  for (const ev of ['change', 'click']) el.addEventListener(ev, () => setTimeout(popCommit), false);
+}
 function undo() { const e = undoStack.pop(); if (!e) return; e.undo(); redoStack.push(e); if (!e.view) refreshModel(e.geometry); }
 function redo() { const e = redoStack.pop(); if (!e) return; e.redo(); undoStack.push(e); if (!e.view) refreshModel(e.geometry); }
 // Clipping planes moved, turned, resized, added or removed: undone like the model's edits, but they
@@ -2696,6 +2825,9 @@ document.addEventListener('keydown', (e) => {
     else if (levelEdits.selected === null && !tools.tool) { $('massing').hidden = true; $('library').hidden = true; }
   } else if (e.key === ' ' && massing && selected && !tools.tool) {
     if (flipSelected()) e.preventDefault();
+  } else if (e.key === 'Delete' && !massing && current()?.kind === 'window') {
+    deleteWindow(current().item.name);
+    e.preventDefault();
   } else if (e.key === 'Delete' && massing && current()?.kind === 'wall') {
     const f = current();
     view.select(null);
@@ -2870,6 +3002,9 @@ const ws = workspace({
   }, true), new PlanEdit(d, {
     view, tools, massing: () => massing, selected: () => selected,
     select: (name) => { view.select(name); ws.selection(); },
+    placing: () => placing,
+    offerAt: (wall, p) => offerAt(wall, p),
+    placeOffer: (o) => placeOffer(o),
     massingTarget: (name) => { const f = view.find(name); return f && massing ? massingTarget(f) : null; },
     change: massingChange,
     // a window's width (m) set about its middle; false if it would not fit

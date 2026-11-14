@@ -491,3 +491,18 @@ body.bartucked .calcbar>.ribbon{display:none}
 
 /* the time picked falls between the data's own times */
 .interp{font-family:var(--mono); font-size:10px; font-style:italic; color:var(--ink3); margin-left:4px; cursor:help}
+
+/* caps: the swatches beside a gradient's range, the key's end marks, and the colour picker */
+.capsw{width:18px; height:14px; border:1px solid var(--rule); border-radius:2px; padding:0; vertical-align:middle; cursor:pointer}
+.capsw:hover{border-color:var(--glass)}
+.capkey{display:inline-block; width:7px; height:10px; vertical-align:middle; border:1px solid var(--rule)}
+.cpick{position:fixed; z-index:60; background:var(--panel); border:1px solid var(--rule); border-radius:5px; box-shadow:0 3px 12px rgba(0,0,0,.16); padding:7px; width:182px}
+.cpgrid{display:grid; grid-template-columns:repeat(12, 1fr); gap:2px}
+.cpgrid button{height:13px; border:1px solid rgba(0,0,0,.08); border-radius:2px; padding:0; cursor:pointer}
+.cpgrid button.on,.cpgrid button:hover{outline:1.5px solid var(--glass); outline-offset:1px}
+.cpcustom{margin-top:7px; display:flex; flex-direction:column; gap:5px}
+.cpsv{width:168px; height:96px; border-radius:3px; cursor:crosshair}
+.cphue{width:168px; height:12px; border-radius:3px; cursor:ew-resize}
+.cprow{display:flex; align-items:center; gap:6px}
+.cpnow{width:22px; height:16px; border:1px solid var(--rule); border-radius:2px}
+.cphex{width:76px; font-family:var(--mono); font-size:11px; padding:2px 4px; border:1px solid var(--rule); border-radius:2px; background:var(--panel); color:var(--ink)}

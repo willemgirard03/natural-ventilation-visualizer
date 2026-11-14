@@ -53,3 +53,16 @@ export function niceRange(field, lo, hi) {
 }
 // The gradient as a CSS linear-gradient, for swatches.
 export const rampCss = (name, flip = false) => `linear-gradient(${flip ? 270 : 90}deg, ${(RAMPS[name] || RAMPS.coolwarm).stops.join(', ')})`;
+
+// Caps: values below the range's low end, or above its high end, in a colour of their own rather than
+// the gradient's end (on: whether they are).
+export const CAP_DEFAULT = { on: false, lo: '#5E3C99', hi: '#2D2D2D' };
+// The colour of value v of field on a gradient setting { ramp, flip, range, cap? }, into out.
+export function colourOf(g, field, v, out = new THREE.Color()) {
+  if (g.cap?.on) {
+    if (v < g.range[0]) return out.set(g.cap.lo);
+    if (v > g.range[1]) return out.set(g.cap.hi);
+  }
+  const x = placeOf(field, v, g.range[0], g.range[1]);
+  return rampAt(g.ramp, g.flip ? 1 - x : x, out);
+}

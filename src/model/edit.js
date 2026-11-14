@@ -108,6 +108,57 @@ export function rectProblem(model, name, r) {
   return null;
 }
 
+// Whether a new window fits a wall at rectangle r of its frame (as rectProblem, with no window yet).
+export function openingProblem(model, surface, r) {
+  const wall = model.surfaces[surface], f = wall && wallFrame(wall.vertices);
+  if (!f) return 'Windows go in upright walls.';
+  if (r.s1 - r.s0 < WINDOW_MIN - 1e-9 || r.z1 - r.z0 < WINDOW_MIN - 1e-9) return `A window is at least ${WINDOW_MIN * 1000} mm each way.`;
+  const outline = wallOutline(wall, f), e = WINDOW_EDGE;
+  const corners = [[r.s0 - e, r.z0 - e], [r.s1 + e, r.z0 - e], [r.s1 + e, r.z1 + e], [r.s0 - e, r.z1 + e]];
+  if (!corners.every((c) => inside2(c, outline))) return 'The window would reach past the wall.';
+  for (const other of wall.windows) {
+    const o = windowRect(model, other);
+    if (o && r.s0 < o.s1 + e && r.s1 > o.s0 - e && r.z0 < o.z1 + e && r.z1 > o.z0 - e) return `The window would overlap ${other}.`;
+  }
+  return null;
+}
+// The wall's extent in its frame: { s0, s1, z0, z1 }.
+export function wallExtent(model, surface) {
+  const wall = model.surfaces[surface], f = wall && wallFrame(wall.vertices);
+  if (!f) return null;
+  const o = wallOutline(wall, f), s = o.map((p) => p[0]), z = o.map((p) => p[1]);
+  return { s0: Math.min(...s), s1: Math.max(...s), z0: Math.min(...z), z1: Math.max(...z), frame: f };
+}
+// A new window on an upright wall at rectangle r of its frame (corners counterclockwise seen from
+// outside from the lower left, as setWindowRect writes them), with the construction of a window on
+// that wall, else in its zone, else in the model. On a wall between zones it is made on the other
+// side too, each naming the other. The zone's natural-ventilation opening area grows with its glazing,
+// so its operable fraction stays. Returns the window's name.
+export function addWindow(tx, model, surface, r) {
+  const wall = model.surfaces[surface], f = wallFrame(wall.vertices);
+  if (!f) throw new Error(`${surface} is not upright.`);
+  const at = (s, z) => [f.right[0] * s + f.out[0] * f.plane, f.right[1] * s + f.out[1] * f.plane, z];
+  const pts = [at(r.s0, r.z0), at(r.s1, r.z0), at(r.s1, r.z1), at(r.s0, r.z1)];
+  const ws = Object.values(model.windows).filter((w) => w.surfaceType !== 'Door');
+  const like = ws.find((w) => w.parent === surface) || ws.find((w) => w.zone === wall.zone) || ws[0];
+  const construction = like?.construction || Object.keys(tx.epjson['WindowMaterial:SimpleGlazingSystem'] || {})[0];
+  if (!construction) throw new Error('The model has no window construction to give it.');
+  const relative = String(Object.values(tx.epjson.GlobalGeometryRules || {})[0]?.coordinate_system || 'Relative').toLowerCase() === 'relative';
+  const put = (name, parent, zone, corners, other) => {
+    const o = tx.get('FenestrationSurface:Detailed', name, true);
+    Object.assign(o, { surface_type: 'Window', construction_name: construction, building_surface_name: parent, ...(other ? { outside_boundary_condition_object: other } : {}), multiplier: 1, number_of_vertices: 4 });
+    writeVertices(o, relative ? toZone(corners, tx.epjson.Zone?.[zone] || {}) : corners);
+  };
+  const name = freeName(tx.epjson, ['FenestrationSurface:Detailed'], `${surface} window`);
+  const adj = wall.boundary === 'Surface' && model.surfaces[wall.adjacentSurface];
+  const other = adj ? freeName({ ...tx.epjson, 'FenestrationSurface:Detailed': { ...tx.epjson['FenestrationSurface:Detailed'], [name]: {} } }, ['FenestrationSurface:Detailed'], `${adj.name} window`) : null;
+  put(name, surface, wall.zone, pts, other);
+  if (adj) put(other, adj.name, adj.zone, [...pts].reverse(), name);
+  const z = model.zones[wall.zone], added = area(pts);
+  if (!adj) scaleOpenings(tx, wall.zone, z.glazingArea, z.glazingArea + added);
+  return name;
+}
+
 // The rectangle moved or resized as far as the wall allows: each side held inside the wall's
 // bounds (an outline that is not a rectangle is checked by rectProblem).
 export function clampRect(model, name, r) {

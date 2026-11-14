@@ -15,7 +15,7 @@
 
 import * as THREE from 'three';
 import { frameOf, removes as removesPoint } from './sections.js';
-import { rampAt, placeOf, niceRange, DEFAULT_RAMP, DEFAULT_RANGE } from './ramps.js';
+import { rampAt, placeOf, niceRange, DEFAULT_RAMP, DEFAULT_RANGE , colourOf } from './ramps.js';
 
 const FILL = 0.82; // the slices' opacity: a field to read, with the model still showing through
 const TINT = new THREE.Color();
@@ -153,8 +153,8 @@ export class FieldSlices {
     for (const s of out) {
       const a = s.plane.air;
       s.plane.shown = {
-        fill: s.field ? { field: s.field, ramp: rampOf(a, 'fill'), flip: !!a.fillFlip, range: a.fillRange || DEFAULT_RANGE[s.field], data: s.fillData, suggest: s.fillData && niceRange(s.field, ...s.fillData) } : null,
-        part: a.particles && a.color !== 'plain' ? { field: a.color, ramp: rampOf(a, 'part'), flip: !!a.partFlip, range: a.partRange || DEFAULT_RANGE[a.color], data: s.partData, suggest: s.partData && niceRange(a.color, ...s.partData) } : null,
+        fill: s.field ? { field: s.field, ramp: rampOf(a, 'fill'), flip: !!a.fillFlip, cap: a.fillCap, range: a.fillRange || DEFAULT_RANGE[s.field], data: s.fillData, suggest: s.fillData && niceRange(s.field, ...s.fillData) } : null,
+        part: a.particles && a.color !== 'plain' ? { field: a.color, ramp: rampOf(a, 'part'), flip: !!a.partFlip, cap: a.partCap, range: a.partRange || DEFAULT_RANGE[a.color], data: s.partData, suggest: s.partData && niceRange(a.color, ...s.partData) } : null,
       };
     }
     for (const s of out) {
@@ -162,7 +162,7 @@ export class FieldSlices {
       s.values.forEach((val, k) => {
         if (val === null) { data[k * 4 + 3] = 0; return; }
         if (!s.field) { data[k * 4 + 3] = 255; return; } // depth only: hides the particles behind
-        const x = placeOf(s.field, val, fill.range[0], fill.range[1]), col = rampAt(fill.ramp, fill.flip ? 1 - x : x, TINT);
+        const col = colourOf(fill, s.field, val, TINT); // with its caps beyond the range
         data[k * 4] = col.r * 255; data[k * 4 + 1] = col.g * 255; data[k * 4 + 2] = col.b * 255; data[k * 4 + 3] = 255;
       });
       s.texture.needsUpdate = true;
@@ -361,7 +361,7 @@ export class FieldSlices {
           // range; or plain black.
           const by = t.p.air.color, sh = t.p.shown?.part;
           const v = by === 'speed' ? Math.hypot(vel[0], vel[1], vel[2]) : by === 'co2' ? sample.co2(x, y, z) : sample.temperature(x, y, z);
-          const xp = sh ? placeOf(by, v, sh.range[0], sh.range[1]) : 0, col = by === 'plain' || !sh ? NONE : rampAt(sh.ramp, sh.flip ? 1 - xp : xp, TINT);
+          const col = by === 'plain' || !sh ? NONE : colourOf(sh, by, v, TINT);
           t.tint[k * 3] = col.r; t.tint[k * 3 + 1] = col.g; t.tint[k * 3 + 2] = col.b;
           const du = vel[0] * f.u.x + vel[1] * f.u.y + vel[2] * f.u.z, dv = vel[0] * f.v.x + vel[1] * f.v.y + vel[2] * f.v.z;
           a += du * dt; b += dv * dt;

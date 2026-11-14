@@ -98,7 +98,7 @@ export class ViewCube {
       }
       const arrow = onArrow(e), ring = !arrow && onRing(e);
       el.style.cursor = arrow ? 'pointer' : ring ? 'ew-resize' : '';
-      el.title = arrow ? (this.mode === 'building' ? 'Building north: the cube square to the building. Click for true north.' : 'True north. Click for building north: the cube square to the building, its faces looking square at the walls.')
+      el.title = arrow ? `True north. Click to turn the view ${this.northUp === 'true' ? 'with the building\'s north (its walls\' axis nearest true north) up' : 'with true north up'}; again for the other.`
         : 'Click a face, edge or corner to look from that side';
       this.showHover(ring ? null : region(e));
     });
@@ -117,7 +117,7 @@ export class ViewCube {
     el.addEventListener('pointerleave', () => { if (!turning) this.showHover(null); });
     el.addEventListener('click', (e) => {
       if (this.justTurned) { this.justTurned = false; return; }
-      if (onArrow(e)) { this.setMode(this.mode === 'building' ? 'true' : 'building'); return; }
+      if (onArrow(e)) { this.orientNorth(this.northUp === 'true' ? 'building' : 'true'); return; }
       if (onRing(e)) return;
       const d = region(e);
       // the cube's own axes turned out to the model's
@@ -207,19 +207,26 @@ export class ViewCube {
   }
 
   // The norths, in degrees anticlockwise from the model's +y axis: true north, and the building's
-  // (its walls' axis nearest true north; null when it has none). The cube turns so its BACK faces the
-  // north it is set to (true by default; a click on the ring's arrow switches), its arrow on that north.
+  // (its walls' axis nearest true north; null when it has none). The ring's arrow marks true north.
   setNorth(trueDeg, buildingDeg = null) {
     this.norths = { true: trueDeg, building: buildingDeg ?? trueDeg };
-    this.setMode(this.mode || 'true');
-  }
-  setMode(mode) {
-    this.mode = mode;
-    const deg = this.norths?.[mode] ?? 0;
-    this.cube.rotation.z = THREE.MathUtils.degToRad(deg);
-    this.north.rotation.z = 0;
-    this.north.children[0]?.material.color.set(mode === 'building' ? '#D9A625' : this.accent);
+    this.north.rotation.z = THREE.MathUtils.degToRad(trueDeg);
     this.render();
+  }
+  // A north as a horizontal unit vector in the model's axes.
+  northVec(which = 'true') {
+    const a = THREE.MathUtils.degToRad(this.norths?.[which] ?? 0);
+    return new THREE.Vector3(-Math.sin(a), Math.cos(a), 0);
+  }
+  // The view turned about the compass's centre so this north points up the screen: looking north
+  // (from the side, it is straight ahead; from above, at the top of the view).
+  orientNorth(which) {
+    this.northUp = which;
+    const v = this.view, n = this.northVec(which), f = v.controls.target.clone().sub(v.camera.position);
+    f.z = 0;
+    if (f.lengthSq() < 1e-8) f.copy(v.camera.up).setZ(0); // from straight above: the screen's up
+    if (f.lengthSq() < 1e-8) return;
+    this.turn(Math.atan2(n.y, n.x) - Math.atan2(f.y, f.x));
   }
 
   showHover(d) {

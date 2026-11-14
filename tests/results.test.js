@@ -84,3 +84,23 @@ test('results over a weather step: a window\'s mean opening, and the share of it
   near(ventShare(r, 'Z', 100, 2), 0.5, 0.02, 'one of two hours ventilated');
   assert.equal(windowAtTime(r, 'W', 101.5), 1, 'no span: the moment\'s own');
 });
+
+test('a window added to a wall: where it was put, on both sides of a wall between zones, and checked first', { skip: existsSync(EMMENWEID) ? false : 'example not here' }, async () => {
+  const { edit, addWindow, openingProblem, wallExtent, windowRect } = await import('../src/model/edit.js');
+  let model = importEpJSON(JSON.parse(readFileSync(EMMENWEID, 'utf8')));
+  const wall = Object.values(model.surfaces).find((s) => s.boundary === 'Surface' && wallExtent(model, s.name) && wallExtent(model, s.name).s1 - wallExtent(model, s.name).s0 > 4);
+  const x = wallExtent(model, wall.name);
+  let r = null;
+  for (let c = x.s0 + 0.8; c < x.s1 - 0.8 && !r; c += 0.25) { const t = { s0: c - 0.6, s1: c + 0.6, z0: x.z0 + 0.9, z1: x.z0 + 2.4 }; if (!openingProblem(model, wall.name, t)) r = t; }
+  assert.ok(r, 'a free place on the wall');
+  assert.ok(openingProblem(model, wall.name, { ...r, z1: x.z1 + 1 }), 'past the wall: refused');
+  const n = Object.keys(model.windows).length, e = edit(model.epjson, (tx) => addWindow(tx, model, wall.name, r));
+  model = importEpJSON(model.epjson);
+  assert.equal(Object.keys(model.windows).length, n + 2, 'this side and the other');
+  const got = windowRect(model, e.result);
+  for (const k of ['s0', 's1', 'z0', 'z1']) near(got[k], r[k], 1e-4, k);
+  const other = model.epjson['FenestrationSurface:Detailed'][e.result].outside_boundary_condition_object;
+  assert.equal(model.epjson['FenestrationSurface:Detailed'][other].outside_boundary_condition_object, e.result, 'each names the other');
+  e.undo();
+  assert.equal(Object.keys(importEpJSON(model.epjson).windows).length, n, 'undone');
+});

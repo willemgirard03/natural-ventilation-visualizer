@@ -167,6 +167,11 @@ export class PlanEdit {
     if (!this.drag) this.figs = null;
     const arrDrag = this.drag && (this.drag.span !== undefined || this.drag.fig || this.drag.pitch);
     if (!this.api.tools.tool) g += arrDrag ? this.dragDraw() : this.arrayFor(sel) + (this.drag ? this.dragDraw() : this.gripsFor(sel));
+    // the window the Window tool would put: a pane on the wall's line, red where it does not fit
+    if (this.api.placing?.() && this.offer) {
+      const o3 = this.api.view.origin || [0, 0, 0], [a, b] = this.offer.ends.map((p) => this.d.toPx(p[0] - o3[0], p[1] - o3[1])), col = this.offer.problem ? '#C0442B' : 'var(--glass)';
+      g += line(a[0], a[1], b[0], b[1], { stroke: col, w: 4 }) + label((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 10, this.offer.problem || `${Math.round((this.offer.r.s1 - this.offer.r.s0) * 1000)} mm`, { size: 9, fill: col });
+    }
     ov.innerHTML = g;
   }
   find(name) {
@@ -343,6 +348,14 @@ export class PlanEdit {
       return;
     }
     if (this.api.tools.tool) return;
+    // the Window tool: a window offered on the wall under the pointer, where it would go
+    if (this.api.placing?.()) {
+      const h = this.pickAt(e), o3 = this.api.view.origin || [0, 0, 0], q = this.d.fromPx(...this.px(e));
+      this.offer = h?.kind === 'surface' ? this.api.offerAt(h.name, [q[0] + o3[0], q[1] + o3[1], this.zc + o3[2]]) : null;
+      this.d.host.style.cursor = this.offer ? 'copy' : 'not-allowed';
+      this.paint();
+      return;
+    }
     const g = this.gripAt(e), h = g ? null : this.pickAt(e);
     const fg = !g && this.figAt(e);
     if (fg) { this.d.host.style.cursor = 'ew-resize'; return; }
@@ -352,6 +365,7 @@ export class PlanEdit {
   leave() { if (this.hover) { this.hover = null; this.paint(); } }
   down(e) {
     if (this.api.tools.tool) { this.api.tools.press(e); return; }
+    if (this.api.placing?.()) { if (this.offer && !this.offer.problem) this.api.placeOffer(this.offer); return; }
     const g = this.gripAt(e);
     if (g) {
       this.drag = { ...g, x0: e.clientX, y0: e.clientY, d: 0, moved: false };
