@@ -67,8 +67,9 @@ export class ViewCube {
       ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.camera);
       const hit = ray.intersectObject(this.box, false)[0];
       if (!hit) return null;
-      // The face hit sets one axis; on the others, near the face's border counts as an edge or corner.
-      const p = hit.point, n = hit.face.normal;
+      // The face hit sets one axis; on the others, near the face's border counts as an edge or corner
+      // (in the cube's own axes, which turn with the north it is set to).
+      const p = this.box.worldToLocal(hit.point.clone()), n = hit.face.normal;
       return [0, 1, 2].map((i) => {
         if (Math.abs(n.getComponent(i)) > 0.5) return Math.sign(n.getComponent(i));
         const v = p.getComponent(i);
@@ -80,6 +81,12 @@ export class ViewCube {
       ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.camera);
       return ray.intersectObject(this.ringHit, false).length > 0 && !ray.intersectObject(this.box, false).length;
     };
+    // the north arrow on the ring: a click turns the cube between true north and the building's
+    const onArrow = (e) => {
+      const r = el.getBoundingClientRect();
+      ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.camera);
+      return ray.intersectObject(this.arrowHit, false).length > 0;
+    };
     let turning = null;
     el.addEventListener('pointermove', (e) => {
       if (turning) {
@@ -89,12 +96,14 @@ export class ViewCube {
         this.turn(-dx * 0.012);
         return;
       }
-      const ring = onRing(e);
-      el.style.cursor = ring ? 'ew-resize' : '';
+      const arrow = onArrow(e), ring = !arrow && onRing(e);
+      el.style.cursor = arrow ? 'pointer' : ring ? 'ew-resize' : '';
+      el.title = arrow ? (this.mode === 'building' ? 'Building north: the cube square to the building. Click for true north.' : 'True north. Click for building north: the cube square to the building, its faces looking square at the walls.')
+        : 'Click a face, edge or corner to look from that side';
       this.showHover(ring ? null : region(e));
     });
     el.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 || !onRing(e)) return;
+      if (e.button !== 0 || onArrow(e) || !onRing(e)) return;
       turning = { x: e.clientX, x0: e.clientX, moved: false };
       try { el.setPointerCapture(e.pointerId); } catch { /* a pointer the browser no longer tracks */ }
       e.preventDefault();
@@ -108,9 +117,11 @@ export class ViewCube {
     el.addEventListener('pointerleave', () => { if (!turning) this.showHover(null); });
     el.addEventListener('click', (e) => {
       if (this.justTurned) { this.justTurned = false; return; }
+      if (onArrow(e)) { this.setMode(this.mode === 'building' ? 'true' : 'building'); return; }
       if (onRing(e)) return;
       const d = region(e);
-      if (d) this.onPick(new THREE.Vector3(...d).normalize());
+      // the cube's own axes turned out to the model's
+      if (d) this.onPick(new THREE.Vector3(...d).normalize().applyAxisAngle(new THREE.Vector3(0, 0, 1), this.cube.rotation.z));
     });
     el.addEventListener('contextmenu', (e) => e.preventDefault());
   }
@@ -143,6 +154,10 @@ export class ViewCube {
     const tip = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.42, 3), new THREE.MeshBasicMaterial({ color: this.accent }));
     tip.position.set(0, 1.86, -1.05); // a cone points along +y
     this.north.add(tip);
+    // a larger unseen target round the tip, for the click that turns true north and the building's
+    this.arrowHit = new THREE.Mesh(new THREE.SphereGeometry(0.42, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
+    this.arrowHit.position.copy(tip.position);
+    this.north.add(this.arrowHit);
     this.cube.add(ring, this.north);
   }
 
@@ -158,9 +173,25 @@ export class ViewCube {
         uv.setXY(i, u + 0.5, v + 0.5);
       }
     };
-    // each side's text turned upright (z up), the top's towards +y; checked by eye from each side
-    rotate(0, 1); rotate(1, 3); rotate(2, 2); rotate(5, 2);
+    // each side's text turned upright (z up); checked by rendering the cube from every side
+    rotate(0, 3); rotate(1, 1); rotate(2, 2); rotate(5, 2);
     uv.needsUpdate = true;
+    this.uv0 = Float32Array.from(uv.array); // the top's own, turned below to face the eye
+    this.rotateFace = rotate;
+    this.topTurn = 0;
+  }
+
+  // The top's text turned a quarter at a time so it reads from the side the camera is on (never upside
+  // down): k quarter turns for the camera's bearing round the cube, to the nearest side.
+  turnTop() {
+    const v = this.view, d = v.camera.position.clone().sub(v.controls.target).applyAxisAngle(new THREE.Vector3(0, 0, 1), -this.cube.rotation.z); // in the cube's own axes
+    const k = ((Math.round(Math.atan2(d.x, -d.y) / (Math.PI / 2)) % 4) + 4) % 4;
+    if (k === this.topTurn || !this.uv0) return;
+    const uv = this.box.geometry.getAttribute('uv');
+    for (let i = 16; i < 20; i++) uv.setXY(i, this.uv0[i * 2], this.uv0[i * 2 + 1]);
+    this.rotateFace(4, (4 - k) % 4);
+    uv.needsUpdate = true;
+    this.topTurn = k;
   }
 
   // The view turned by `angle` (radians) about the upright through the compass's centre (the site's
@@ -175,9 +206,19 @@ export class ViewCube {
     v.render();
   }
 
-  // True north, in degrees clockwise from the model's +y axis (EnergyPlus's north axis is the reverse).
-  setNorth(degrees) {
-    this.north.rotation.z = THREE.MathUtils.degToRad(degrees);
+  // The norths, in degrees anticlockwise from the model's +y axis: true north, and the building's
+  // (its walls' axis nearest true north; null when it has none). The cube turns so its BACK faces the
+  // north it is set to (true by default; a click on the ring's arrow switches), its arrow on that north.
+  setNorth(trueDeg, buildingDeg = null) {
+    this.norths = { true: trueDeg, building: buildingDeg ?? trueDeg };
+    this.setMode(this.mode || 'true');
+  }
+  setMode(mode) {
+    this.mode = mode;
+    const deg = this.norths?.[mode] ?? 0;
+    this.cube.rotation.z = THREE.MathUtils.degToRad(deg);
+    this.north.rotation.z = 0;
+    this.north.children[0]?.material.color.set(mode === 'building' ? '#D9A625' : this.accent);
     this.render();
   }
 
@@ -186,7 +227,8 @@ export class ViewCube {
     const span = (s) => (s === 0 ? [-EDGE, EDGE] : s > 0 ? [EDGE, 1.02] : [-1.02, -EDGE]);
     const [x, y, z] = d.map(span);
     this.hover.scale.set(x[1] - x[0], y[1] - y[0], z[1] - z[0]);
-    this.hover.position.set((x[0] + x[1]) / 2, (y[0] + y[1]) / 2, (z[0] + z[1]) / 2);
+    this.hover.position.set((x[0] + x[1]) / 2, (y[0] + y[1]) / 2, (z[0] + z[1]) / 2).applyAxisAngle(new THREE.Vector3(0, 0, 1), this.cube.rotation.z);
+    this.hover.rotation.z = this.cube.rotation.z;
     this.hover.visible = true;
     this.render();
   }
@@ -194,6 +236,7 @@ export class ViewCube {
   // Follows the main camera: the same direction from the target, the same up.
   render() {
     const v = this.view;
+    this.turnTop();
     const dir = v.camera.position.clone().sub(v.controls.target).normalize();
     this.camera.position.copy(dir.multiplyScalar(6));
     this.camera.up.copy(v.camera.up);

@@ -179,7 +179,14 @@ export class PlanEdit {
   }
   outline({ kind, item }, o) {
     const T = (p) => this.d.toPx(p[0], p[1]);
-    if (kind === 'zone') return item.polys.map((P) => poly(P.map(T), o)).join('');
+    // a zone: the outline of its floor as one, the seams between its pieces left out
+    if (kind === 'zone') return outerEdges(item.polys).map(([a, b]) => { const A = T(a), B = T(b); return line(A[0], A[1], B[0], B[1], { stroke: o.stroke, w: o.w, dash: o.dash }); }).join('');
+    // a window: where it stands now (an open sash where it has swung to)
+    if (kind === 'window') {
+      const panel = this.api.view.swungPanel?.(item.name), o3 = this.api.view.origin || [0, 0, 0];
+      const seg = panel && cutLine(panel.map((p) => [p[0] - o3[0], p[1] - o3[1], p[2] - o3[2]]), this.zc);
+      if (seg) item = { ...item, seg };
+    }
     if ((kind === 'surface' || kind === 'wall') && item.loops.length) return item.loops.map((L) => poly(L.map(T), o)).join('');
     // a line: a narrow box around it
     const [a, b] = item.seg.map(T), dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1, h = kind === 'window' ? 4 : 3, nx = -dy / l * h, ny = dx / l * h;
@@ -212,9 +219,23 @@ export class PlanEdit {
     this.figs = { zone: t.zone, face: t.face, n: lay.n, pitch: lay.pitch, ud };
     return out;
   }
-  // the grips of a massing's selected zone (each wall) or wall (its own)
+  // the grips of a massing's selected zone (each wall) or wall (its own); a selected window's jambs
   gripsFor(sel) {
     const m = this.api.massing();
+    // a window: a grip at each jamb, dragged outward or in, the width growing about its middle (as Edit
+    // window in 3D's jambs); its width written beside it, a click types it
+    const win = sel && this.api.windowWidth && this.picks()?.windows.find((w) => w.name === sel);
+    if (win) {
+      const [A, B] = win.seg.map((p) => this.d.toPx(p[0], p[1])), W = Math.hypot(win.seg[1][0] - win.seg[0][0], win.seg[1][1] - win.seg[0][1]);
+      const L = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1, u = [(B[0] - A[0]) / L, (B[1] - A[1]) / L];
+      let g = '';
+      [[A, [-u[0], -u[1]]], [B, u]].forEach(([p, dir]) => { this.grips.push({ p, dir, win: sel, W, pxm: L / (W || 1), A, B }); g += gripMark(p[0], p[1], 4.5); });
+      const mid = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], nrm = [-u[1], u[0]];
+      g += label(mid[0] + nrm[0] * 16, mid[1] + nrm[1] * 16 + 3, `w ${Math.round(W * 1000)} mm`, { size: 9, fill: 'var(--glass)', edit: 'w.width' });
+      this.winFig = { name: sel, W };
+      return g;
+    }
+    this.winFig = null;
     // a free wall: its two ends, where the cut passes through it
     if (m && String(sel || '').startsWith('wall:')) {
       const w = m.walls?.find((x) => x.id === Number(sel.slice(5)));
@@ -236,9 +257,9 @@ export class PlanEdit {
     return g;
   }
   gripAt(e) { const [x, y] = this.px(e); return (this.grips || []).find((g) => Math.hypot(g.p[0] - x, g.p[1] - y) < 9) || null; }
-  // the array's number or spacing under the pointer: { key, el }
+  // the array's number or spacing under the pointer: { key, el } (or a window's width)
   figAt(e) {
-    if (!this.figs) return null;
+    if (!this.figs && !this.winFig) return null;
     for (const el of this.d.ov.querySelectorAll('rect[data-edit]')) {
       const r = el.getBoundingClientRect();
       if (e.clientX >= r.left - 2 && e.clientX <= r.right + 2 && e.clientY >= r.top - 2 && e.clientY <= r.bottom + 2) return { key: el.dataset.edit, el: el.nextElementSibling || el };
@@ -258,7 +279,14 @@ export class PlanEdit {
   // the zones as they will be, while a grip is dragged
   dragDraw() {
     const r = this.drag, m = this.api.massing();
-    if (!r || !m) return '';
+    if (!r || (!m && !r.win)) return '';
+    if (r.win) {
+      // the window as wide as it is being dragged, about its middle
+      const c = [(r.A[0] + r.B[0]) / 2, (r.A[1] + r.B[1]) / 2], u = [(r.B[0] - r.A[0]) / 2, (r.B[1] - r.A[1]) / 2], k = (r.w ?? r.W) / (r.W || 1);
+      const a = [c[0] - u[0] * k, c[1] - u[1] * k], b = [c[0] + u[0] * k, c[1] + u[1] * k], L = Math.hypot(u[0], u[1]) || 1, n = [-u[1] / L, u[0] / L];
+      return line(a[0], a[1], b[0], b[1], { stroke: 'var(--glass)', w: 3 }) + gripMark(a[0], a[1], 4.5) + gripMark(b[0], b[1], 4.5)
+        + label(c[0] + n[0] * 16, c[1] + n[1] * 16 + 3, `w ${Math.round((r.w ?? r.W) * 1000)} mm`, { size: 9, fill: 'var(--glass)' });
+    }
     if (r.span !== undefined || r.fig || r.pitch) {
       const trial = structuredClone(m);
       if (r.moved) this.arrayDraft(trial, r);
@@ -295,6 +323,7 @@ export class PlanEdit {
       if (!r.moved && Math.hypot(dx, dy) < CLICK_PX) return;
       r.moved = true;
       if (r.free !== undefined) { const q = this.toMassing(e), step = e.shiftKey ? 0.1 : STEP; r.dv = [q[0] - r.q0[0], q[1] - r.q0[1]].map((v) => Math.round(v / step) * step); this.paint(); return; }
+      if (r.win) { const run = (dx * r.dir[0] + dy * r.dir[1]) / r.pxm; r.w = Math.max(0.3, Math.round((r.W + 2 * run) / 0.005) * 0.005); this.paint(); return; }
       if (r.fig) { const along = dx * this.figs.ud[0] + dy * this.figs.ud[1]; r.steps = Math.round(along / 12); this.paint(); return; }
       if (r.pitch) {
         const m = this.api.massing(), { A, U } = faceAxes(m, r.zone, r.face), len = faceLength(m, r.zone, r.face), q = this.toMassing(e);
@@ -331,6 +360,11 @@ export class PlanEdit {
     }
     // the array's number or spacing: slid along the bracket, or clicked to type
     const fg = this.figAt(e);
+    if (fg && fg.key === 'w.width') {
+      const wf = this.winFig;
+      askNumber(this.d.host, { clientX: e.clientX, clientY: e.clientY, target: fg.el }, `width mm, now ${Math.round(wf.W * 1000)}`, (x) => { if (x >= 300) this.api.windowWidth(wf.name, x / 1000); this.paint(); });
+      return;
+    }
     if (fg) {
       const f = this.figs;
       this.drag = { fig: fg.key, el: fg.el, zone: f.zone, face: f.face, n0: f.n, p0: f.pitch, steps: 0, x0: e.clientX, y0: e.clientY, moved: false };
@@ -367,6 +401,12 @@ export class PlanEdit {
       this.d.host.releasePointerCapture?.(e.pointerId);
       // pressed and let go where it was: picked
       if (r.press && !r.moved) { this.api.select(r.press); this.paint(); return; }
+      if (r.win) {
+        if (r.moved && r.w && Math.abs(r.w - r.W) > 1e-6) this.api.windowWidth(r.win, r.w);
+        else if (!r.moved) askNumber(this.d.host, e, `width mm, now ${Math.round(r.W * 1000)}`, (x) => { if (x >= 300) this.api.windowWidth(r.win, x / 1000); this.paint(); });
+        this.paint();
+        return;
+      }
       if (r.free !== undefined) {
         if (r.dv[0] || r.dv[1]) this.api.change((m) => { moveWall(m, r.free, r.dv); }, 'wall moved');
         this.paint();
@@ -402,6 +442,23 @@ export class PlanEdit {
     this.api.select(h ? h.name : null);
   }
   dispose() { this.unregister?.(); }
+}
+
+// The edges of polygons (plan points) that no other of them shares: their outline as one. Each edge is
+// split where another's corner lies along it, so pieces meeting at a T-junction match up.
+function outerEdges(polys) {
+  const key = (p) => `${p[0].toFixed(3)},${p[1].toFixed(3)}`, corners = [...new Map(polys.flat().map((p) => [key(p), p])).values()], count = new Map();
+  for (const P of polys) P.forEach((a, i) => {
+    const b = P[(i + 1) % P.length], d = [b[0] - a[0], b[1] - a[1]], L2 = d[0] ** 2 + d[1] ** 2;
+    if (!L2) return;
+    const cut = corners.map((q) => [((q[0] - a[0]) * d[0] + (q[1] - a[1]) * d[1]) / L2, q]).filter(([t, q]) => t > 1e-4 && t < 1 - 1e-4 && Math.hypot(a[0] + d[0] * t - q[0], a[1] + d[1] * t - q[1]) < 0.002).sort((x, y) => x[0] - y[0]).map((c) => c[1]);
+    const pts = [a, ...cut, b];
+    for (let k = 0; k + 1 < pts.length; k++) {
+      const ka = key(pts[k]), kb = key(pts[k + 1]), id = ka < kb ? ka + '|' + kb : kb + '|' + ka, e = count.get(id);
+      if (e) e.n++; else count.set(id, { a: pts[k], b: pts[k + 1], n: 1 });
+    }
+  });
+  return [...count.values()].filter((e) => e.n === 1).map((e) => [e.a, e.b]);
 }
 
 // A polygon's normal (Newell), not normalised.

@@ -1114,13 +1114,30 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       return [q[0] - o[0] + y[0], q[1] - o[1] + y[1], q[2] - o[2] + y[2]];
     };
     // The edges where faces meet at an angle, and the open ones: the zone's box, without its openings.
+    // Each edge is split where another face's corner lies along it (a T-junction), so the seam between
+    // two pieces of one floor matches up and is dropped.
+    const corners = [...new Map(info.flatMap((f) => f.p.vertices).map((q) => [key(q), q])).values()];
+    const pieces = (a, b) => {
+      const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], L2 = d[0] ** 2 + d[1] ** 2 + d[2] ** 2, cut = [];
+      if (!L2) return [];
+      for (const q of corners) {
+        const t = ((q[0] - a[0]) * d[0] + (q[1] - a[1]) * d[1] + (q[2] - a[2]) * d[2]) / L2;
+        if (t <= 1e-4 || t >= 1 - 1e-4) continue;
+        const e = Math.hypot(a[0] + d[0] * t - q[0], a[1] + d[1] * t - q[1], a[2] + d[2] * t - q[2]);
+        if (e < 0.002) cut.push([t, q]);
+      }
+      const pts = [a, ...cut.sort((x, y) => x[0] - y[0]).map((c) => c[1]), b];
+      return pts.slice(1).map((q, i) => [pts[i], q]);
+    };
     const edges = new Map();
     for (const f of info) {
       const v = f.p.vertices;
       for (let i = 0; i < v.length; i++) {
-        const a = v[i], b = v[(i + 1) % v.length], ka = key(a), kb = key(b), id = ka < kb ? ka + '|' + kb : kb + '|' + ka;
-        if (!edges.has(id)) edges.set(id, { a, b, on: [] });
-        edges.get(id).on.push(f.n);
+        for (const [a, b] of pieces(v[i], v[(i + 1) % v.length])) {
+          const ka = key(a), kb = key(b), id = ka < kb ? ka + '|' + kb : kb + '|' + ka;
+          if (!edges.has(id)) edges.set(id, { a, b, on: [] });
+          edges.get(id).on.push(f.n);
+        }
       }
     }
     const out = [];
@@ -1171,7 +1188,8 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
         g.setAttribute('position', new THREE.Float32BufferAttribute(tris, 3));
         h.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ ...tint, opacity: found.kind === 'window' ? 0.35 : 0.45 })));
       }
-      const edges = found.tris ? null : this.outlineOf(found.polys);
+      // a zone: its outer outline, the seams between faces in line left out (as its preview)
+      const edges = found.tris ? null : (found.kind === 'zone' && this.outerOutlineOf(`zone:${name}`, found.polys)) || this.outlineOf(found.polys);
       const eg = found.tris ? new THREE.EdgesGeometry(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(found.tris, 3)), 25)
         : edges ? new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(edges, 3)) : edgeGeometry(found.polys, this.origin);
       h.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: SELECTED, clippingPlanes: this.clipping })));
@@ -1182,6 +1200,12 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     }
     if (!quiet) this.onSelect(found);
     this.render();
+  }
+
+  // An open window's sash as it stands now (its corners, model coordinates), or null when it is shut.
+  swungPanel(name) {
+    const sash = this.swung?.has(name) ? this.lastWindows?.[1]?.get(name) : null, w = this.model?.windows[name];
+    return sash && w ? sashPanel(w, sash, this.windowOffset(w)) : null;
   }
 
   // Closes in on polygons (model coordinates) from where the camera looks now; the orbit then turns

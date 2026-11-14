@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { Tracer, MAX_AGE, EXIT_TIME } from '../src/solver/tracer.js';
 import { co2Color } from './view3d.js';
+import { rampAt, placeOf } from './ramps.js';
 
 const CAPACITY = 20000;
 const TARGET = 6000; // particles in view under the first conditions shown, at density x1
@@ -63,6 +64,8 @@ export class AirflowParticles {
   }
 
   // The cells (voxelize) and the model's total volume, for a new model.
+  // the lowest and highest the particles carried when last drawn, for the gradient's Sync
+  valueRange() { return this.seen && this.seen[0] <= this.seen[1] ? [...this.seen] : null; }
   setGrid(grid, volume) {
     this.tracer = new Tracer(grid);
     this.volume = volume;
@@ -123,9 +126,16 @@ export class AirflowParticles {
       }
       // Fully visible until it leaves the building or times out in a still corner, then fading.
       const alpha = q.out ? q.out.left / EXIT_TIME : Math.min(1, (MAX_AGE - q.age) / FADE);
-      if (this.colorBy === 'speed') speedColor(Math.hypot(...q.v), col);
-      else if (this.colorBy === 'co2') co2Color(this.co2At ? this.co2At(q.p, q.zone) : 400, col);
-      else temperatureColor(q.t, col);
+      // the value it carries, placed on the gradient's range (Layers: as the cuts')
+      const val = this.colorBy === 'speed' ? Math.hypot(...q.v) : this.colorBy === 'co2' ? (this.co2At ? this.co2At(q.p, q.zone) : 400) : q.t;
+      const G = this.gradient;
+      if (G) { const x = placeOf(this.colorBy, val, G.range[0], G.range[1]); rampAt(G.ramp, G.flip ? 1 - x : x, col); }
+      else if (this.colorBy === 'speed') speedColor(val, col);
+      else if (this.colorBy === 'co2') co2Color(val, col);
+      else temperatureColor(val, col);
+      if (n === 0) this.seen = [Infinity, -Infinity];
+      if (val < this.seen[0]) this.seen[0] = val;
+      if (val > this.seen[1]) this.seen[1] = val;
       const w = F ? toW(q.p) : q.p; // the grid's axes may be turned to the building's
       for (let i = 0; i < 3; i++) H.pos[n * 3 + i] = w[i] - o[i];
       H.rgba.set([col.r, col.g, col.b, alpha * 0.95], n * 4);

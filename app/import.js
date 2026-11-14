@@ -32,7 +32,7 @@ import {
 import { HoverPick } from './hover.js';
 import { WindowEditor } from './winedit.js';
 import { WallEnds3D } from './wallends.js';
-import { RAMPS, rampAt, rampCss, UNITS, niceRange } from './ramps.js';
+import { RAMPS, rampAt, rampCss, UNITS, niceRange, DEFAULT_RAMP, DEFAULT_RANGE } from './ramps.js';
 import {
   massing0, massingBlank, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
@@ -922,7 +922,41 @@ $('windows-reset').addEventListener('click', () => { windowSet.clear(); roomSet.
 for (const id of ['windows', 'doors']) $(id).addEventListener('change', () => { windowSet.clear(); roomSet.clear(); solveAir(); if (model) showInfo(current()); legend(); });
 
 
-$('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; legend(); });
+// The 3D particles' colours, as the cuts': a field, a gradient (flipped or not) and its range.
+function airGradient(reset = false) {
+  const field = $('air-color').value;
+  if (reset) { air.gradient = { ramp: DEFAULT_RAMP[field], flip: false, range: [...DEFAULT_RANGE[field]] }; }
+  const g = air.gradient, d = field === 'co2' ? 0 : field === 'speed' ? 3 : 1;
+  $('air-ramp').value = g.ramp;
+  $('air-ramp-flip').style.background = rampCss(g.ramp, g.flip);
+  $('air-ramp-flip').title = `Flip the gradient: ${g.flip ? 'low to high again' : 'high to low'}`;
+  for (const [id, k] of [['air-lo', 0], ['air-hi', 1]]) { $(id).value = String(+g.range[k].toFixed(d)); $(id).dataset.per = field === 'co2' ? 2 : field === 'speed' ? 0.002 : 0.05; $(id).dataset.digits = d; }
+  $('air-unit').textContent = UNITS[field];
+  if (model) legend();
+}
+$('air-color').addEventListener('change', (e) => { air.colorBy = e.target.value; airGradient(true); });
+$('air-ramp').addEventListener('change', (e) => { air.gradient.ramp = e.target.value; airGradient(); });
+$('air-ramp-flip').addEventListener('click', () => { air.gradient.flip = !air.gradient.flip; airGradient(); });
+for (const [id, k] of [['air-lo', 0], ['air-hi', 1]]) $(id).addEventListener('input', (e) => {
+  const v = Number(String(e.target.value).replace(',', '.'));
+  if (!Number.isFinite(v)) return;
+  air.gradient.range[k] = v;
+  if (e.type === 'input' && !e.target.dataset.scrubbing) return;
+  legend();
+});
+for (const id of ['air-lo', 'air-hi']) $(id).addEventListener('change', () => { const r = air.gradient.range; if (r[0] > r[1]) r.reverse(); airGradient(); });
+// Sync: the range once to the lowest and highest the particles carry now, rounded
+$('air-sync').addEventListener('click', () => { const d = air.valueRange?.(); if (d) { air.gradient.range = niceRange($('air-color').value, d[0], d[1]); airGradient(); } });
+// the range's ends dragged left or right, as the cuts' are
+for (const id of ['air-lo', 'air-hi']) $(id).addEventListener('pointerdown', (e) => {
+  const t = e.target, x0 = e.clientX, v0 = Number(t.value), per = Number(t.dataset.per || 0.05), digits = Number(t.dataset.digits || 1);
+  let moved = false;
+  const move = (m) => { if (!moved && Math.abs(m.clientX - x0) < 3) return; if (!moved) { moved = true; t.blur(); t.dataset.scrubbing = '1'; } m.preventDefault(); t.value = String(+(v0 + (m.clientX - x0) * per).toFixed(digits)); t.dispatchEvent(new Event('input', { bubbles: true })); };
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); delete t.dataset.scrubbing; if (moved) t.dispatchEvent(new Event('change', { bubbles: true })); };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
+});
+air.gradient = null;
+airGradient(true);
 // What the grid solver needs for CO2 in an hour: each zone's level from the balance, the outdoor
 // level, and the CO2 people breathe out and the outdoor air supplied, by zone.
 function co2Message(hourAt, targets, site) {
@@ -940,6 +974,15 @@ function roomsOf(m) {
   r.model = t.model;
   r.g.frame = F;
   return r;
+}
+// The building's north, in degrees anticlockwise from the model's +y: of its walls' four axes
+// (src/solver/frame.js), the one nearest true north; null when it has none.
+function buildingNorth(m) {
+  const F = gridFrame(m), t = -m.site.northAxis;
+  if (!F) return null;
+  const a = (F.angle * 180) / Math.PI, wrap = (x) => ((((x + 180) % 360) + 360) % 360) - 180;
+  const k = Math.round(wrap(t - a) / 90);
+  return a + 90 * k;
 }
 // CO2 at a point (the grid's axes): the grid solver's field, or with ideal flow its room's level.
 function co2Near(p, zoneIndex = null) {
@@ -1213,9 +1256,12 @@ function showInfo(found) {
   queueMicrotask(() => ws.selection());
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
   if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; popShut = null; view.clicked = false; return; }
-  // picked in a plan or section a moment ago: the pop-up opens in that view, beside the pick
-  const host = drawnPick && performance.now() - drawnPick.time < 600 && drawnPick.el.isConnected ? drawnPick.el : $('viewer');
+  // picked in a plan a moment ago: the pop-up opens over that plan, beside the pick (kept in the page
+  // itself, fixed, so it never goes with a plan's drawing when that is drawn again)
+  popInPlan = !!(drawnPick && performance.now() - drawnPick.time < 600 && drawnPick.el.isConnected);
+  const host = popInPlan ? document.body : $('viewer');
   if (box.parentElement !== host) { host.appendChild(box); popKey = null; }
+  box.style.position = popInPlan ? 'fixed' : '';
   const { kind, item } = found, key = `${kind}:${item.name}`;
   // its pop-up closed: the selection stays, the pop-up stays shut until another is selected
   const clicked = view.clicked;
@@ -1235,10 +1281,18 @@ function showInfo(found) {
 }
 
 // A pick in a plan or section view: { el (its drawing), x, y (in it), time }.
-let drawnPick = null;
+let drawnPick = null, popInPlan = false;
 // Beside the point picked, inside the view (the 3D view's, or the plan or section's it was picked in).
 function placePop() {
-  const box = $('info'), v = box.parentElement || $('viewer'), at = v === $('viewer') ? view.lastPick : drawnPick && [drawnPick.x, drawnPick.y];
+  const box = $('info');
+  if (popInPlan && drawnPick) {
+    // over the plan, beside the pick, kept inside the plan
+    const r = drawnPick.el.getBoundingClientRect(), w = box.offsetWidth, h = box.offsetHeight;
+    const x = Math.max(r.left + 8, Math.min(drawnPick.cx + 16, r.right - w - 8)), y = Math.max(r.top + 8, Math.min(drawnPick.cy + 12, r.bottom - h - 8));
+    Object.assign(box.style, { left: `${x}px`, top: `${y}px`, bottom: '' });
+    return;
+  }
+  const v = $('viewer'), at = view.lastPick;
   if (!at) { Object.assign(box.style, { left: '10px', top: '10px', bottom: '' }); return; }
   const w = box.offsetWidth, h = box.offsetHeight, W = v.clientWidth, H = v.clientHeight;
   const x = Math.max(8, Math.min(at[0] + 16, W - w - 8)), y = Math.max(8, Math.min(at[1] + 12, H - h - 8));
@@ -1256,7 +1310,8 @@ $('info').addEventListener('pointerdown', (e) => {
 // below), never over it; a window being edited keeps room for its figures.
 function followPop() {
   const box = $('info');
-  if (popPinned || box.hidden || !model || box.parentElement !== $('viewer')) return; // in a plan or section, it stays where it opened
+  if (box.parentElement === document.body && !drawnPick?.el.isConnected) box.hidden = true; // its plan closed
+  if (popPinned || box.hidden || !model || box.parentElement !== $('viewer')) return; // over a plan, it stays where it opened
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   if (box.dataset.kind === 'plane') {
     // Beside a plane's gumball, clear of its arrows.
@@ -1320,7 +1375,7 @@ function popContent(kind, item) {
       item.operableFraction ? `Operable fraction ${fmt(item.operableFraction.value, 2)}` : 'Not operable');
     const ms = massingSide(kind, item);
     if (ms) title = `Window ${ms.index + 1} of ${ms.n}`;
-    if (r) rows.push(`<button class="pbtn${winEdit.name === item.name ? ' on' : ''}" data-act="winedit" title="${winEdit.name === item.name ? 'Back to the building: the handles go (Esc)' : 'Its sill, head and jambs get handles in the view to push or pull; drag the glass to move it across its wall; click a handle or a figure to type it'}">${winEdit.name === item.name ? 'Done' : 'Edit window in 3D'}</button>`);
+    if (r && !popInPlan) rows.push(`<button class="pbtn${winEdit.name === item.name ? ' on' : ''}" data-act="winedit" title="${winEdit.name === item.name ? 'Back to the building: the handles go (Esc)' : 'Its sill, head and jambs get handles in the view to push or pull; drag the glass to move it across its wall; click a handle or a figure to type it'}">${winEdit.name === item.name ? 'Done' : 'Edit window in 3D'}</button>`);
     if (ms) rows.push(...sideRows(ms, winEdit.name === item.name));
   } else if (kind === 'wall') {
     const w = massing?.walls?.find((x) => x.id === item.id);
@@ -1364,11 +1419,12 @@ function gradientRows(which, field, shown) {
   const p = view.sections.selected, a = p.air, key = `${which}Ramp`, flipKey = `${which}Flip`, rangeKey = `${which}Range`;
   const now = a[key] || shown?.ramp || 'coolwarm', flip = !!a[flipKey], unit = UNITS[field], d = field === 'co2' ? 0 : field === 'speed' ? 3 : 1;
   const f = (v) => (v === null || v === undefined ? '' : String(+Number(v).toFixed(d)));
+  const per = field === 'co2' ? 2 : field === 'speed' ? 0.002 : 0.05; // a value a pixel, dragged
   const used = shown?.range, data = shown?.data;
   const pick = Object.entries(RAMPS).map(([k, r]) => `<button type="button" class="ramppick${k === now ? ' on' : ''}" data-ramp-pick="${k}" data-which="${which}"><i class="rampsw" style="background:${rampCss(k, flip)}"></i>${r.name}</button>`).join('');
   return [
     `<span class="popkv"><span class="tipped" title="The colours the values run through, low to high. Click the swatch to run them the other way.">Gradient</span><span class="popv"><details class="dd rampdd"><summary>${RAMPS[now].name}</summary><div class="ddmenu rampmenu">${pick}</div></details> <button type="button" class="rampsw flipsw" data-air-flip="${flipKey}" style="background:${rampCss(now, flip)}" title="Flip the gradient: ${flip ? 'low to high again' : 'high to low'}">⇄</button></span></span>`,
-    `<span class="popkv"><span class="tipped" title="The values at the two ends of the gradient: type them, or Sync to set them once to the lowest and highest on this cut now, rounded (they then hold as the air changes).${field === 'speed' ? ' Speed runs on a log scale.' : ''}">Range</span><span class="popv"><input class="popnum short" data-air="${which}Lo" value="${f(used?.[0])}"> – <input class="popnum short" data-air="${which}Hi" value="${f(used?.[1])}"> ${unit} <button type="button" class="pbtn" data-air-sync="${rangeKey}" data-field="${field}"${data ? '' : ' disabled'} title="Set the range to this cut's lowest and highest now${data ? `, ${f(shown.suggest[0])} … ${f(shown.suggest[1])} ${unit}` : ''}, once">Sync</button></span></span>`,
+    `<span class="popkv"><span class="tipped" title="The values at the two ends of the gradient: type them, or Sync to set them once to the lowest and highest on this cut now, rounded (they then hold as the air changes).${field === 'speed' ? ' Speed runs on a log scale.' : ''}">Range</span><span class="popv"><input class="popnum short scrubnum" data-air="${which}Lo" data-per="${per}" data-digits="${d}" value="${f(used?.[0])}" title="Drag left or right, or type"> – <input class="popnum short scrubnum" data-air="${which}Hi" data-per="${per}" data-digits="${d}" value="${f(used?.[1])}" title="Drag left or right, or type"> ${unit} <button type="button" class="pbtn" data-air-sync="${rangeKey}" data-field="${field}"${data ? '' : ' disabled'} title="Set the range to this cut's lowest and highest now${data ? `, ${f(shown.suggest[0])} … ${f(shown.suggest[1])} ${unit}` : ''}, once">Sync</button></span></span>`,
     data ? `<span class="muted">On this cut now: ${f(data[0])} … ${f(data[1])} ${unit}</span>` : '',
   ].filter(Boolean);
 }
@@ -1402,14 +1458,15 @@ function onAir(e) {
   if (key === 'on') { p.off = !t.checked; view.sections.changed(); drawSlices(true); showInfo(current()); legend(); return; }
   if (key === 'particles') a.particles = t.checked;
   else if (/^(fill|part)(Lo|Hi)$/.test(key)) {
-    // a range's end typed: held there, the other end as shown
-    if (e.type !== 'change') return;
+    // a range's end typed (or slid: as it moves, the cut alone redrawn): held there, the other end as shown
+    if (e.type !== 'change' && !t.dataset.scrubbing) return;
     const which = key.startsWith('fill') ? 'fill' : 'part', rk = `${which}Range`, sh = p.shown?.[which];
     const v = Number(String(t.value).replace(',', '.'));
     if (t.value.trim() === '' || !Number.isFinite(v)) { showInfo(current()); return; }
     const r = [...(a[rk] || sh?.range || [v, v])];
     r[key.endsWith('Lo') ? 0 : 1] = v;
     a[rk] = r[0] <= r[1] ? r : [r[1], r[0]];
+    if (e.type !== 'change') { drawSlices(true); legend(); return; }
   } else if (key === 'color') { a.color = t.value; a.particles = t.value !== 'none'; a.partRange = null; }
   else if (key === 'field') { a.field = t.value; a.fillRange = null; } // another kind of data: its own range
   else if (key === 'partOpacity') { const v = Number(String(t.value).replace(',', '.')); if (Number.isFinite(v)) a.partOpacity = Math.max(0.05, Math.min(1, v / 100)); return; } // the particles take it as they move
@@ -1444,7 +1501,7 @@ $('info').addEventListener('click', (e) => {
   drawSlices(true); showInfo(current()); legend();
 });
 // A gradient list opens over the pop-up, not inside its scrolling body
-$('info').addEventListener('toggle', (e) => {
+document.addEventListener('toggle', (e) => {
   const d = e.target;
   if (!d.classList?.contains('rampdd') || !d.open) return;
   const r = d.querySelector('summary').getBoundingClientRect(), m = d.querySelector('.rampmenu');
@@ -1458,16 +1515,19 @@ $('info').addEventListener('toggle', (e) => {
 $('info').addEventListener('pointerdown', (e) => {
   const t = e.target.closest('input.scrubnum');
   if (!t || e.button !== 0) return;
-  const x0 = e.clientX, v0 = Number(t.value), lo = Number(t.dataset.min), hi = Number(t.dataset.max);
+  // per: the value a pixel moves (half a percent by default); digits: as it is shown
+  const x0 = e.clientX, v0 = Number(t.value || t.placeholder), lo = Number(t.dataset.min ?? -Infinity), hi = Number(t.dataset.max ?? Infinity);
+  const per = Number(t.dataset.per || 0.5), digits = Number(t.dataset.digits || 0);
+  if (!Number.isFinite(v0)) return;
   let moved = false;
   const move = (m) => {
     if (!moved && Math.abs(m.clientX - x0) < 3) return;
-    if (!moved) { moved = true; t.blur(); }
+    if (!moved) { moved = true; t.blur(); t.dataset.scrubbing = '1'; }
     m.preventDefault();
-    t.value = String(Math.round(Math.max(lo, Math.min(hi, v0 + (m.clientX - x0) / 2))));
+    t.value = String(+Math.max(lo, Math.min(hi, v0 + (m.clientX - x0) * per)).toFixed(digits));
     t.dispatchEvent(new Event('input', { bubbles: true }));
   };
-  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); if (moved) t.dispatchEvent(new Event('change', { bubbles: true })); };
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); delete t.dataset.scrubbing; if (moved) t.dispatchEvent(new Event('change', { bubbles: true })); };
   addEventListener('pointermove', move); addEventListener('pointerup', up);
 });
 $('info').addEventListener('click', (e) => {
@@ -1922,7 +1982,7 @@ function legend() {
   const figure = (k, v) => (k === 'speed' ? +v.toPrecision(2) : k === 'co2' ? Math.round(v) : fmt(v, 1));
   const cutKey = (sh, who) => {
     const stops = [0, 0.25, 0.5, 0.75, 1].map((x) => rampAt(sh.ramp, sh.flip ? 1 - x : x));
-    const how = 'over the range set in its pop-up';
+    const how = sh.how || 'over the range set in its pop-up';
     return `<span title="${who}: air ${WORD[sh.field]}, ${how}${sh.field === 'speed' ? ', on a log scale' : ''}">${ramp(stops, 48)}${who}: ${WORD[sh.field]} ${figure(sh.field, sh.range[0])} … ${figure(sh.field, sh.range[1])} ${UNIT[sh.field]}</span>`;
   };
   for (const q of shownPlanes) {
@@ -1941,7 +2001,7 @@ function legend() {
     if (mode === 'none') return chip('#000000', `${who}: black`);
     return `<span title="${who} colour: the temperature of the air they carry">${ramp([temperatureColor(14), temperatureColor(22), temperatureColor(30)])}${who}: 14–30 °C</span>`;
   };
-  if ($('show-air').checked) items.push(particleKey($('air-color').value, 'Particles'));
+  if ($('show-air').checked && air.gradient) items.push(cutKey({ field: $('air-color').value, ...air.gradient, how: 'over the range set in Layers' }, 'Particles'));
   if (view.problems.length) items.push(chip(PROBLEM, 'Geometry fault', 'A surface a model check finds standing wrong: facing the wrong way, not closing its zone, out of line with its partner. Red on both sides; its arrow points the way EnergyPlus takes as its outside, from the order of its corner points. The checks are listed under Model details.'));
   $('legend').innerHTML = items.join('');
 }
@@ -2536,7 +2596,7 @@ function render(m) {
   windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();
   const a = ((footprintAxis(m).azimuth - m.site.northAxis) * Math.PI) / 180;
   view.longAxis = Math.atan2(Math.cos(a), Math.sin(a)); // the footprint's long side, from model x
-  view.cube.setNorth(-m.site.northAxis);
+  view.cube.setNorth(-m.site.northAxis, buildingNorth(m));
   sky.turned = null;
   setResults(null); // results belong to the previous model; this also solves the network
   queueMicrotask(airCorner);
@@ -2599,7 +2659,7 @@ function refreshModel(geometry = true) {
   startGrid(m);
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
   for (const map of [windowSet, sashSet, amountSet]) for (const k of [...map.keys()]) if (!m.windows[k] && !k.endsWith(':door')) map.delete(k);
-  view.cube.setNorth(-m.site.northAxis);
+  view.cube.setNorth(-m.site.northAxis, buildingNorth(m));
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);
   applyHour(); // solves the air with the model as it is now
@@ -2806,12 +2866,22 @@ const ws = workspace({
   editorFor: (d) => (d.host.addEventListener('pointerdown', (e) => {
     const r = d.host.getBoundingClientRect();
     if (getComputedStyle(d.host).position === 'static') d.host.style.position = 'relative';
-    drawnPick = { el: d.host, x: e.clientX - r.left, y: e.clientY - r.top, time: performance.now() };
+    drawnPick = { el: d.host, x: e.clientX - r.left, y: e.clientY - r.top, cx: e.clientX, cy: e.clientY, time: performance.now() };
   }, true), new PlanEdit(d, {
     view, tools, massing: () => massing, selected: () => selected,
     select: (name) => { view.select(name); ws.selection(); },
     massingTarget: (name) => { const f = view.find(name); return f && massing ? massingTarget(f) : null; },
     change: massingChange,
+    // a window's width (m) set about its middle; false if it would not fit
+    windowWidth: (name, w) => {
+      const R = model && windowRect(model, name);
+      if (!R) return false;
+      const m = (R.s0 + R.s1) / 2, r = clampRect(model, name, { ...R, s0: m - w / 2, s1: m + w / 2 });
+      if (rectProblem(model, name, r)) { popMessage(rectProblem(model, name, r)); return false; }
+      if (massing && massingWindow(massing, name)) massingWindowEdit(name, r);
+      else applyEdit((tx, mm) => setWindowRect(tx, mm, name, r), `window ${name} width set`, { geometry: true });
+      return true;
+    },
   })),
   hasTools: () => !!massing,
   onTake: (rec) => {

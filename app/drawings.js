@@ -27,6 +27,7 @@ function occluders(view) {
     for (let i = 0; i < V.length; i++) { const a = V[i], b = V[(i + 1) % V.length]; n.x += (a.y - b.y) * (a.z + b.z); n.y += (a.z - b.z) * (a.x + b.x); n.z += (a.x - b.x) * (a.y + b.y); }
     if (n.lengthSq() < 1e-12) continue;
     n.normalize();
+    if (n.z < -1e-9 || (Math.abs(n.z) <= 1e-9 && (n.y < -1e-9 || (Math.abs(n.y) <= 1e-9 && n.x < 0)))) n.negate(); // one way per plane
     const e1 = V[1].clone().sub(V[0]).normalize(), e2 = n.clone().cross(e1);
     const pts = V.map((p) => [p.clone().sub(V[0]).dot(e1), p.clone().sub(V[0]).dot(e2)]);
     const box = new THREE.Box3().setFromPoints(V).expandByScalar(0.01);
@@ -41,7 +42,7 @@ function occluders(view) {
 function seesCut(view, f, q) {
   const dist = f.o.clone().sub(q).dot(f.n);
   if (dist <= 0) return true;
-  const hit = new THREE.Vector3();
+  const hit = new THREE.Vector3(), touch = new Map();
   for (const s of occluders(view)) {
     const den = s.n.dot(f.n);
     if (Math.abs(den) < 0.05) continue; // seen edge on: no cover
@@ -58,6 +59,13 @@ function seesCut(view, f, q) {
       near = Math.min(near, Math.hypot(x - xi - k * dx, y - yi - k * dy));
     }
     if (inside && near > 0.02) return false;
+    // on the edge of a surface: hidden where another surface in the same plane shares it (the seam
+    // between two pieces of one floor, which reads as one)
+    if (near <= 0.02) {
+      const key = `${s.n.x.toFixed(2)},${s.n.y.toFixed(2)},${s.n.z.toFixed(2)},${s.p0.dot(s.n).toFixed(2)}`, k = (touch.get(key) || 0) + 1;
+      touch.set(key, k);
+      if (k >= 2) return false;
+    }
   }
   return true;
 }
@@ -169,8 +177,10 @@ export function drawSVG(g, { w, h, cx, cy, s }, marks = {}) {
   if (g.cut) out += `<path d="${path(g.cut)}" fill="url(#poche2d)" fill-rule="evenodd" stroke="var(--ink)" stroke-width="0.85"/>`;
   else for (const loops of [...g.slabs, ...g.poche]) out += `<path d="${path(loops)}" fill="url(#poche2d)" fill-rule="evenodd" stroke="var(--ink)" stroke-width="0.85"/>`;
   if (g.lines.length) out += `<path d="${segs(g.lines)}" fill="none" stroke="var(--ink)" stroke-width="1.4"/>`;
-  // glass cut: a pane at least 3 px thick, --shade with an ink edge
-  if (g.glass.length) out += `<path d="${segs(g.glass)}" fill="none" stroke="var(--ink)" stroke-width="4.6" stroke-linecap="butt"/><path d="${segs(g.glass)}" fill="none" stroke="var(--shade)" stroke-width="3" stroke-linecap="butt"/>`;
+  // glass cut: a pane drawn at a glazing unit's depth (60 mm) at the drawing's scale, so it keeps its
+  // size against the walls as the drawing zooms; never thinner than 2.2 px. --shade with an ink edge
+  const pane = Math.max(2.2, 0.06 * s), core = Math.max(0.8, pane - 1.6);
+  if (g.glass.length) out += `<path d="${segs(g.glass)}" fill="none" stroke="var(--ink)" stroke-width="${pane.toFixed(2)}" stroke-linecap="butt"/><path d="${segs(g.glass)}" fill="none" stroke="var(--shade)" stroke-width="${core.toFixed(2)}" stroke-linecap="butt"/>`;
   for (const [u, v, text] of marks.labels || []) {
     const x = X(u), y = Y(v), tw = text.length * 9 * 0.58 + 6;
     out += `<rect x="${r1(x - tw / 2)}" y="${r1(y - 7.5)}" width="${r1(tw)}" height="13" fill="var(--panel)" opacity="0.85"/><text x="${x}" y="${r1(y + 3)}" text-anchor="middle" font-size="9" fill="var(--ink2)" font-family="var(--sans)">${esc(text)}</text>`;

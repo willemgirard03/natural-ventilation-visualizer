@@ -375,13 +375,20 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     dispose() {}
   }
 
-  // the zones a plan cuts, named at the middle of their floor
+  // the zones a plan cuts, named at the middle of their floor (not those below, seen or not)
   function zoneLabels(f, depth) {
-    const o3 = view.origin || [0, 0, 0], best = new Map();
+    const o3 = view.origin || [0, 0, 0], best = new Map(), extent = new Map();
+    for (const s of view.surfaces || []) {
+      if (!s.zone) continue;
+      const e = extent.get(s.zone) || [Infinity, -Infinity];
+      for (const p of s.vertices) { e[0] = Math.min(e[0], p[2] - o3[2]); e[1] = Math.max(e[1], p[2] - o3[2]); }
+      extent.set(s.zone, e);
+    }
     for (const s of view.surfaces || []) {
       if (!s.zone || s.vertices.length < 3) continue;
-      const zs = s.vertices.map((p) => p[2] - o3[2]);
+      const zs = s.vertices.map((p) => p[2] - o3[2]), [z0, z1] = extent.get(s.zone);
       if (Math.max(...zs) - Math.min(...zs) > 0.01) continue; // level only
+      if (!(z0 <= f.o.z + 1e-6 && z1 > f.o.z + 1e-6) || Math.abs(zs[0] - z0) > 0.01) continue; // the floor of a zone the cut passes through
       const z = zs[0], dz = f.o.z - z;
       if (dz < 0 || dz > depth) continue;
       const a = Math.abs(area2(s.vertices));
