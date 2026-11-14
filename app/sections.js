@@ -493,8 +493,11 @@ for (int i = 0; i < ${MAX}; i++) {
         const n = frameOf(p).n;
         p.o.copy(drag.o).addScaledVector(n, along(drag.o, n));
       } else if (h.type === 'grip') {
-        const t = Math.round(along(h.grip.at, h.grip.dir) / SNAP) * SNAP, k = h.grip.k;
-        p.b[k] = drag.b[k] + (k % 2 ? t : -t);
+        const k = h.grip.k, j = k ^ 1, size0 = drag.b[k | 1] - drag.b[k & 2], t0 = Math.round(along(h.grip.at, h.grip.dir) / SNAP) * SNAP;
+        // Alt: the opposite side moves as far the other way, the plane growing about its middle
+        const t = e.altKey ? Math.max(t0, (0.5 - size0) / 2) : t0, delta = k % 2 ? t : -t;
+        p.b[k] = drag.b[k] + delta;
+        p.b[j] = e.altKey ? drag.b[j] - delta : drag.b[j];
         if (k < 2) p.b[k] = k ? Math.max(p.b[k], p.b[0] + 0.5) : Math.min(p.b[k], p.b[1] - 0.5);
         else p.b[k] = k === 3 ? Math.max(p.b[k], p.b[2] + 0.5) : Math.min(p.b[k], p.b[3] - 0.5);
       } else if (h.type === 'turn') {
@@ -532,8 +535,10 @@ for (int i = 0; i < ${MAX}; i++) {
         const k = d.h.grip.k, size = k < 2 ? d.p.b[1] - d.p.b[0] : d.p.b[3] - d.p.b[2];
         askNumber(this.view.container, e, `${k < 2 ? 'width' : 'height'} mm, now ${Math.round(size * 1000)}`, typed((x) => {
           if (!(x >= 500)) return;
-          const grow = x / 1000 - size; // moves the side clicked, keeps the other
-          if (k % 2) d.p.b[k] += grow; else d.p.b[k] -= grow;
+          // moves the side clicked, keeps the other; with Alt held, both sides by half
+          const grow = x / 1000 - size, share = e.altKey ? grow / 2 : grow;
+          if (k % 2) d.p.b[k] += share; else d.p.b[k] -= share;
+          if (e.altKey) { if (k % 2) d.p.b[k ^ 1] -= share; else d.p.b[k ^ 1] += share; }
         }));
       }
     };

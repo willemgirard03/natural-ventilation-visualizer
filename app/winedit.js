@@ -209,6 +209,10 @@ export class WindowEditor {
         const axis = drag.h.type === 'axis' ? drag.h.axis : drag.axis;
         const s = axis === 'up' ? 0 : lim(ds, b0 - R.s0, b1 - R.s1), z = axis === 'along' ? 0 : lim(dz, (sz ? floor : -Infinity) - R.z0, top - R.z1);
         r = this.clamp(this.name, { s0: R.s0 + s, s1: R.s1 + s, z0: R.z0 + z, z1: R.z1 + z });
+      } else if ((drag.h.k === 'sill' || drag.h.k === 'head') && e.altKey) {
+        // Alt: the sill and head move as far the other way, the window growing about its middle
+        const m = (R.z0 + R.z1) / 2, out = drag.h.k === 'head' ? dz : -dz, half = lim((R.z1 - R.z0) / 2 + out, 0.1, Math.min(m - (sz ? floor : -Infinity), top - m));
+        r.z0 = m - half; r.z1 = m + half;
       } else if (drag.h.k === 'sill') r.z0 = lim(R.z0 + dz, sz ? floor : -Infinity, R.z1 - 0.2);
       else if (drag.h.k === 'head') r.z1 = lim(R.z1 + dz, R.z0 + 0.2, top);
       else {

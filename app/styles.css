@@ -101,9 +101,10 @@ body.hasfull{overflow:hidden}
 .layhd{display:flex; justify-content:space-between; align-items:center; gap:10px; min-height:24px}
 .layhd b{font-weight:500; color:var(--ink)}
 /* a layer's opacity, at the right of its row */
-.lop{margin-left:auto; font-size:11px}
-.lop .scrub{font-size:11px; color:var(--ink3)}
-.lop .val{min-width:2em}
+.lop{margin-left:auto; font-family:var(--mono); font-size:11.5px; color:var(--ink2); border-bottom:1px dotted var(--rule); cursor:ew-resize; min-width:3.4em; text-align:right; user-select:none}
+.lop:hover{border-bottom-color:var(--glass); color:var(--ink)}
+.lop input.valbox{width:3.2em}
+.viewcube{width:124px !important; height:124px !important}
 .laylab{font-size:11px; color:var(--ink3); margin-left:auto}
 .layitem{padding-left:22px}
 .layrow{display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:26px; white-space:nowrap}

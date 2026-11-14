@@ -102,7 +102,7 @@ export class FieldSlices {
     this.grid = grid;
     const planes = v.sections.planes;
     for (const p of planes) p.air.particles = p.air.color !== 'none';
-    this.clearTrails(new Set(planes.filter((p) => p.air.particles)));
+    this.clearTrails(new Set(planes.filter((p) => p.air.particles && !p.off))); // clipping off: its particles go too
     const out = [];
     // The grid's box in view coordinates: slices are cropped to it.
     const gmin = new THREE.Vector3(grid.min[0] - o[0], grid.min[1] - o[1], grid.min[2] - o[2]);

@@ -923,10 +923,11 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     const names = new Set([...[...from].filter(([, v]) => v.angle > 0.01).map(([n]) => n), ...to.keys()]);
     const moves = [...names].some((n) => Math.abs((from.get(n)?.angle || 0) - (to.get(n)?.angle || 0)) > 0.5);
     cancelAnimationFrame(this.swingRaf);
-    if (!moves || !this.glass) { this.sashNow = to; this.setOpenWindows(open, sashes); return; }
+    // swingDirect: the opening slider moves the sash itself, at once
+    if (!moves || !this.glass || this.swingDirect) { this.sashNow = to; this.setOpenWindows(open, sashes); return; }
     const t0 = performance.now();
     const step = (now) => {
-      const k = Math.min(1, (now - t0) / WINDOW_SWING), e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+      const k = Math.min(1, (now - t0) / WINDOW_SWING), e = k; // at an even pace
       if (k >= 1) { this.sashNow = to; this.setOpenWindows(open, sashes); return; }
       const cur = new Map(), shown = new Set(), sh = new Map();
       for (const n of names) {
@@ -1148,7 +1149,18 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     const panel = sash && sashPanel(this.model.windows[name], sash, this.windowOffset(this.model.windows[name]));
     if (panel) found = { ...found, polys: [{ name, vertices: panel }] };
     this.selectedPolys = found?.polys || null;
-    if (found) {
+    if (found?.kind === 'window') {
+      // a window: its glass where it is drawn (at its depth in the wall, or as its sash has swung), not
+      // the wall's depth
+      const polys = panel ? found.polys : found.polys.map((p) => { const n = unitNormal(p.vertices), off = this.windowOffset(p); return { ...p, vertices: p.vertices.map((v) => v.map((x, k) => x + n[k] * off)) }; });
+      const h = new THREE.Group();
+      h.add(new THREE.Mesh(polygonGeometry(polys, this.origin, null), new THREE.MeshBasicMaterial({ color: SELECTED, side: THREE.DoubleSide, transparent: true, opacity: 0.42, depthWrite: false, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 })));
+      h.add(new THREE.LineSegments(edgeGeometry(polys, this.origin), new THREE.LineBasicMaterial({ color: SELECTED, clippingPlanes: this.clipping })));
+      h.renderOrder = 2;
+      this.highlight = h;
+      this.group.add(h);
+      if (frame) this.frame(found.polys);
+    } else if (found) {
       const h = new THREE.Group(), tint = { color: SELECTED, side: THREE.DoubleSide, transparent: true, opacity: 0.42, depthWrite: false, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 };
       const solids = found.polys.map((p) => this.thickOf(p));
       const flat = found.polys.filter((p, i) => !solids[i]);

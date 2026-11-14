@@ -312,6 +312,33 @@ function fadeLayers() {
   if (levelMarks?.svg) levelMarks.svg.style.opacity = String(opacity('levels'));
 }
 for (const el of document.querySelectorAll('[id^="op-"]')) el.addEventListener('input', layerOpacity);
+// A layer's opacity figure: dragged left or right (1% a pixel), or clicked to type it.
+for (const fig of document.querySelectorAll('.lop[data-op]')) {
+  const input = fig.querySelector('input'), show = () => { fig.firstChild.textContent = `${input.value}%`; };
+  const set = (v) => { input.value = String(Math.max(0, Math.min(100, Math.round(v)))); show(); input.dispatchEvent(new Event('input', { bubbles: true })); };
+  fig.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('input')) return;
+    e.preventDefault();
+    const x0 = e.clientX, v0 = Number(input.value);
+    let moved = false;
+    const move = (m) => { if (Math.abs(m.clientX - x0) > 2) moved = true; if (moved) set(v0 + (m.clientX - x0)); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', () => {
+      window.removeEventListener('pointermove', move);
+      if (moved) return;
+      // a click: type it
+      const box = document.createElement('input');
+      box.className = 'valbox';
+      box.value = input.value;
+      fig.firstChild.textContent = '';
+      fig.prepend(box);
+      box.focus(); box.select();
+      const done = (keep) => { const v = Number(box.value.replace('%', '').replace(',', '.').trim()); box.remove(); if (keep && Number.isFinite(v)) set(v); else show(); };
+      box.addEventListener('keydown', (k) => { if (k.key === 'Enter') done(true); else if (k.key === 'Escape') done(false); k.stopPropagation(); });
+      box.addEventListener('blur', () => done(true), { once: true });
+    }, { once: true });
+  });
+}
 for (const el of document.querySelectorAll('[data-sky]')) el.addEventListener('change', () => { sky.set({ layers: { ...sky.layers, [el.dataset.sky]: el.checked } }); legend(); });
 let sliceRanges = {}, sliceTimer = 0, sliceLast = 0;
 // Redraws the slices from the room air: the grid solver's fields, or ideal flow's speed and each
@@ -882,7 +909,9 @@ $('info').addEventListener('input', (e) => {
   if (e.target.dataset?.act !== 'amount') return;
   const name = e.target.dataset.name, a = Number(e.target.value) / 100, l = net.links.find((x) => x.name === name);
   for (const n of scopeOf(name)) { amountSet.set(n, a); windowSet.set(n, a > 0); }
+  view.swingDirect = true; // the sash follows the slider itself
   solveAir();
+  view.swingDirect = false;
   const out = $('info').querySelector(`output[data-for="${CSS.escape(name)}"]`);
   if (out) out.textContent = amountText(l);
 });
@@ -1172,6 +1201,9 @@ function showInfo(found) {
   queueMicrotask(() => ws.selection());
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
   if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; popShut = null; view.clicked = false; return; }
+  // picked in a plan or section a moment ago: the pop-up opens in that view, beside the pick
+  const host = drawnPick && performance.now() - drawnPick.time < 600 && drawnPick.el.isConnected ? drawnPick.el : $('viewer');
+  if (box.parentElement !== host) { host.appendChild(box); popKey = null; }
   const { kind, item } = found, key = `${kind}:${item.name}`;
   // its pop-up closed: the selection stays, the pop-up stays shut until another is selected
   const clicked = view.clicked;
@@ -1190,9 +1222,11 @@ function showInfo(found) {
   if (key !== popKey) { popKey = key; popPinned = false; placePop(); }
 }
 
-// Beside the point picked, inside the view.
+// A pick in a plan or section view: { el (its drawing), x, y (in it), time }.
+let drawnPick = null;
+// Beside the point picked, inside the view (the 3D view's, or the plan or section's it was picked in).
 function placePop() {
-  const box = $('info'), v = $('viewer'), at = view.lastPick;
+  const box = $('info'), v = box.parentElement || $('viewer'), at = v === $('viewer') ? view.lastPick : drawnPick && [drawnPick.x, drawnPick.y];
   if (!at) { Object.assign(box.style, { left: '10px', top: '10px', bottom: '' }); return; }
   const w = box.offsetWidth, h = box.offsetHeight, W = v.clientWidth, H = v.clientHeight;
   const x = Math.max(8, Math.min(at[0] + 16, W - w - 8)), y = Math.max(8, Math.min(at[1] + 12, H - h - 8));
@@ -1210,7 +1244,7 @@ $('info').addEventListener('pointerdown', (e) => {
 // below), never over it; a window being edited keeps room for its figures.
 function followPop() {
   const box = $('info');
-  if (popPinned || box.hidden || !model) return;
+  if (popPinned || box.hidden || !model || box.parentElement !== $('viewer')) return; // in a plan or section, it stays where it opened
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   if (box.dataset.kind === 'plane') {
     // Beside a plane's gumball, clear of its arrows.
@@ -1378,7 +1412,10 @@ function onAir(e) {
   else a[key] = t.value;
   if (key === 'density') t.nextElementSibling.textContent = `×${+a.density.toFixed(2)}`;
   if (key !== 'speed') drawSlices(true);
-  if (e.type === 'change' && key !== 'density' && key !== 'speed') showInfo(current());
+  if (e.type === 'change' && key !== 'density' && key !== 'speed') {
+    if (t.tagName === 'SELECT') t.blur(); // so the pop-up is redrawn with the rows the choice brings or takes
+    showInfo(current());
+  }
   legend();
 }
 $('info').addEventListener('input', onAir);
@@ -2754,12 +2791,16 @@ const ws = workspace({
   planeOf: (id) => planeById(namedViews().find((v) => v.id === id)?.plane),
   onCut3d: cut3d,
   // a plan edited as the 3D view is: its zones, walls and windows picked and pushed, the tools at work
-  editorFor: (d) => new PlanEdit(d, {
+  editorFor: (d) => (d.host.addEventListener('pointerdown', (e) => {
+    const r = d.host.getBoundingClientRect();
+    if (getComputedStyle(d.host).position === 'static') d.host.style.position = 'relative';
+    drawnPick = { el: d.host, x: e.clientX - r.left, y: e.clientY - r.top, time: performance.now() };
+  }, true), new PlanEdit(d, {
     view, tools, massing: () => massing, selected: () => selected,
     select: (name) => { view.select(name); ws.selection(); },
     massingTarget: (name) => { const f = view.find(name); return f && massing ? massingTarget(f) : null; },
     change: massingChange,
-  }),
+  })),
   hasTools: () => !!massing,
   onTake: (rec) => {
     undoStack.push({ undo: () => ws.put(rec), redo: () => ws.take(rec.el), what: 'view removed', view: true });

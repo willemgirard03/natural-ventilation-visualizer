@@ -6,7 +6,7 @@
 
 import * as THREE from 'three';
 
-const SIZE = 112; // CSS px
+const SIZE = 124; // CSS px
 const EDGE = 0.56; // where a face's middle ends and its edges and corners begin, of the half width
 const FACES = [
   // [normal, label, up direction of its text in the cube's frame]
@@ -51,7 +51,8 @@ export class ViewCube {
     view.container.appendChild(el);
 
     this.scene = new THREE.Scene();
-    this.camera = new THREE.OrthographicCamera(-1.9, 1.9, 1.9, -1.9, 0.1, 20);
+    // wide enough for the ring (radius 1.75, 1.05 below the cube's middle) and its north tip at any angle
+    this.camera = new THREE.OrthographicCamera(-2.3, 2.3, 2.3, -2.3, 0.1, 20);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0xb8bec0, 2.6));
     this.cube = new THREE.Group();
     this.scene.add(this.cube);

@@ -15,6 +15,67 @@ import pc from 'polygon-clipping';
 
 const r1 = (x) => Math.round(x * 10) / 10;
 
+// The model's surfaces (walls, floors, roofs; not glass) as occluders in view coordinates: each a plane
+// (normal, a point), its outline in its own 2D basis and its box, made once per model.
+function occluders(view) {
+  if (view._occ?.of === view.surfaces) return view._occ.list;
+  const o = view.origin, list = [];
+  for (const s of view.surfaces || []) {
+    const V = s.vertices.map((p) => new THREE.Vector3(p[0] - o[0], p[1] - o[1], p[2] - o[2]));
+    if (V.length < 3) continue;
+    const n = new THREE.Vector3();
+    for (let i = 0; i < V.length; i++) { const a = V[i], b = V[(i + 1) % V.length]; n.x += (a.y - b.y) * (a.z + b.z); n.y += (a.z - b.z) * (a.x + b.x); n.z += (a.x - b.x) * (a.y + b.y); }
+    if (n.lengthSq() < 1e-12) continue;
+    n.normalize();
+    const e1 = V[1].clone().sub(V[0]).normalize(), e2 = n.clone().cross(e1);
+    const pts = V.map((p) => [p.clone().sub(V[0]).dot(e1), p.clone().sub(V[0]).dot(e2)]);
+    const box = new THREE.Box3().setFromPoints(V).expandByScalar(0.01);
+    list.push({ n, p0: V[0], e1, e2, pts, box });
+  }
+  view._occ = { of: view.surfaces, list };
+  return list;
+}
+// Whether point q (view coordinates) sees the cut: a ray from it along the plane's normal, up to the
+// plane, crossing no surface (a hit within 2 cm of a surface's own edges does not count, so an edge
+// shared with the surface it bounds stays seen).
+function seesCut(view, f, q) {
+  const dist = f.o.clone().sub(q).dot(f.n);
+  if (dist <= 0) return true;
+  const hit = new THREE.Vector3();
+  for (const s of occluders(view)) {
+    const den = s.n.dot(f.n);
+    if (Math.abs(den) < 0.05) continue; // seen edge on: no cover
+    const t = s.p0.clone().sub(q).dot(s.n) / den;
+    if (t < 0.005 || t > dist - 0.005) continue;
+    hit.copy(q).addScaledVector(f.n, t);
+    if (!s.box.containsPoint(hit)) continue;
+    const r = hit.clone().sub(s.p0), x = r.dot(s.e1), y = r.dot(s.e2), P = s.pts;
+    let inside = false, near = Infinity;
+    for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+      const [xi, yi] = P[i], [xj, yj] = P[j];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+      const dx = xj - xi, dy = yj - yi, L = dx * dx + dy * dy, k = L ? Math.max(0, Math.min(1, ((x - xi) * dx + (y - yi) * dy) / L)) : 0;
+      near = Math.min(near, Math.hypot(x - xi - k * dx, y - yi - k * dy));
+    }
+    if (inside && near > 0.02) return false;
+  }
+  return true;
+}
+// The parts of edge A-B (behind the cut) seen from it, as runs [t0, t1] along it: sampled about every
+// 0.25 m, each sample taken 3 cm further from the cut, so an edge lying in a floor (a wall's top under
+// the floor above) is hidden by it.
+function seenRuns(view, f, A, B) {
+  const len = A.distanceTo(B), n = Math.max(2, Math.min(40, Math.ceil(len / 0.25) + 1)), runs = [];
+  let start = null;
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1), q = A.clone().lerp(B, t).addScaledVector(f.n, -0.03);
+    const seen = seesCut(view, f, q);
+    if (seen && start === null) start = Math.max(0, t - 0.5 / (n - 1));
+    if ((!seen || i === n - 1) && start !== null) { runs.push([start, seen ? 1 : Math.min(1, t - 0.5 / (n - 1))]); start = null; }
+  }
+  return runs;
+}
+
 // The plane as seen: a frame { o, u, v, n } in view coordinates; the side n points to is removed, the
 // eye is there, looking along -n. Seen from there, u runs right and v up when u x v = n; otherwise the
 // drawing is mirrored so it is never seen from behind.
@@ -53,10 +114,13 @@ export function cutGeometry(view, f, { depth = Infinity, near = 4 } = {}) {
       if (da > -eps) { A.copy(C); da = 0; } else { B.copy(C); db = 0; }
     }
     if (Math.min(-da, -db) > depth) continue;
-    const ua = A.sub(f.o), ub = B.sub(f.o);
-    const s = [P(new THREE.Vector2(ua.dot(f.u), ua.dot(f.v))), P(new THREE.Vector2(ub.dot(f.u), ub.dot(f.v)))];
-    if (Math.hypot(s[1][0] - s[0][0], s[1][1] - s[0][1]) < 1e-3) continue; // seen end on
-    ((-da - db) / 2 < near ? beyond : far).push(s);
+    // only the parts no surface hides from the cut (a floor over the walls below it, a wall in front)
+    for (const [ta, tb] of seenRuns(view, f, A, B)) {
+      const a = A.clone().lerp(B, ta).sub(f.o), b = A.clone().lerp(B, tb).sub(f.o);
+      const s = [P(new THREE.Vector2(a.dot(f.u), a.dot(f.v))), P(new THREE.Vector2(b.dot(f.u), b.dot(f.v)))];
+      if (Math.hypot(s[1][0] - s[0][0], s[1][1] - s[0][1]) < 1e-3) continue; // seen end on
+      ((-da - db) / 2 < near ? beyond : far).push(s);
+    }
   }
   const all = [...poche.flat(2), ...slabs.flat(2), ...lines.flat(), ...glass.flat(), ...beyond.flat(), ...far.flat()];
   const box = all.length ? all.reduce((b, [x, y]) => [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)], [Infinity, Infinity, -Infinity, -Infinity]) : null;
