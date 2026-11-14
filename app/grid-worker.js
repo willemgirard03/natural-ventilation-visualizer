@@ -23,6 +23,7 @@ import { buildNetwork, solveNetwork } from '../src/solver/network.js';
 import { flowStreams } from '../src/solver/paths.js';
 import { voxelize, prepareRoomFlow } from '../src/solver/roomflow.js';
 import { GridFlow } from '../src/solver/grid.js';
+import { gridFrame, inGridFrame } from '../src/solver/frame.js';
 
 const SAMPLE = 10; // s of air between the snapshots the change is measured over
 const SETTLE_MAX = 300; // s of air: settled at the latest
@@ -38,7 +39,9 @@ self.onmessage = ({ data: m }) => {
   if (m.type === 'model') {
     const model = importEpJSON(m.epjson);
     net = buildNetwork(model);
-    grid = new GridFlow(prepareRoomFlow(voxelize(model, { cell: m.cell ?? 0.5 }), net, model), model);
+    // the cells laid along the building's walls, as the page's (frame.js)
+    const t = inGridFrame(model, net, gridFrame(model));
+    grid = new GridFlow(prepareRoomFlow(voxelize(t.model, { cell: m.cell ?? 0.5 }), t.net, t.model), t.model);
     grid.turbulence = !!m.turbulence;
     running = false;
     still = true;

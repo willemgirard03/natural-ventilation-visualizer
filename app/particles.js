@@ -110,6 +110,7 @@ export class AirflowParticles {
     this.spawnDebt += this.density * this.densityScale * tr.entryTotal * RHO * sim;
     for (; this.spawnDebt >= 1; this.spawnDebt--) if (this.live.length < CAPACITY) this.live.push(this.newParticle());
     const o = this.view.origin, col = new THREE.Color(), every = TRAIL / (HISTORY - 1);
+    const F = tr.g.frame, toW = (p) => [F.cos * p[0] - F.sin * p[1], F.sin * p[0] + F.cos * p[1], p[2]];
     const H = this.heads, T = this.trails;
     let n = 0, segs = 0;
     for (const q of this.live) {
@@ -125,12 +126,13 @@ export class AirflowParticles {
       if (this.colorBy === 'speed') speedColor(Math.hypot(...q.v), col);
       else if (this.colorBy === 'co2') co2Color(this.co2At ? this.co2At(q.p, q.zone) : 400, col);
       else temperatureColor(q.t, col);
-      for (let i = 0; i < 3; i++) H.pos[n * 3 + i] = q.p[i] - o[i];
+      const w = F ? toW(q.p) : q.p; // the grid's axes may be turned to the building's
+      for (let i = 0; i < 3; i++) H.pos[n * 3 + i] = w[i] - o[i];
       H.rgba.set([col.r, col.g, col.b, alpha * 0.95], n * 4);
       // Trail: head to newest remembered position, then back through the rest, fading to nothing.
-      let a = q.p;
+      let a = w;
       for (let j = 0; j < q.hist.length; j++) {
-        const b = q.hist[j];
+        const b = F ? toW(q.hist[j]) : q.hist[j];
         for (let i = 0; i < 3; i++) { T.pos[segs * 6 + i] = a[i] - o[i]; T.pos[segs * 6 + 3 + i] = b[i] - o[i]; }
         T.rgba.set([col.r, col.g, col.b, alpha * 0.85 * (1 - j / HISTORY), col.r, col.g, col.b, alpha * 0.85 * (1 - (j + 1) / HISTORY)], segs * 8);
         segs++;

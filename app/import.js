@@ -12,6 +12,7 @@ import { voxelize, prepareRoomFlow, roomFlow } from '../src/solver/roomflow.js';
 import { GridFlow } from '../src/solver/grid.js';
 import { co2Generation, outdoorAirSupply, outdoorCO2, stepCO2 } from '../src/solver/co2.js';
 import { cellAt } from '../src/solver/roomflow.js';
+import { gridFrame, inGridFrame, toGrid, fromGrid } from '../src/solver/frame.js';
 import { FieldSlices, rampTemperature } from './slices.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
@@ -81,7 +82,7 @@ function zoneUnder(e, h = view.hitAt(e)) {
   const g = rooms.g, o = view.origin;
   for (const back of [0.3, 0.6, 0.9]) {
     const p = h.point.clone().addScaledVector(h.dir, -back);
-    const c = cellAt(g, [p.x + o[0], p.y + o[1], p.z + o[2]]);
+    const c = cellAt(g, toGrid(g.frame, [p.x + o[0], p.y + o[1], p.z + o[2]]));
     if (c >= 0 && g.zone[c] >= 0) return g.zones[g.zone[c]];
   }
   return null;
@@ -352,17 +353,19 @@ function drawSlices(now = false) {
   const wait = 300 - (performance.now() - sliceLast);
   if (!now && wait > 0) { clearTimeout(sliceTimer); sliceTimer = setTimeout(() => drawSlices(true), wait); return; }
   sliceLast = performance.now();
-  const g = rooms.g, fluid = (x, y, z) => { const c = cellAt(g, [x, y, z]); return c >= 0 && g.zone[c] >= 0; };
-  const velocity = simulated ? (x, y, z) => grid.velocityAt([x, y, z])
-    : (x, y, z) => { const c = cellAt(g, [x, y, z]); return [field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]]; };
-  const temperature = simulated ? (x, y, z) => grid.temperatureAt(x, y, z) : (x, y, z) => airflow.conditions.zones[g.zones[g.zone[cellAt(g, [x, y, z])]]]?.t ?? 20;
-  const co2 = (x, y, z) => co2Near([x, y, z]);
+  // points on the cuts are the model's; the grid's own axes may be turned to the building's (frame.js)
+  const g = rooms.g, F = g.frame, L = (x, y, z) => toGrid(F, [x, y, z]);
+  const fluid = (x, y, z) => { const c = cellAt(g, L(x, y, z)); return c >= 0 && g.zone[c] >= 0; };
+  const velocity = simulated ? (x, y, z) => fromGrid(F, grid.velocityAt(L(x, y, z)))
+    : (x, y, z) => { const c = cellAt(g, L(x, y, z)); return fromGrid(F, [field.velocity[3 * c], field.velocity[3 * c + 1], field.velocity[3 * c + 2]]); };
+  const temperature = simulated ? (x, y, z) => grid.temperatureAt(...L(x, y, z)) : (x, y, z) => airflow.conditions.zones[g.zones[g.zone[cellAt(g, L(x, y, z))]]]?.t ?? 20;
+  const co2 = (x, y, z) => co2Near(L(x, y, z));
   const value = (kind, x, y, z) => (kind === 'speed' ? Math.hypot(...velocity(x, y, z)) : kind === 'co2' ? co2(x, y, z) : temperature(x, y, z));
   // The zone a point is in, and each zone's air on average (all of it, not just the cut), worked out
   // once per drawing when first asked; and what is known of the zone: its temperature as the results
   // (or the Indoor setting) give it, its CO2 by the results where they report it, and by the tool's own
   // balance.
-  const zoneAt = (x, y, z) => { const c = cellAt(g, [x, y, z]); return c >= 0 && g.zone[c] >= 0 ? g.zone[c] : -1; };
+  const zoneAt = (x, y, z) => { const c = cellAt(g, L(x, y, z)); return c >= 0 && g.zone[c] >= 0 ? g.zone[c] : -1; };
   let means = null;
   const zoneMean = (zi) => {
     if (!means) {
@@ -405,7 +408,7 @@ function startGrid(m) {
   worker = null; grid = null; gridLive = false;
   $('room-air-status').textContent = '';
   if ($('room-air').value !== 'grid') return;
-  grid = new GridFlow(rooms, m);
+  grid = new GridFlow(rooms, rooms.model);
   worker = new Worker(new URL('./grid-worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }) => {
     if (data.type !== 'state' || !grid) return;
@@ -929,7 +932,16 @@ function co2Message(hourAt, targets, site) {
     supply: Object.fromEntries(outdoorAirSupply(model, net.zones, hourAt, site.elevation).map((m, i) => [net.zones[i], m])),
   };
 }
-// CO2 at a point (model coordinates): the grid solver's field, or with ideal flow its room's level.
+// The rooms divided into the room air's cells, laid along the building's walls (src/solver/frame.js):
+// the model and network turned into the grid's axes go to the solver; the grid keeps its frame.
+function roomsOf(m) {
+  const F = gridFrame(m), t = inGridFrame(m, net, F);
+  const r = prepareRoomFlow(voxelize(t.model, { cell: roomCell() }), t.net, t.model);
+  r.model = t.model;
+  r.g.frame = F;
+  return r;
+}
+// CO2 at a point (the grid's axes): the grid solver's field, or with ideal flow its room's level.
 function co2Near(p, zoneIndex = null) {
   const G = grid, sim = $('room-air').value === 'grid';
   if (sim && G?.co2) return G.co2At(p);
@@ -2180,7 +2192,7 @@ $('play-step').addEventListener('input', () => { playControls(); if (play) play.
 function setQuality(v) {
   $('room-quality').value = v;
   if (!model || !net) return;
-  rooms = prepareRoomFlow(voxelize(model, { cell: roomCell() }), net, model);
+  rooms = roomsOf(model);
   air.setGrid(rooms.g, Object.values(model.zones).reduce((sum, z) => sum + z.volume.value, 0));
   restartAir();
   if (play) { play.regime = null; play.warming = true; }
@@ -2514,7 +2526,7 @@ function render(m) {
   ws.reset(); // a new model: the 3D view alone again
   hover.clear();
   net = buildNetwork(m);
-  rooms = prepareRoomFlow(voxelize(m, { cell: roomCell() }), net, m);
+  rooms = roomsOf(m);
   field = null;
   startGrid(m);
   $('restart-air').disabled = false;
@@ -2581,7 +2593,7 @@ function refreshModel(geometry = true) {
   hover.clear();
   if (geometry) {
     net = buildNetwork(m);
-    rooms = prepareRoomFlow(voxelize(m, { cell: roomCell() }), net, m);
+    rooms = roomsOf(m);
   }
   field = null;
   startGrid(m);

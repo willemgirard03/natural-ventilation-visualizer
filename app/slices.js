@@ -105,8 +105,14 @@ export class FieldSlices {
     this.clearTrails(new Set(planes.filter((p) => p.air.particles && !p.off))); // clipping off: its particles go too
     const out = [];
     // The grid's box in view coordinates: slices are cropped to it.
-    const gmin = new THREE.Vector3(grid.min[0] - o[0], grid.min[1] - o[1], grid.min[2] - o[2]);
-    const gmax = gmin.clone().add(new THREE.Vector3(grid.nx, grid.ny, grid.nz).multiplyScalar(grid.h));
+    // (its corners turned out of the grid's own axes, where they are turned to the building's)
+    const F = grid.frame, W = (p) => (F ? [F.cos * p[0] - F.sin * p[1], F.sin * p[0] + F.cos * p[1], p[2]] : p);
+    const box = new THREE.Box3();
+    for (let c = 0; c < 8; c++) {
+      const p = W([0, 1, 2].map((k) => grid.min[k] + ((c >> k) & 1) * [grid.nx, grid.ny, grid.nz][k] * grid.h));
+      box.expandByPoint(new THREE.Vector3(p[0] - o[0], p[1] - o[1], p[2] - o[2]));
+    }
+    const gmin = box.min, gmax = box.max;
     planes.forEach((p, i) => {
       const { field, particles } = p.air;
       if (p.off || (!field && !particles)) return;
@@ -204,10 +210,15 @@ export class FieldSlices {
   // plane's own first, then the others.
   showProbe(found, e) {
     if (!found) { if (this.cross.visible || !this.tag.hidden) { this.cross.visible = false; this.tag.hidden = true; this.view.render(); } return; }
-    const { point, plane } = found, s = this.sample, g = this.grid, o = this.view.origin;
-    const idx = [0, 1, 2].map((k) => Math.floor((point[k] - g.min[k]) / g.h));
-    const lo = idx.map((i, k) => g.min[k] + i * g.h - o[k]), hi = lo.map((x) => x + g.h);
-    const P = (a, b, c) => new THREE.Vector3(a ? hi[0] : lo[0], b ? hi[1] : lo[1], c ? hi[2] : lo[2]);
+    const { point, plane } = found, s = this.sample, g = this.grid, o = this.view.origin, F = g.frame;
+    // in the grid's own axes (turned to the building's, where they are), and its corners turned back
+    const lp = F ? [F.cos * point[0] + F.sin * point[1], -F.sin * point[0] + F.cos * point[1], point[2]] : point;
+    const idx = [0, 1, 2].map((k) => Math.floor((lp[k] - g.min[k]) / g.h));
+    const lo = idx.map((i, k) => g.min[k] + i * g.h), hi = lo.map((x) => x + g.h);
+    const P = (a, b, c) => {
+      const q = [a ? hi[0] : lo[0], b ? hi[1] : lo[1], c ? hi[2] : lo[2]], w = F ? [F.cos * q[0] - F.sin * q[1], F.sin * q[0] + F.cos * q[1], q[2]] : q;
+      return new THREE.Vector3(w[0] - o[0], w[1] - o[1], w[2] - o[2]);
+    };
     const ends = [];
     for (const [a, b] of [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]]) {
       const v = (n) => P(n & 1, (n >> 1) & 1, (n >> 2) & 1);

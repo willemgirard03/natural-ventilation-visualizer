@@ -355,3 +355,26 @@ for (const type of ['hopper', 'awning']) {
     assert.match(report, / 0 not converged/);
   });
 }
+
+test('grid frame: the cells lie along the building\'s walls, and the solver runs in those axes', { skip: existsSync(path.join(REPO, 'data', 'Emmenweid 2226.epJSON')) ? false : 'example not here' }, async () => {
+  const { readFileSync } = await import('node:fs');
+  const { gridFrame, inGridFrame, toGrid, fromGrid } = await import('../src/solver/frame.js');
+  const { voxelize, prepareRoomFlow } = await import('../src/solver/roomflow.js');
+  const { flowStreams } = await import('../src/solver/paths.js');
+  const { GridFlow } = await import('../src/solver/grid.js');
+  const model = importEpJSON(JSON.parse(readFileSync(path.join(REPO, 'data', 'Emmenweid 2226.epJSON'), 'utf8')));
+  const F = gridFrame(model);
+  near((F.angle * 180) / Math.PI, 5.89, 0.05, 'Emmenweid runs about 6 degrees off the model\'s axes');
+  const p = [3.2, -7.5, 4];
+  fromGrid(F, toGrid(F, p)).forEach((x, k) => near(x, p[k], 1e-9, 'turned and back'));
+  const net = buildNetwork(model), t = inGridFrame(model, net, F);
+  assert.equal(gridFrame(t.model), null, 'turned, its walls run along the grid\'s axes');
+  const zones = Object.fromEntries(Object.keys(model.zones).map((z) => [z, { t: 25, w: 0.008 }]));
+  const cond = { site: { elevation: 0, latitude: 49 }, zones, outdoor: { t: 18, w: 0.008, pressure: 101325, windSpeed: 3, windDirection: 270 } };
+  const grid = new GridFlow(prepareRoomFlow(voxelize(t.model, { cell: 1 }), t.net, t.model), t.model);
+  grid.setConditions(flowStreams(net, solveNetwork(net, cond), cond), cond);
+  for (let s = 0; s < 20; s++) grid.step();
+  let worst = 0;
+  for (const c of grid.fluid) worst = Math.max(worst, Math.abs(grid.divergence(c)));
+  assert.ok(worst < 1e-3, `air conserved in every cell (${worst})`);
+});
