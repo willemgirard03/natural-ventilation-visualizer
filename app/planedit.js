@@ -44,6 +44,48 @@ export class PlanEdit {
       level: () => { const v = this.d.item; return v?.kind === 'plan' && Number.isInteger(v.level) ? v.level : null; },
     };
     this.unregister = api.tools.register(this.ctx);
+    // Tab over a wall: the walls chained to it (end to end) offered, and picked by the next click
+    this.onKey = (e) => {
+      if (e.key !== 'Tab' || !this.over || this.api.tools.tool || e.target.closest?.('input, select, textarea')) return;
+      if (!this.hover || !['surface', 'wall'].includes(this.hover.kind)) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      this.chain = this.chain ? null : this.chainOf(this.hover.name);
+      this.paint();
+    };
+    addEventListener('keydown', this.onKey, true);
+  }
+  // The walls (zone walls cut here, and drawn walls standing free) joined end to end with this one.
+  chainOf(name) {
+    const c = this.picks();
+    if (!c) return [name];
+    const all = [...c.walls, ...c.free], key = (p) => `${p[0].toFixed(2)},${p[1].toFixed(2)}`, ends = (w) => [key(w.seg[0]), key(w.seg[1])];
+    const seen = new Set([name]), todo = [all.find((w) => w.name === name)].filter(Boolean);
+    while (todo.length) {
+      const w = todo.pop(), [a, b] = ends(w);
+      for (const o of all) if (!seen.has(o.name) && ends(o).some((k) => k === a || k === b)) { seen.add(o.name); todo.push(o); }
+    }
+    return [...seen];
+  }
+  // A zone's walls cut by this plan.
+  zoneWalls(zone) { return (this.picks()?.walls || []).filter((w) => w.zone === zone).map((w) => w.name); }
+  // What a box holds (window: the box drawn to the right) or touches (crossing: to the left), on this
+  // plan's level: each item's points all inside it, or any inside it or any of its edges crossing it.
+  inBox(bx) {
+    const c = this.picks();
+    if (!c) return [];
+    const [x0, y0] = this.d.fromPx(Math.min(bx.x0, bx.x1), Math.min(bx.y0, bx.y1)), [x1, y1] = this.d.fromPx(Math.max(bx.x0, bx.x1), Math.max(bx.y0, bx.y1));
+    const lo = [Math.min(x0, x1), Math.min(y0, y1)], hi = [Math.max(x0, x1), Math.max(y0, y1)], crossing = bx.x1 < bx.x0;
+    const inR = (p) => p[0] >= lo[0] && p[0] <= hi[0] && p[1] >= lo[1] && p[1] <= hi[1];
+    const R = [[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]];
+    const cross = (a, b, c2, d) => { const o = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]); return o(a, b, c2) * o(a, b, d) < 0 && o(c2, d, a) * o(c2, d, b) < 0; };
+    const touches = (loops) => loops.some((L) => L.some(inR) || L.some((p, i) => R.some((q, j) => cross(p, L[(i + 1) % L.length], q, R[(j + 1) % 4]))) || R.some((q) => inside(L, q)));
+    const holds = (loops) => loops.every((L) => L.every(inR));
+    const test = (loops) => (crossing ? touches(loops) : holds(loops));
+    const out = [];
+    for (const w of [...c.walls, ...c.free]) if (test(w.loops.length ? w.loops : [w.seg])) out.push(w.name);
+    for (const w of c.windows) if (test([w.seg])) out.push(w.name);
+    for (const z of c.zones) if (test(z.polys)) out.push(z.name);
+    return out;
   }
 
   px(e) { const r = this.d.host.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
@@ -161,7 +203,14 @@ export class PlanEdit {
     if (!ov || !this.picks()) { if (ov) ov.innerHTML = ''; return; }
     let g = '';
     const sel = this.api.selected(), selPick = sel && this.find(sel);
+    for (const n of this.api.selection?.() || []) { if (n === sel) continue; const f = this.find(n); if (f) g += this.outline(f, { stroke: 'var(--glass)', w: 1.2 }); }
     if (selPick) g += this.outline(selPick, { stroke: 'var(--glass)', w: 1.5 });
+    for (const n of this.chain || []) { const f = this.find(n); if (f) g += this.outline(f, { stroke: 'var(--glass)', w: 2.4, dash: '6 4' }); }
+    for (const n of this.api.mergeAsk?.() || []) { const f = this.find(n); if (f) g += this.outline(f, { stroke: '#D9822B', w: 3 }); }
+    if (this.box) {
+      const b = this.box, x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1);
+      g += `<rect x="${x}" y="${y}" width="${Math.abs(b.x1 - b.x0)}" height="${Math.abs(b.y1 - b.y0)}" fill="var(--glass)" fill-opacity="0.06" stroke="var(--glass)" stroke-width="1"${b.x1 < b.x0 ? ' stroke-dasharray="5 3"' : ''}/>`;
+    }
     if (this.hover && this.hover.name !== sel && !this.api.tools.tool) g += this.outline(this.hover, { stroke: 'var(--glass)', w: 2.6, dash: '6 4' });
     this.grips = [];
     if (!this.drag) this.figs = null;
@@ -323,6 +372,12 @@ export class PlanEdit {
 
   // ---------- the pointer (left button; the drawing pans with the others) ----------
   move(e) {
+    this.over = true;
+    if (this.press && !this.drag) {
+      const dx = e.clientX - this.press.x, dy = e.clientY - this.press.y;
+      if (!this.box && Math.hypot(dx, dy) > CLICK_PX) { const [x, y] = this.px({ clientX: this.press.x, clientY: this.press.y }); this.box = { x0: x, y0: y, x1: x, y1: y }; }
+      if (this.box) { [this.box.x1, this.box.y1] = this.px(e); this.paint(); return; }
+    }
     if (this.drag) {
       const r = this.drag, dx = e.clientX - r.x0, dy = e.clientY - r.y0;
       if (!r.moved && Math.hypot(dx, dy) < CLICK_PX) return;
@@ -360,9 +415,9 @@ export class PlanEdit {
     const fg = !g && this.figAt(e);
     if (fg) { this.d.host.style.cursor = 'ew-resize'; return; }
     this.d.host.style.cursor = g ? (g.end || g.span !== undefined ? 'move' : Math.abs(g.dir[0]) > Math.abs(g.dir[1]) ? 'ew-resize' : 'ns-resize') : h ? 'pointer' : '';
-    if ((h?.name || null) !== (this.hover?.name || null)) { this.hover = h; this.paint(); }
+    if ((h?.name || null) !== (this.hover?.name || null)) { this.hover = h; if (!this.chain?.includes(h?.name)) this.chain = null; this.paint(); }
   }
-  leave() { if (this.hover) { this.hover = null; this.paint(); } }
+  leave() { this.over = false; if (this.hover || this.chain) { this.hover = null; this.chain = null; this.paint(); } }
   down(e) {
     if (this.api.tools.tool) { this.api.tools.press(e); return; }
     if (this.api.placing?.()) { if (this.offer && !this.offer.problem) this.api.placeOffer(this.offer); return; }
@@ -414,7 +469,7 @@ export class PlanEdit {
       this.drag = null;
       this.d.host.releasePointerCapture?.(e.pointerId);
       // pressed and let go where it was: picked
-      if (r.press && !r.moved) { this.api.select(r.press); this.paint(); return; }
+      if (r.press && !r.moved) { this.api.selectNames(this.chain?.includes(r.press) ? this.chain : [r.press], e.shiftKey); this.chain = null; this.paint(); return; }
       if (r.win) {
         if (r.moved && r.w && Math.abs(r.w - r.W) > 1e-6) this.api.windowWidth(r.win, r.w);
         else if (!r.moved) askNumber(this.d.host, e, `width mm, now ${Math.round(r.W * 1000)}`, (x) => { if (x >= 300) this.api.windowWidth(r.win, x / 1000); this.paint(); });
@@ -449,13 +504,18 @@ export class PlanEdit {
       this.paint();
       return;
     }
-    const p = this.press;
-    this.press = null;
+    const p = this.press, box = this.box;
+    this.press = null; this.box = null;
+    // a box: what it holds (drawn to the right) or touches (to the left); Shift adds it
+    if (box) { this.api.selectNames(this.inBox(box), e.shiftKey); this.paint(); return; }
     if (!p || Math.hypot(e.clientX - p.x, e.clientY - p.y) > CLICK_PX) return;
     const h = this.pickAt(e);
-    this.api.select(h ? h.name : null);
+    // a zone comes with its walls; Tab's chain whole; Shift adds to what is selected
+    const names = !h ? [] : this.chain?.includes(h.name) ? this.chain : h.kind === 'zone' ? [...this.zoneWalls(h.name), h.name] : [h.name];
+    this.chain = null;
+    this.api.selectNames(names, e.shiftKey);
   }
-  dispose() { this.unregister?.(); }
+  dispose() { this.unregister?.(); removeEventListener('keydown', this.onKey, true); }
 }
 
 // The edges of polygons (plan points) that no other of them shares: their outline as one. Each edge is

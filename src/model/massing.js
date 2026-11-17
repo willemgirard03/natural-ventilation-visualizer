@@ -1585,10 +1585,37 @@ export function freeWalls(m) {
 export function addWall(m, { a, b, base, top, asm = GENERIC_ASSEMBLIES.facade[0], line = 'centre', side = 1 }) {
   if (len2(sub2(b, a)) < 0.05 || top <= base) return null;
   m.walls ||= [];
+  [a, b] = reachWalls(m, a, b, base, top);
   const w = { id: nextWallId(m), a: a.map(R6), b: b.map(R6), base, top, asm, line, side };
   m.walls.push(w);
   const split = splitByWall(m, w), made = enclose(m, base, top);
   return { id: w.id, split, made };
+}
+
+// A new wall's ends carried on to the line of the wall (or zone edge) each points at, where that is
+// within REACH: drawn to another wall's face rather than its line, a wall still joins it, as walls join
+// in Revit, so the space it closes becomes a zone. Ends already on a line stay.
+const REACH = 0.5; // m: more than a wall's thickness, less than a gap meant as an opening
+function reachWalls(m, a, b, base, top) {
+  const lvz = (L) => m.levels[L].z, over = (x) => Math.min(lvz(x.top), lvz(top)) - Math.max(lvz(x.base), lvz(base)) > 1e-6;
+  const segs = [...(m.walls || []).filter(over).map((w) => [w.a, w.b])];
+  for (const z of m.zones) if (over(z)) z.plate.forEach((p, k) => segs.push([p, z.plate[(k + 1) % z.plate.length]]));
+  const reach = (end, from) => {
+    const D = sub2(end, from), L = len2(D);
+    if (L < 1e-9) return end;
+    const u = [D[0] / L, D[1] / L];
+    let best = null;
+    for (const [p, q] of segs) {
+      const e = sub2(q, p), den = cross2(u, e);
+      if (Math.abs(den) < 1e-9) continue;
+      const t = cross2(sub2(p, end), e) / den, s = cross2(sub2(p, end), u) / den; // t: past the end along u; s: along the segment
+      if (s < -1e-6 || s > 1 + 1e-6) continue;
+      if (Math.abs(t) < 1e-4) return end; // on a line already
+      if (t > 0 && t <= REACH && (!best || t < best)) best = t;
+    }
+    return best ? [end[0] + u[0] * best, end[1] + u[1] * best] : end;
+  };
+  return [reach(a, b), reach(b, a)];
 }
 
 // The zones on the wall's levels it runs right across (between two of its faces) cut along it.

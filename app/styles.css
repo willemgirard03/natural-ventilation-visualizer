@@ -204,7 +204,7 @@ footer{padding:18px 24px 40px; font-size:12px; color:var(--ink3); max-width:88ch
 .calcbar input[type=number]{width:5.2em}
 
 /* placing a section plane: dragged in from the bar, or a click on the button then on the view */
-body.placing .viewer, body.placing .viewer *{cursor:crosshair !important}
+body.placing .viewer, body.placing .viewer *, body.placing .draw2d, body.placing .draw2d *{cursor:crosshair !important}
 body.placedrag, body.placedrag *{cursor:copy !important; user-select:none}
 /* a distance typed after a click on a gumball arrow */
 .floatedit{position:absolute; z-index:80; width:7em; font-family:var(--mono); font-size:12px; padding:1px 4px; border:1px solid var(--glass); border-radius:2px; background:var(--panel); color:var(--ink); box-shadow:0 2px 8px rgba(0,0,0,.15)}
@@ -506,3 +506,5 @@ body.bartucked .calcbar>.ribbon{display:none}
 .cprow{display:flex; align-items:center; gap:6px}
 .cpnow{width:22px; height:16px; border:1px solid var(--rule); border-radius:2px}
 .cphex{width:76px; font-family:var(--mono); font-size:11px; padding:2px 4px; border:1px solid var(--rule); border-radius:2px; background:var(--panel); color:var(--ink)}
+
+/* a box drawn to select in a plan: solid left to right (what it holds), dashed right to left (what it touches) */

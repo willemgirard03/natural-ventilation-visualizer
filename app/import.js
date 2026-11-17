@@ -39,7 +39,7 @@ import {
   massing0, massingBlank, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
   setArray, setBy, addWindows, setWindowSize, setWindowFigure, breakWindow, revertWindow, applyToArray, spreadSide, dragPitch, wallLine, freeWalls,
-  WALL_LINES, setFaceLine, flipWall, deleteWall,
+  WALL_LINES, setFaceLine, flipWall, deleteWall, wallsOn, sharingFaces, mergeZones,
 } from '../src/model/massing.js';
 import { PRESETS, SIZES } from '../src/model/windows.js';
 import { massingPanel } from './massing-panel.js';
@@ -1248,6 +1248,17 @@ Promise.all([fetch('/examples/').then((r) => (r.ok ? r.json() : [])).catch(() =>
 let popKey = null, popMin = false, layersOpen = false, popPinned = false, popShut = null; // popShut: the selection whose pop-up was closed
 function showInfo(found) {
   const box = $('info');
+  // A room picked while a deleted wall asks which room's settings to keep: that one.
+  if (mergeAsk && found?.kind === 'zone') { const i = massingGeometry(massing).findIndex((z) => z.name === found.item.name); if (mergeAsk.zones.includes(i)) { mergeKeep(i); return; } }
+  // The selection: many things at once (a box, Shift, a zone with its walls, Tab's chain). A plain
+  // pick of one thing selects it alone; with Shift it is added (or, already selected, let go).
+  const nm = found && found.kind !== 'plane' ? found.item?.name : null;
+  if (!keepSelection) {
+    const add = view.addMode && !!selected && !!nm;
+    if (add) { const s = new Set(selection.size ? selection : [selected]); if (s.has(nm) && s.size > 1) s.delete(nm); else s.add(nm); selection = s; }
+    else if (!nm || view.clicked || !selection.has(nm)) selection = new Set(nm ? [nm] : []);
+    view.addMode = false;
+  }
   // a window of a massing: the Zones window turns to its zone and face
   const at = massing && found?.kind === 'window' && massingWindow(massing, found.item.name);
   if (at && !$('massing').hidden) massingUI.show(at.zone, at.face);
@@ -1276,6 +1287,20 @@ function showInfo(found) {
   popShut = null;
   // Not redrawn under a figure being typed, unless the selection changed.
   if (key === popKey && box.contains(document.activeElement) && document.activeElement.matches('input:not([type=range]), select')) return;
+  // several things: their number, what kinds, and Delete (a zone's own walls go with it, not counted)
+  const principal = principalOf(selection);
+  if (principal.length > 1) {
+    box.dataset.kind = 'many';
+    const kinds = {};
+    for (const n of principal) { const k = kindOf(n); kinds[k] = (kinds[k] || 0) + 1; }
+    box.innerHTML = `<div class="pophd" title="Drag to move"><span class="popttl">${principal.length} selected</span><span class="popbtns"><button type="button" data-pop="close" title="Close this pop-up; the selection stays (Esc lets it go)">×</button></span></div>`
+      + `<div class="popbody"><div class="muted">${Object.entries(kinds).map(([k, v]) => `${v} ${k}${v === 1 ? '' : 's'}`).join(' · ')}</div>`
+      + `<div class="poprow">${principal.slice(0, 12).map((n) => `<button type="button" class="pbtn" data-pick-one="${esc(n)}" title="Select this one alone">${esc(n.replace(/^wall:/, 'Wall '))}</button>`).join(' ')}${principal.length > 12 ? ` … ${principal.length - 12} more` : ''}</div>`
+      + `<div class="poprow"><button type="button" class="pbtn danger" data-act="multi-del" title="Delete them (Delete): zones, drawn walls and windows; a zone's walls go with it">Delete</button></div></div>`;
+    box.hidden = false;
+    if (key !== popKey) { popKey = key; popPinned = false; placePop(); }
+    return;
+  }
   const { title, rows } = popContent(kind, item);
   box.dataset.kind = kind;
   box.innerHTML = `<div class="pophd" title="Drag to move"><span class="popttl">${title}</span><span class="popbtns">`
@@ -2694,6 +2719,114 @@ view.renderer.domElement.addEventListener('pointermove', (e) => {
 });
 view.placeAt = () => { if (!placing) return false; placeOffer(offer3d); return true; };
 addEventListener('keydown', (e) => { if (placing && e.key === 'Escape') { setPlacing(null); e.stopImmediatePropagation(); } }, true);
+// ---------- the selection ----------
+let selection = new Set(), keepSelection = false;
+// Selects names (the last the one whose pop-up and handles show); add: to what is selected (one already
+// selected, added again alone, is let go).
+function selectNames(names, add = false) {
+  names = names.filter(Boolean);
+  let next;
+  if (add) {
+    next = new Set(selection.size ? selection : selected ? [selected] : []);
+    if (names.length === 1 && next.has(names[0]) && next.size > 1) next.delete(names[0]); else for (const n of names) next.add(n);
+  } else next = new Set(names);
+  const primary = names.length && next.has(names[names.length - 1]) ? names[names.length - 1] : [...next].pop() ?? null;
+  selection = next;
+  keepSelection = true;
+  try { view.select(primary); } finally { keepSelection = false; }
+  if (primary) showInfo(current());
+  ws.selection();
+}
+// What a thing selected is, in a word.
+function kindOf(n) {
+  if (String(n).startsWith('wall:')) return 'wall';
+  const f = view.find(n);
+  return f?.kind === 'surface' ? 'wall' : f?.kind || 'item';
+}
+// The things selected that count on their own: a zone's walls go with their zone.
+function principalOf(set) {
+  return [...set].filter((n) => { const f = !String(n).startsWith('wall:') && view.find(n); return !(f?.kind === 'surface' && set.has(f.item.zone)); });
+}
+// Delete on several: zones (a massing's), drawn walls and an imported model's windows, at once.
+function deleteMany() {
+  const names = principalOf(selection);
+  const zones = massing ? massingGeometry(massing) : [], zi = names.map((n) => zones.findIndex((z) => z.name === n)).filter((i) => i >= 0);
+  const walls = names.filter((n) => String(n).startsWith('wall:')).map((n) => Number(n.slice(5)));
+  const wins = !massing ? names.filter((n) => model.windows[n]) : [];
+  selection = new Set();
+  view.select(null);
+  if (massing && (zi.length || walls.length)) massingChange((x) => { for (const id of walls) deleteWall(x, id); for (const i of zi.sort((a, b) => b - a)) deleteZone(x, i); }, `${zi.length + walls.length} deleted`);
+  if (wins.length) applyEdit((tx) => { for (const n of wins) tx.remove('FenestrationSurface:Detailed', n); }, `${wins.length} windows deleted`, { geometry: true });
+}
+$('info').addEventListener('click', (e) => {
+  const one = e.target.closest('[data-pick-one]');
+  if (one) { selectNames([one.dataset.pickOne]); return; }
+  if (e.target.closest('button[data-act="multi-del"]')) deleteMany();
+});
+
+// ---------- a wall between rooms deleted: which room's settings to keep ----------
+// The rooms either side light up (orange); a click on one of them, or its button, keeps its settings
+// for the room they make together; Esc or Cancel leaves the wall.
+let mergeAsk = null, mergeMarks = null;
+function deleteWallAsk({ walls = [], zones = [] }) {
+  const same = zones.filter((i) => massing.zones[i] && massing.zones[i].base === massing.zones[zones[0]].base && massing.zones[i].top === massing.zones[zones[0]].top);
+  if (same.length < 2) { if (walls.length) massingChange((x) => { for (const id of walls) deleteWall(x, id); }, 'wall deleted'); return; }
+  mergeAsk = { walls, zones: same };
+  const names = same.map((i) => zoneName(massing, i)), box = $('info');
+  box.dataset.kind = 'merge';
+  box.innerHTML = `<div class="pophd"><span class="popttl">Delete wall · one room</span></div><div class="popbody"><div class="muted">The rooms either side become one. Keep the settings of:</div>`
+    + `<div class="poprow">${names.map((n, k) => `<button type="button" class="pbtn" data-merge-keep="${same[k]}">${esc(n)}</button>`).join(' ')}</div>`
+    + '<div class="poprow"><button type="button" class="pbtn" data-merge-cancel>Cancel</button></div></div>';
+  box.hidden = false;
+  popKey = 'merge'; popPinned = false; placePop();
+  markMerge(names);
+  ws.selection();
+}
+function markMerge(names) {
+  if (mergeMarks) { mergeMarks.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); }); view.scene.remove(mergeMarks); mergeMarks = null; }
+  if (names?.length) {
+    const o = view.origin, pos = [];
+    for (const n of names) for (const p of view.find(n)?.polys || []) p.vertices.forEach((a, i) => { const b = p.vertices[(i + 1) % p.vertices.length]; pos.push(a[0] - o[0], a[1] - o[1], a[2] - o[2], b[0] - o[0], b[1] - o[1], b[2] - o[2]); });
+    mergeMarks = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)), new THREE.LineBasicMaterial({ color: '#D9822B', depthTest: false }));
+    mergeMarks.renderOrder = 41;
+    mergeMarks.userData.noSection = true;
+    view.scene.add(mergeMarks);
+  }
+  view.render();
+}
+function mergeEnd() { mergeAsk = null; markMerge(null); $('info').hidden = true; popKey = null; ws.selection(); }
+function mergeKeep(i) {
+  const { walls, zones } = mergeAsk;
+  mergeEnd();
+  let why = null;
+  massingChange((x) => {
+    for (const id of walls) deleteWall(x, id);
+    const r = mergeZones(x, [i, ...zones.filter((z) => z !== i)], false);
+    if (typeof r === 'string') why = r;
+  }, 'wall deleted; rooms made one');
+  if (why) popMessage(why);
+}
+$('info').addEventListener('click', (e) => {
+  const k = e.target.closest('[data-merge-keep]');
+  if (k && mergeAsk) { mergeKeep(Number(k.dataset.mergeKeep)); return; }
+  if (e.target.closest('[data-merge-cancel]') && mergeAsk) mergeEnd();
+});
+addEventListener('keydown', (e) => { if (mergeAsk && e.key === 'Escape') { mergeEnd(); e.stopImmediatePropagation(); } }, true);
+// The rooms a drawn wall, or a zone's wall shared with another zone, stands between.
+function wallBetween(found) {
+  if (!massing || !found) return null;
+  if (found.kind === 'wall') {
+    const j = (massing.walls || []).findIndex((w) => w.id === found.item.id), zones = new Set();
+    massing.zones.forEach((z, i) => z.plate.forEach((_, k) => { if (wallsOn(massing, i, k).includes(j)) zones.add(i); }));
+    return { walls: [found.item.id], zones: [...zones] };
+  }
+  const t = found.kind === 'surface' && massingTarget(found);
+  if (!t || !Number.isInteger(t.face)) return null;
+  const others = sharingFaces(massing, t.zone, t.face).map(([j]) => j);
+  if (!others.length) return null;
+  return { walls: wallsOn(massing, t.zone, t.face).map((j) => massing.walls[j].id), zones: [t.zone, ...others] };
+}
+
 // A window taken out of an imported model (a massing's windows are its arrays').
 function deleteWindow(name) {
   if (!model?.windows[name]) return;
@@ -2825,6 +2958,12 @@ document.addEventListener('keydown', (e) => {
     else if (levelEdits.selected === null && !tools.tool) { $('massing').hidden = true; $('library').hidden = true; }
   } else if (e.key === ' ' && massing && selected && !tools.tool) {
     if (flipSelected()) e.preventDefault();
+  } else if (e.key === 'Delete' && principalOf(selection).length > 1) {
+    deleteMany();
+    e.preventDefault();
+  } else if (e.key === 'Delete' && massing && wallBetween(current())?.zones.length > 1) {
+    deleteWallAsk(wallBetween(current()));
+    e.preventDefault();
   } else if (e.key === 'Delete' && !massing && current()?.kind === 'window') {
     deleteWindow(current().item.name);
     e.preventDefault();
@@ -2904,7 +3043,7 @@ function onClick(e) {
   if (act === 'layers') { layersOpen = !layersOpen; showInfo(current()); }
   else if (act === 'asm-edit') editAssembly(b.dataset.v);
   else if (act === 'wall-flip' || act === 'fline-flip') flipSelected();
-  else if (act === 'wall-del') { const f = current(); if (f?.kind === 'wall') { view.select(null); massingChange((x) => deleteWall(x, f.item.id), 'wall deleted'); } }
+  else if (act === 'wall-del') { const f = current(); if (f?.kind === 'wall') { const b = wallBetween(f); view.select(null); if (b?.zones.length > 1) deleteWallAsk(b); else massingChange((x) => deleteWall(x, f.item.id), 'wall deleted'); } }
   else if (act === 'layer-del' && base) applyEdit((tx) => removeLayer(tx, base, i), `layer of ${base}`);
   else if (act === 'layer-up' && base) applyEdit((tx) => moveLayer(tx, base, i, -1), `layer of ${base}`);
   else if (act === 'layer-down' && base) applyEdit((tx) => moveLayer(tx, base, i, 1), `layer of ${base}`);
@@ -3001,7 +3140,10 @@ const ws = workspace({
     drawnPick = { el: d.host, x: e.clientX - r.left, y: e.clientY - r.top, cx: e.clientX, cy: e.clientY, time: performance.now() };
   }, true), new PlanEdit(d, {
     view, tools, massing: () => massing, selected: () => selected,
-    select: (name) => { view.select(name); ws.selection(); },
+    select: (name) => { selectNames(name ? [name] : []); },
+    selectNames: (names, add) => selectNames(names, add),
+    selection: () => selection,
+    mergeAsk: () => (mergeAsk ? mergeAsk.zones.map((i) => zoneName(massing, i)) : []),
     placing: () => placing,
     offerAt: (wall, p) => offerAt(wall, p),
     placeOffer: (o) => placeOffer(o),
@@ -3290,16 +3432,18 @@ function faceMiddle(name) {
 // New massing: the starting massing, or a blank one opened in the plan of Level 1 with Draw wall on,
 // for its footprint to be drawn.
 $('new-massing').addEventListener('click', () => newMassing(massing0()));
-$('new-blank').addEventListener('click', () => {
+function newBlank(draw = true) {
   const m = massingBlank();
   m.views = [{ id: 0, kind: 'plan', name: `${m.levels[0].name} plan`, level: 0, cut: 1.2 }];
   if (!newMassing(m)) return;
   ws.swapIn(0);
-  tools.start('wall');
-});
+  if (draw) tools.start('wall');
+}
+$('new-blank').addEventListener('click', () => newBlank(true));
+// First opened: a new massing, in its Level 1 plan (an example or a model can be opened from File)
+setTimeout(() => { if (!model) newBlank(false); }, 0);
 function newMassing(m) {
   if (model && !confirm('Start a new massing in place of the model open now? Export it first to keep it.')) return false;
-  $('new-dd').open = false;
   massing = m;
   model = importEpJSON(massingEpJSON(massing, { weather }), { fileName: 'Massing.epJSON' });
   $('status').textContent = '';

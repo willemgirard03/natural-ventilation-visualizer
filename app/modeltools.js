@@ -113,7 +113,9 @@ export class ModelTools {
       if (this.dragged) { this.commit(e); this.stop(); }
     };
     const key = (e) => {
-      if (e.target.closest?.('input, select, textarea')) return;
+      // typed into a box, the keys are the box's; a checkbox or slider pressed last keeps no keys from the
+      // tool (Space flips the location line rather than ticking Chain again, Esc stops)
+      if (e.target.closest?.('select, textarea, input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button])')) return;
       // Draw wall, after its start: a length typed (mm) holds the wall to it, the pointer giving its way
       if (this.tool === 'wall' && this.wall?.start && (/^[0-9.,]$/.test(e.key) || (e.key === 'Backspace' && this.wall.typed))) {
         e.preventDefault(); e.stopImmediatePropagation();
@@ -441,6 +443,18 @@ export class ModelTools {
         const q = [start[0] + u[0] * s2, start[1] + u[1] * s2];
         if (d(q, p) < 10) { p = q; kind = 'cross'; break; }
       }
+      // else in line with a wall's end across x or y of the plan, along the held angle
+      if (kind === 'angle') {
+        let best = null;
+        for (const q of segs.flatMap(([a, b]) => [a, b])) {
+          for (const k of [0, 1]) {
+            if (Math.abs(u[k]) < 1e-6) continue;
+            const t2 = (q[k] - start[k]) / u[k], c = [start[0] + u[0] * t2, start[1] + u[1] * t2], dd = d(c, p);
+            if (t2 > 0 && dd < 8 && (!best || dd < best.dd)) best = { c, q, dd };
+          }
+        }
+        if (best) return { p: best.c, kind: 'align', refs: [best.q] };
+      }
       return { p, kind };
     }
     let best = null;
@@ -521,12 +535,6 @@ export class ModelTools {
           }
           const a = this.P([s0[0], s0[1], z0]);
           g += line(a[0], a[1], at[0], at[1], { stroke: 'var(--glass)', w: 1.2, dash: '6 3' });
-          // the side the exterior finish is drawn on, as a short tick off the line's middle
-          if (pr.line !== 'centre' && len > 0.05) {
-            const u = [(p[0] - s0[0]) / len, (p[1] - s0[1]) / len], side = this.wall.side, n = [-u[1] * side, u[0] * side], mid = [(s0[0] + p[0]) / 2, (s0[1] + p[1]) / 2];
-            const q0 = this.P([mid[0], mid[1], z0]), q1 = this.P([mid[0] + n[0] * 0.6, mid[1] + n[1] * 0.6, z0]);
-            g += line(q0[0], q0[1], q1[0], q1[1], { stroke: 'var(--glass)', w: 1.4, dash: '3 2' });
-          }
           g += label((a[0] + at[0]) / 2, (a[1] + at[1]) / 2 - 12, `${typed ? `${this.wall.typed} mm typed` : `${Math.round(len * 1000)} mm`} · ${Math.round(((ang % 360) + 360) % 360)}°`, { size: 9, fill: 'var(--glass)' });
         }
         return g;

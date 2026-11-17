@@ -495,3 +495,10 @@ test('Corner joins two walls where their lines cross; Extend takes one to anothe
   moveWall(m, 6, [0, 1]);
   assert.deepEqual(m.walls[6].a, [8, 3]);
 });
+
+test('a wall drawn to another wall\'s face (short of its line) still joins it and closes the space', async () => {
+  const M = await import('../src/model/massing.js');
+  const make = (inner) => { const m = M.massingBlank(); for (const [a, b] of [[[0, 0], [10, 0]], [[10, 0], [10, 6]], [[10, 6], [0, 6]], [[0, 6], [0, 0]], inner]) M.addWall(m, { a, b, base: 0, top: 1, line: 'exterior' }); return m; };
+  assert.equal(make([[4, 0.2], [4, 5.8]]).zones.length, 2, 'to the faces 0.2 m in: two rooms');
+  assert.equal(make([[4, 1], [4, 5]]).zones.length, 1, 'a metre short: it stands free');
+});

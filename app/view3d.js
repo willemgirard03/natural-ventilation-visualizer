@@ -358,6 +358,7 @@ export class View3D {
       if (e.button !== 0 || !down) return;
       const moved = Math.hypot(e.clientX - down[0], e.clientY - down[1]);
       down = null;
+      this.addMode = e.shiftKey; // Shift: added to what is selected
       if (moved < 5 && !this.placeAt?.(e)) this.pickAt(e); // a placing tool (Window) takes the click first
     });
 

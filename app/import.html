@@ -28,10 +28,8 @@
 <div class="calcbar" id="drop">
   <div class="ribbon" data-panel="file">
     <span class="ribgrp"><span class="ribttl">Model</span><label class="minibtn" for="file">Open .epJSON</label><input type="file" id="file" accept=".epJSON,.epjson,.json">
-      <details class="dd" id="new-dd"><summary title="Model a building from scratch, written as an EnergyPlus model like ClimateStudio's, ready to run">New massing</summary><div class="ddmenu">
-        <div class="layrow"><button type="button" class="minibtn" id="new-massing" title="Two storeys of one zone each, with windows along each side: a building to start changing">Starting massing</button></div>
-        <div class="layrow"><button type="button" class="minibtn" id="new-blank" title="Nothing yet: the plan of Level 1 opens with Draw wall on, to draw the footprint. Walls that close a space make it a zone.">Blank, from a plan</button></div>
-      </div></details>
+      <button type="button" class="minibtn" id="new-blank" title="A new massing, empty: the plan of Level 1 opens with Draw wall on, to draw the footprint. Walls that close a space make it a zone.">New massing</button>
+      <button type="button" class="minibtn" id="new-massing" title="An example massing: two storeys of one zone each, with windows along each side, to start changing">Example massing</button>
       <span id="examples" hidden></span>
       <span id="status" class="cbval"></span></span>
     <span class="ribgrp"><span class="ribttl">Export</span><button type="button" class="minibtn" id="export" disabled title="Save the model as it stands, with the tool's changes, as .epJSON">Export .epJSON</button></span>
