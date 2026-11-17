@@ -618,3 +618,18 @@ test('an airflow path makes a window where it comes in, a door through the wall 
   assert.equal(m.doors.length, 1); assert.equal(m.openings.length, 1);
   assert.equal(Object.keys(importEpJSON(massingEpJSON(m)).doors).length, 2);
 });
+
+test('a window of an array taken out and put back; an array made separate windows', async () => {
+  const M = await import('../src/model/massing.js');
+  const m = M.massing0(), g = m.zones[0].faces[0], count = () => M.massingGeometry(m)[0].windows.length, n0 = count();
+  M.removeUnit(g, 1);
+  assert.equal(count(), n0 - 1);
+  assert.deepEqual(M.removedOf(g), [1]);
+  M.putBackUnits(g);
+  assert.equal(count(), n0);
+  M.removeUnit(g, 0);
+  const made = M.explodeArray(m, 0, 0);
+  assert.equal(m.zones[0].faces[0], null);
+  assert.equal(m.openings.length, made);
+  assert.equal(count(), n0 - 1, 'every window still there but the one taken out, each its own');
+});

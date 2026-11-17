@@ -145,6 +145,7 @@ export function sideWindows(g, len, h, slab = 0.3) {
   const { n, pitch, first, span } = unitLayout(g, len), top = Math.max(0.1, h - clamp(slab, 0, h - 0.1)), out = [];
   const a = Math.max(span[0] - len / 2, -len / 2 + WINDOW_EDGE), b = Math.min(span[1] - len / 2, len / 2 - WINDOW_EDGE);
   for (let i = 0; i < n; i++) {
+    if (g.removed?.[i]) continue; // taken out of the array (its bay left as wall)
     const u = unitGlazing(g, i), c = first + i * pitch;
     // the room the window has: its bay, less half the gap to the next, kept inside the array's stretch
     // and clear of the face's corners
@@ -897,6 +898,27 @@ export function applyToArray(g, w, others = 'keep') {
   if (others === 'rebind') g.broken = {};
 }
 export const brokenOf = (g) => Object.keys(g?.broken || {}).map(Number).sort((a, b) => a - b);
+// One window of an array taken out, its bay left as wall (it can be put back); the others stay where they
+// are. By its place in the array: a change to the array's number moves which bays are empty.
+export function removeUnit(g, i) { g.removed = { ...(g.removed || {}), [i]: true }; if (g.broken) delete g.broken[i]; }
+export const removedOf = (g) => Object.keys(g?.removed || {}).map(Number).sort((a, b) => a - b);
+export function putBackUnits(g) { delete g.removed; }
+// An array made separate windows: each window it lays, where it is and as big, a window of its own
+// (m.openings), the face's array gone. Returns how many.
+export function explodeArray(m, i, k) {
+  const z = m.zones[i], g = z.faces[k];
+  if (!g) return 0;
+  const [z0, z1] = zoneLevels(m, i), { A, U } = faceAxes(m, i, k), len = faceLength(m, i, k);
+  const ws = sideWindows(g, len, z1 - z0, z.slab);
+  m.openings ||= [];
+  let id = m.openings.reduce((a, o) => Math.max(a, (Number.isInteger(o.id) ? o.id : -1) + 1), 0);
+  for (const w of ws) {
+    const u = (w.u0 + w.u1) / 2 + len / 2;
+    m.openings.push({ id: id++, p: [R6(A[0] + U[0] * u), R6(A[1] + U[1] * u)], level: z.base, w: R6(w.u1 - w.u0), h: R6(w.v1 - w.v0), sill: R6(w.v0) });
+  }
+  z.faces[k] = null;
+  return ws.length;
+}
 // The links a zone keeps: its other faces follow face k (linkFaces), the zones stacked above it follow
 // it (linkAbove) on their face looking the same way. After every edit to face k they take a copy of it.
 export function spreadSide(m, i, k) {

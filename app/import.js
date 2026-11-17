@@ -21,6 +21,7 @@ import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { addWindow, openingProblem, wallExtent } from '../src/model/edit.js';
 import { addDoor, deleteDoor, addOpening, deleteOpening, massingOpening, setOpening, faceAxes as doorFaceAxes, massingGeometry as doorGeometry } from '../src/model/massing.js';
+import { removeUnit, removedOf, putBackUnits, explodeArray } from '../src/model/massing.js';
 import { pathOf, pathCurve, pathOpenings, setPathSmooth, deletePath, applyPath, releasePathOpening, isPathOpening } from '../src/model/airpath.js';
 import { readZoneResultsStream, mergeResults, zoneAtTime, windowAtTime, ventShare, surfaceAtTime, resultsTiming } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
@@ -1970,8 +1971,11 @@ function sideRows(at, isolated = false) {
     + (g.len > 0 ? '<button type="button" class="pbtn" data-act="sw-full" title="The array set out along the whole face again">Full face</button>' : '') + '</div>');
   rows.push(`<div class="poprow">${chk('sw-sides', z.linkFaces, 'Apply to all faces', 'On: the zone\'s other faces take these windows and follow every later change to them. Off: each face keeps its own.')}`
     + chk('sw-above', z.linkAbove, 'Apply to zones above', 'On: the zones stacked above take these windows on their face looking the same way, and follow every later change to them.') + '</div>');
-  rows.push(`<button type="button" class="pbtn more" data-act="sw-more" aria-expanded="${sideMore}">${sideMore ? 'More ▴' : 'More ▸'}</button>`);
-  if (sideMore) {
+  // windows taken out of the array: put back; the array made separate windows
+  const gone = removedOf(g);
+  if (gone.length && isArray(g)) rows.push(`<div class="poprow"><span class="muted">${gone.length === 1 ? `Window ${gone[0] + 1} is` : `Windows ${gone.map((j) => j + 1).join(', ')} are`} taken out</span><button type="button" class="pbtn" data-act="sw-putback" title="Put the windows taken out of the array back in their bays">Put back</button></div>`);
+  if (isArray(g)) rows.push(`<div class="poprow"><button type="button" class="pbtn" data-act="sw-explode" title="Every window of the array becomes a window of its own, where it is and as big, edited one by one (each jamb moved on its own); the array goes">Make separate windows</button></div>`);
+  {
     const broken = brokenOf(g), others = broken.filter((j) => j !== k);
     if (k !== undefined && isArray(g)) {
       if (g.broken?.[k]) {
@@ -1983,7 +1987,6 @@ function sideRows(at, isolated = false) {
         if (others.length) rows.push(`<div class="poprow">${others.length === 1 ? `Window ${others[0] + 1} is` : `Windows ${others.map((j) => j + 1).join(', ')} are`} broken. <button type="button" class="pbtn" data-act="sw-rebind-all" title="Every broken window of the side follows the array again">Rebind all</button></div>`);
       }
     } else if (broken.length) rows.push(`<div class="poprow">${broken.length === 1 ? `Window ${broken[0] + 1} is` : `Windows ${broken.map((j) => j + 1).join(', ')} are`} broken. <button type="button" class="pbtn" data-act="sw-rebind-all" title="Every broken window of the side follows the array again">Rebind all</button></div>`);
-    rows.push('<button type="button" class="quiet" data-act="sw-remove" title="Take the windows off this side (Delete)">Remove windows</button>');
   }
   return rows;
 }
@@ -1998,6 +2001,8 @@ function sideAction(el) {
   const act = el.dataset.act, i = at.zone, f = at.face, k = at.index;
   if (act !== 'sw-apply' && act !== 'sw-cancel') applyAsk = false;
   if (act === 'sw-more') { sideMore = !sideMore; showInfo(found); }
+  else if (act === 'sw-putback') sideEdit(at, (x, g) => putBackUnits(g), 'windows put back');
+  else if (act === 'sw-explode') { view.select(null); massingChange((x) => { explodeArray(x, i, f); }, `${faceWord(at)}: windows made separate`); }
   else if (act === 'sw-one' || (act === 'sw-preset' && el.value)) {
     if (!sideEdit(at, (x) => addWindows(x, i, f, act === 'sw-one' ? null : el.value), act === 'sw-one' ? 'a window added' : `${PRESETS[el.value].label.toLowerCase()} added`)) return;
     // the window added (the first of a preset's) is selected
@@ -3208,7 +3213,10 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
   } else if (e.key === 'Delete' && massing && selected) {
     const found = current(), at = found && massingSide(found.kind, found.item), zt = found?.kind === 'zone' && massingTarget(found);
-    if (at && massing.zones[at.zone].faces[at.face]) { sideEdit(at, (x) => { x.zones[at.zone].faces[at.face] = null; }, 'windows removed'); e.preventDefault(); }
+    const g = at && massing.zones[at.zone].faces[at.face];
+    // a window of an array: that one taken out (Put back in its pop-up); a wall: all its windows
+    if (g && found.kind === 'window' && at.index !== undefined && isArray(g)) { view.select(null); sideEdit(at, (x, gg) => removeUnit(gg, at.index), `window ${at.index + 1} taken out`); e.preventDefault(); }
+    else if (g) { sideEdit(at, (x) => { x.zones[at.zone].faces[at.face] = null; }, 'windows removed'); e.preventDefault(); }
     else if (zt) { removeZone(zt.zone); e.preventDefault(); }
   }
 });
@@ -3417,6 +3425,20 @@ const ws = workspace({
     placeOffer: (o) => placeOffer(o),
     massingTarget: (name) => { const f = view.find(name); return f && massing ? massingTarget(f) : null; },
     change: massingChange,
+    // whether a window lays as one of an array (not broken out of it): its width changes about its middle
+    windowInArray: (name) => { const at = massing && massingWindow(massing, name); return !!at && !massing.zones[at.zone].faces[at.face]?.broken?.[at.index]; },
+    // a window on its own made w wide (m) from its jamb at `fixed` (view coordinates), the other moving
+    windowEdge: (name, fixed, w) => {
+      const R = model && windowRect(model, name), o = view.origin || [0, 0, 0];
+      if (!R) return false;
+      const s = (fixed[0] + o[0]) * R.frame.right[0] + (fixed[1] + o[1]) * R.frame.right[1];
+      const atLeft = Math.abs(s - R.s0) < Math.abs(s - R.s1), r = clampRect(model, name, atLeft ? { ...R, s1: R.s0 + w } : { ...R, s0: R.s1 - w });
+      if (rectProblem(model, name, r)) { popMessage(rectProblem(model, name, r)); return false; }
+      if (massing && massingWindow(massing, name)) massingWindowEdit(name, r);
+      else if (massing && massingOpening(massing, name)) openingEdit(name, r);
+      else applyEdit((tx, mm) => setWindowRect(tx, mm, name, r), `window ${name} jamb moved`, { geometry: true });
+      return true;
+    },
     // a window's width (m) set about its middle; false if it would not fit
     windowWidth: (name, w) => {
       const R = model && windowRect(model, name);

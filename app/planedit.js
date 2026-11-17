@@ -490,7 +490,10 @@ export class PlanEdit {
       const [A, B] = win.seg.map((p) => this.d.toPx(p[0], p[1])), W = Math.hypot(win.seg[1][0] - win.seg[0][0], win.seg[1][1] - win.seg[0][1]);
       const L = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1, u = [(B[0] - A[0]) / L, (B[1] - A[1]) / L];
       let g = '';
-      [[A, [-u[0], -u[1]]], [B, u]].forEach(([p, dir]) => { this.grips.push({ p, dir, win: sel, W, pxm: L / (W || 1), A, B }); g += gripMark(p[0], p[1], 4.5); });
+      // a window of an array grows and shrinks about its middle (every window of the array alike); one
+      // on its own moves the jamb dragged, the other staying (fixed: that one, view coordinates)
+      const alone = !this.api.windowInArray?.(sel);
+      [[A, [-u[0], -u[1]], 0], [B, u, 1]].forEach(([p, dir, jamb]) => { this.grips.push({ p, dir, win: sel, W, pxm: L / (W || 1), A, B, jamb, alone, fixed: win.seg[1 - jamb] }); g += gripMark(p[0], p[1], 4.5); });
       const mid = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], nrm = [-u[1], u[0]];
       g += label(mid[0] + nrm[0] * 16, mid[1] + nrm[1] * 16 + 3, `w ${Math.round(W * 1000)} mm`, { size: 9, fill: 'var(--glass)', edit: 'w.width' });
       this.winFig = { name: sel, W };
@@ -554,9 +557,12 @@ export class PlanEdit {
     const r = this.drag, m = this.api.massing();
     if (!r || (!m && !r.win)) return '';
     if (r.win) {
-      // the window as wide as it is being dragged, about its middle
+      // the window as wide as it is being dragged: about its middle (in an array), or from its other jamb
       const c = [(r.A[0] + r.B[0]) / 2, (r.A[1] + r.B[1]) / 2], u = [(r.B[0] - r.A[0]) / 2, (r.B[1] - r.A[1]) / 2], k = (r.w ?? r.W) / (r.W || 1);
-      const a = [c[0] - u[0] * k, c[1] - u[1] * k], b = [c[0] + u[0] * k, c[1] + u[1] * k], L = Math.hypot(u[0], u[1]) || 1, n = [-u[1] / L, u[0] / L];
+      let a = [c[0] - u[0] * k, c[1] - u[1] * k], b = [c[0] + u[0] * k, c[1] + u[1] * k];
+      if (r.alone && r.jamb === 0) a = [r.B[0] - 2 * u[0] * k, r.B[1] - 2 * u[1] * k], b = r.B;
+      if (r.alone && r.jamb === 1) a = r.A, b = [r.A[0] + 2 * u[0] * k, r.A[1] + 2 * u[1] * k];
+      const L = Math.hypot(u[0], u[1]) || 1, n = [-u[1] / L, u[0] / L];
       return line(a[0], a[1], b[0], b[1], { stroke: 'var(--glass)', w: 3 }) + gripMark(a[0], a[1], 4.5) + gripMark(b[0], b[1], 4.5)
         + label(c[0] + n[0] * 16, c[1] + n[1] * 16 + 3, `w ${Math.round((r.w ?? r.W) * 1000)} mm`, { size: 9, fill: 'var(--glass)' });
     }
@@ -603,7 +609,7 @@ export class PlanEdit {
       if (!r.moved && Math.hypot(dx, dy) < CLICK_PX) return;
       r.moved = true;
       if (r.free !== undefined) { const q = this.toMassing(e), step = e.shiftKey ? 0.1 : STEP; r.dv = [q[0] - r.q0[0], q[1] - r.q0[1]].map((v) => Math.round(v / step) * step); this.paint(); return; }
-      if (r.win) { const run = (dx * r.dir[0] + dy * r.dir[1]) / r.pxm; r.w = Math.max(0.3, Math.round((r.W + 2 * run) / 0.005) * 0.005); this.paint(); return; }
+      if (r.win) { const run = (dx * r.dir[0] + dy * r.dir[1]) / r.pxm; r.w = Math.max(0.3, Math.round((r.W + (r.alone ? 1 : 2) * run) / 0.005) * 0.005); this.paint(); return; }
       if (r.fig) { const along = dx * this.figs.ud[0] + dy * this.figs.ud[1]; r.steps = Math.round(along / 12); this.paint(); return; }
       if (r.pitch) {
         const m = this.api.massing(), { A, U } = faceAxes(m, r.zone, r.face), len = faceLength(m, r.zone, r.face), q = this.toMassing(e);
@@ -699,8 +705,9 @@ export class PlanEdit {
       // pressed and let go where it was: picked
       if (r.press && !r.moved) { this.api.selectNames(this.chain?.includes(r.press) ? this.chain : [r.press], e.shiftKey); this.chain = null; this.paint(); return; }
       if (r.win) {
-        if (r.moved && r.w && Math.abs(r.w - r.W) > 1e-6) this.api.windowWidth(r.win, r.w);
-        else if (!r.moved) askNumber(this.d.host, e, `width mm, now ${Math.round(r.W * 1000)}`, (x) => { if (x >= 300) this.api.windowWidth(r.win, x / 1000); this.paint(); });
+        const set = (w) => (r.alone && this.api.windowEdge ? this.api.windowEdge(r.win, r.fixed, w) : this.api.windowWidth(r.win, w));
+        if (r.moved && r.w && Math.abs(r.w - r.W) > 1e-6) set(r.w);
+        else if (!r.moved) askNumber(this.d.host, e, `width mm, now ${Math.round(r.W * 1000)}`, (x) => { if (x >= 300) set(x / 1000); this.paint(); });
         this.paint();
         return;
       }
