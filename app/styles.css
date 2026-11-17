@@ -508,3 +508,12 @@ body.bartucked .calcbar>.ribbon{display:none}
 .cphex{width:76px; font-family:var(--mono); font-size:11px; padding:2px 4px; border:1px solid var(--rule); border-radius:2px; background:var(--panel); color:var(--ink)}
 
 /* a box drawn to select in a plan: solid left to right (what it holds), dashed right to left (what it touches) */
+
+/* the command line: what is typed, the rest of the name faintly behind it, the matches under it */
+.cmdline{position:relative; display:inline-block; margin-right:8px; vertical-align:middle}
+.cmdline input{position:relative; z-index:1; width:170px; font:12px var(--mono); color:var(--ink); background:transparent; border:1px solid var(--rule); border-radius:3px; padding:3px 7px}
+.cmdline input:focus{outline:none; border-color:var(--glass)}
+.cmdline .cmdghost{position:absolute; left:0; top:0; z-index:0; padding:4px 8px; font:12px var(--mono); color:var(--ink3); opacity:.6; pointer-events:none; white-space:pre; background:var(--panel); border-radius:3px; width:170px; box-sizing:border-box}
+.cmdline .cmdlist{position:absolute; right:0; top:calc(100% + 3px); z-index:70; min-width:200px; background:var(--panel); border:1px solid var(--rule); border-radius:4px; box-shadow:0 3px 10px rgba(0,0,0,.13); padding:3px; display:flex; flex-direction:column}
+.cmdline .cmdlist button{text-align:left; font:12px var(--sans); color:var(--ink2); background:none; border:0; padding:4px 8px; border-radius:3px; cursor:pointer}
+.cmdline .cmdlist button.on,.cmdline .cmdlist button:hover{background:var(--glass); color:#fff}

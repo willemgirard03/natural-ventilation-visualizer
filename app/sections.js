@@ -14,6 +14,7 @@
 
 import * as THREE from 'three';
 import { AIR_DEFAULT } from './slices.js';
+import { parseLength } from './units.js';
 
 export const MAX = 8;
 const AXIS_COLORS = ['#c2412d', '#2f8a4e', '#2d5fc2']; // x, y, z; and a plane's own u, v, n
@@ -737,7 +738,9 @@ export function askNumber(container, e, placeholder, apply, zeroOk = false) {
   const finish = (keep) => {
     if (done) return;
     done = true;
-    const text = input.value.trim(), x = Number(text.replace(',', '.'));
+    // a length (the prompt in mm) may be typed in any unit by its suffix (units.js); the rest are numbers
+    const text = input.value.trim(), len = /\bmm\b/.test(placeholder) ? parseLength(text) : null;
+    const x = len !== null ? len * 1000 : Number(text.replace(',', '.'));
     input.remove();
     if (keep && text && Number.isFinite(x) && (x || zeroOk)) apply(x);
   };

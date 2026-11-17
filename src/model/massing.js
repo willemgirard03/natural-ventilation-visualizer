@@ -1099,9 +1099,25 @@ function limited(m, i, x, act) {
 }
 // The pushed face, as far as it may go. Returns the distance taken.
 // The drawn walls on the face go with it, unless another zone shares the face (they stay with that one).
+// The drawn walls along face k of zone i, each cut where the face ends: the pieces on the face (their
+// indices) go with it; the rest stay where they stand, as the walls of the zones beside it (a wall drawn
+// along two rooms' sides, one of them pushed, keeps the other's part).
+function wallsToFace(m, i, k) {
+  const P = m.zones[i].plate, a = P[k], b = P[(k + 1) % P.length], out = [];
+  for (const j of wallsOn(m, i, k)) {
+    const w = m.walls[j], ta = along(a, w.a, w.b)[0], tb = along(b, w.a, w.b)[0];
+    const t0 = Math.max(0, Math.min(ta, tb)), t1 = Math.min(1, Math.max(ta, tb)), L = len2(sub2(w.b, w.a));
+    const at = (t) => [R6(w.a[0] + (w.b[0] - w.a[0]) * t), R6(w.a[1] + (w.b[1] - w.a[1]) * t)];
+    const rest = [[0, t0], [t1, 1]].filter(([s0, s1]) => (s1 - s0) * L > 0.01);
+    for (const [s0, s1] of rest) m.walls.push({ ...structuredClone(w), id: nextWallId(m), a: at(s0), b: at(s1) });
+    if (rest.length) { const A = at(t0), B = at(t1); w.a = A; w.b = B; }
+    out.push(j);
+  }
+  return out;
+}
 export function extrudeFace(m, i, k, d) {
-  const ws = sharingFaces(m, i, k).length ? [] : wallsOn(m, i, k), N = faceAxes(m, i, k).n;
-  return limited(m, i, d, (x, v) => { const r = extrudeRaw(x, i, k, v); if (r === false) return false; shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]); });
+  const shared = sharingFaces(m, i, k).length > 0, N = faceAxes(m, i, k).n;
+  return limited(m, i, d, (x, v) => { const ws = shared ? [] : wallsToFace(x, i, k), r = extrudeRaw(x, i, k, v); if (r === false) return false; shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]); });
 }
 
 // The faces of other zones that share face k of zone i: in line with it, facing the other way, along
@@ -1130,9 +1146,9 @@ export function sharingFaces(m, i, k) {
 export function pushWall(m, i, k, d) {
   const share = sharingFaces(m, i, k);
   if (!share.length) return extrudeFace(m, i, k, d);
-  const ws = wallsOn(m, i, k), N = faceAxes(m, i, k).n;
+  const N = faceAxes(m, i, k).n;
   return limited(m, [i, ...share.map(([j]) => j)], d, (x, v) => {
-    const r = extrudeRaw(x, i, k, v);
+    const ws = wallsToFace(x, i, k), r = extrudeRaw(x, i, k, v);
     if (r === false || !share.every(([j, q]) => extrudeRaw(x, j, q, -r.d) !== false)) return false;
     shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]);
   });

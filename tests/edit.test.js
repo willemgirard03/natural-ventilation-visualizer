@@ -135,3 +135,10 @@ test('the library: layers reordered, materials and assemblies made, renamed and 
   assert.equal(epjson.Material.Hempcrete, undefined);
   assert.ok(schedulesOfType(epjson, 'Fraction').every((x) => !Object.keys(epjson.Zone).some((z) => x.includes(z))));
 });
+
+test('lengths typed in any unit: mm by default, metric and imperial suffixes, feet with inches, fractions', async () => {
+  const { parseLength } = await import('../app/units.js');
+  const near2 = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} vs ${b}`);
+  for (const [t, m] of [['1200', 1.2], ['1.2m', 1.2], ['120 cm', 1.2], ['48in', 1.2192], ['48"', 1.2192], ['4 ft', 1.2192], ["5'6\"", 1.6764], ["5' 6", 1.6764], ['5ft 6in', 1.6764], ['3 1/2"', 0.0889], ['-300', -0.3], ['2 metres', 2]]) near2(parseLength(t), m);
+  for (const t of ['abc', '12 parsecs', '']) assert.equal(parseLength(t), null, t);
+});

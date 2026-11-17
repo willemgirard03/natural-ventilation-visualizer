@@ -41,6 +41,7 @@ import { addWall, WALL_LINES, cornerWalls, extendWall, sharingFaces } from '../s
 import { addZone, splitZone, splitFace, extrudeFace, reentrantCorners, faceAxes, faceLength, zoneLevels, turnPlan, zoneFrame,
   mergeZones, mergeFaces, mergeCells, removeWallSeam, zoneSeams, cellAt, cellsOf } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
+import { parseLength, lengthChar } from './units.js';
 
 const SNAP = 0.05; // m along a face
 const CORNER_PX = 14; // a re-entrant corner this close on screen takes the cut
@@ -117,7 +118,8 @@ export class ModelTools {
       // tool (Space flips the location line rather than ticking Chain again, Esc stops)
       if (e.target.closest?.('select, textarea, input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button])')) return;
       // Draw wall, after its start: a length typed (mm) holds the wall to it, the pointer giving its way
-      if (this.tool === 'wall' && this.wall?.start && (/^[0-9.,]$/.test(e.key) || (e.key === 'Backspace' && this.wall.typed))) {
+      // in any unit by its suffix (units.js): once a number has begun, letters and quotes go to it too
+      if (this.tool === 'wall' && this.wall?.start && ((e.key.length === 1 && lengthChar(e.key, this.wall.typed)) || (e.key === 'Backspace' && this.wall.typed))) {
         e.preventDefault(); e.stopImmediatePropagation();
         this.wall.typed = e.key === 'Backspace' ? this.wall.typed.slice(0, -1) : (this.wall.typed || '') + (e.key === ',' ? '.' : e.key);
         if (this.last) this.preview(this.last);
@@ -508,7 +510,7 @@ export class ModelTools {
     const z0 = m.levels[pr.base].z, z1 = m.levels[pr.top].z, raw = this.pointAt(e, z0);
     if (!raw) return null;
     let { p, kind, refs } = this.wallSnap(m, raw, e, pr.base, pr.top);
-    const s0 = this.wall.start, typed = s0 && Number(this.wall.typed) > 0 ? Number(this.wall.typed) / 1000 : 0;
+    const s0 = this.wall.start, len = s0 && this.wall.typed ? parseLength(this.wall.typed) : null, typed = len > 0 ? len : 0;
     // a length typed: the wall runs that far the way the pointer (snapped) points
     if (typed) {
       const d = [p[0] - s0[0], p[1] - s0[1]], l = Math.hypot(...d), u = l > 1e-6 ? [d[0] / l, d[1] / l] : [1, 0];
@@ -535,7 +537,7 @@ export class ModelTools {
           }
           const a = this.P([s0[0], s0[1], z0]);
           g += line(a[0], a[1], at[0], at[1], { stroke: 'var(--glass)', w: 1.2, dash: '6 3' });
-          g += label((a[0] + at[0]) / 2, (a[1] + at[1]) / 2 - 12, `${typed ? `${this.wall.typed} mm typed` : `${Math.round(len * 1000)} mm`} · ${Math.round(((ang % 360) + 360) % 360)}°`, { size: 9, fill: 'var(--glass)' });
+          g += label((a[0] + at[0]) / 2, (a[1] + at[1]) / 2 - 12, `${typed ? `${this.wall.typed}${/[a-z'"″′]/i.test(this.wall.typed) ? '' : ' mm'} typed = ${Math.round(typed * 1000)} mm` : `${Math.round(len * 1000)} mm`} · ${Math.round(((ang % 360) + 360) % 360)}°`, { size: 9, fill: 'var(--glass)' });
         }
         return g;
       },

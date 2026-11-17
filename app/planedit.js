@@ -23,6 +23,7 @@ import { gripMark, label, line, poly, inside, segDist, CLICK_PX } from './handle
 import { zoneLevels, turnPlan, faceAxes, faceLength, pushFace, pushWall, moveWallEnd, moveWall, unitLayout, bayExtents, setArraySpan, setCount, setSpacing, spreadSide, dragPitch } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
 
+const SEL = '#2F6F68'; // the selection's colour and tint, as the 3D view's (view3d.js SELECTED)
 const NEAR_PX = 6; // a wall's or window's line this close is under the pointer (drawn thin)
 const STEP = 0.05;
 
@@ -203,8 +204,8 @@ export class PlanEdit {
     if (!ov || !this.picks()) { if (ov) ov.innerHTML = ''; return; }
     let g = '';
     const sel = this.api.selected(), selPick = sel && this.find(sel);
-    for (const n of this.api.selection?.() || []) { if (n === sel) continue; const f = this.find(n); if (f) g += this.outline(f, { stroke: 'var(--glass)', w: 1.2 }); }
-    if (selPick) g += this.outline(selPick, { stroke: 'var(--glass)', w: 1.5 });
+    for (const n of this.api.selection?.() || []) { if (n === sel) continue; const f = this.find(n); if (f) g += this.selMark(f, false); }
+    if (selPick) g += this.selMark(selPick, true);
     for (const n of this.chain || []) { const f = this.find(n); if (f) g += this.outline(f, { stroke: 'var(--glass)', w: 2.4, dash: '6 4' }); }
     for (const n of this.api.mergeAsk?.() || []) { const f = this.find(n); if (f) g += this.outline(f, { stroke: '#D9822B', w: 3 }); }
     if (this.box) {
@@ -222,6 +223,41 @@ export class PlanEdit {
       g += line(a[0], a[1], b[0], b[1], { stroke: col, w: 4 }) + label((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 10, this.offer.problem || `${Math.round((this.offer.r.s1 - this.offer.r.s0) * 1000)} mm`, { size: 9, fill: col });
     }
     ov.innerHTML = g;
+  }
+  // A selected thing as the 3D view shows it: tinted in the selection's colour (walls and windows at
+  // 0.42, a zone's floor lighter), outlined.
+  selMark(f, strong) {
+    const T = (p) => this.d.toPx(p[0], p[1]);
+    let g = '';
+    if (f.kind === 'zone') g += f.item.polys.map((P) => poly(P.map(T), { fill: SEL, op: 0.1 })).join('');
+    else if ((f.kind === 'surface' || f.kind === 'wall') && f.item.loops.length) g += f.item.loops.map((L) => poly(L.map(T), { fill: SEL, op: 0.42 })).join('');
+    else g += this.outline(f, { fill: SEL, op: 0.42 });
+    return g + this.outline(f, { stroke: SEL, w: strong ? 1.6 : 1.2 });
+  }
+  // A wall's length as a dimension beside it (ticks at its ends, outward of the room), its figure typed
+  // over with a click (in any unit): fig { kind: 'wall', id } or { kind: 'face', zone, face }, len (m).
+  lengthDim(a, b, out, fig) {
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, u = [(b[0] - a[0]) / L, (b[1] - a[1]) / L], o = 18;
+    const A = [a[0] + out[0] * o, a[1] + out[1] * o], B = [b[0] + out[0] * o, b[1] + out[1] * o], tk = [(u[0] + out[0]) * 4, (u[1] + out[1]) * 4];
+    this.lenFig = fig;
+    let g = line(a[0] + out[0] * 4, a[1] + out[1] * 4, A[0] + out[0] * 4, A[1] + out[1] * 4, { stroke: 'var(--ink3)', w: 0.6, dash: '2 2' }) + line(b[0] + out[0] * 4, b[1] + out[1] * 4, B[0] + out[0] * 4, B[1] + out[1] * 4, { stroke: 'var(--ink3)', w: 0.6, dash: '2 2' });
+    g += line(A[0], A[1], B[0], B[1], { stroke: 'var(--ink3)', w: 0.7 });
+    for (const p of [A, B]) g += line(p[0] - tk[0], p[1] - tk[1], p[0] + tk[0], p[1] + tk[1], { stroke: 'var(--ink3)', w: 0.9 });
+    const mid = [(A[0] + B[0]) / 2 + out[0] * 9, (A[1] + B[1]) / 2 + out[1] * 9 + 3];
+    return g + label(mid[0], mid[1], `${Math.round(fig.len * 1000)} mm`, { size: 9, fill: 'var(--glass)', edit: 'w.len' });
+  }
+  // A wall's length typed: a drawn wall's far end moves along it; a zone's side grows or shrinks by its
+  // far end's wall moving (square to it).
+  setLength(f, L) {
+    if (!(L > 0.05)) return;
+    const what = `wall ${Math.round(L * 1000)} mm long`;
+    if (f.kind === 'wall') {
+      this.api.change((m) => { const w = m.walls.find((x) => x.id === f.id), d = [w.b[0] - w.a[0], w.b[1] - w.a[1]], l = Math.hypot(...d) || 1; moveWallEnd(m, f.id, 'b', [w.a[0] + (d[0] / l) * L, w.a[1] + (d[1] / l) * L]); }, what);
+      return;
+    }
+    const m = this.api.massing(), n = m.zones[f.zone].plate.length, next = (f.face + 1) % n, u1 = faceAxes(m, f.zone, f.face).U, u2 = faceAxes(m, f.zone, next).U;
+    if (Math.abs(u1[0] * u2[0] + u1[1] * u2[1]) > 0.05) return; // its far end not square to it: that wall is pushed instead
+    this.api.change((x) => { pushWall(x, f.zone, next, L - f.len); }, what);
   }
   find(name) {
     const c = this.picks();
@@ -276,6 +312,7 @@ export class PlanEdit {
   // the grips of a massing's selected zone (each wall) or wall (its own); a selected window's jambs
   gripsFor(sel) {
     const m = this.api.massing();
+    this.lenFig = null;
     // a window: a grip at each jamb, dragged outward or in, the width growing about its middle (as Edit
     // window in 3D's jambs); its width written beside it, a click types it
     const win = sel && this.api.windowWidth && this.picks()?.windows.find((w) => w.name === sel);
@@ -296,12 +333,20 @@ export class PlanEdit {
       if (!w || !this.picks()?.free.some((f) => f.id === w.id)) return '';
       let g = '';
       for (const end of ['a', 'b']) { const p = this.P(w[end]); this.grips.push({ p, dir: [1, 0], wall: w.id, end }); g += gripMark(p[0], p[1], 5); }
+      const A = this.P(w.a), B = this.P(w.b), L = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1;
+      g += this.lengthDim(A, B, [-(B[1] - A[1]) / L, (B[0] - A[0]) / L], { kind: 'wall', id: w.id, len: Math.hypot(w.b[0] - w.a[0], w.b[1] - w.a[1]) });
       return g;
     }
     const t = m && sel && this.api.massingTarget(sel);
     if (!t || (t.face !== null && !Number.isInteger(t.face)) || !this.zonesHere(m).includes(t.zone)) return '';
     const P = m.zones[t.zone].plate, faces = t.face === null ? P.map((_, k) => k) : [t.face];
     let g = '';
+    // one wall selected: its length, typed over
+    if (t.face !== null) {
+      const { A, U, n } = faceAxes(m, t.zone, t.face), len = faceLength(m, t.zone, t.face), a = this.P(A), b = this.P([A[0] + U[0] * len, A[1] + U[1] * len]);
+      const mid = [A[0] + U[0] * len / 2, A[1] + U[1] * len / 2], p = this.P(mid), q = this.P([mid[0] + n[0], mid[1] + n[1]]), d = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1;
+      g += this.lengthDim(a, b, [(q[0] - p[0]) / d, (q[1] - p[1]) / d], { kind: 'face', zone: t.zone, face: t.face, len });
+    }
     for (const k of faces) {
       const { A, U, n } = faceAxes(m, t.zone, k), len = faceLength(m, t.zone, k), mid = [A[0] + U[0] * len / 2, A[1] + U[1] * len / 2];
       const p = this.P(mid), q = this.P([mid[0] + n[0], mid[1] + n[1]]);
@@ -313,7 +358,7 @@ export class PlanEdit {
   gripAt(e) { const [x, y] = this.px(e); return (this.grips || []).find((g) => Math.hypot(g.p[0] - x, g.p[1] - y) < 9) || null; }
   // the array's number or spacing under the pointer: { key, el } (or a window's width)
   figAt(e) {
-    if (!this.figs && !this.winFig) return null;
+    if (!this.figs && !this.winFig && !this.lenFig) return null;
     for (const el of this.d.ov.querySelectorAll('rect[data-edit]')) {
       const r = el.getBoundingClientRect();
       if (e.clientX >= r.left - 2 && e.clientX <= r.right + 2 && e.clientY >= r.top - 2 && e.clientY <= r.bottom + 2) return { key: el.dataset.edit, el: el.nextElementSibling || el };
@@ -429,6 +474,11 @@ export class PlanEdit {
     }
     // the array's number or spacing: slid along the bracket, or clicked to type
     const fg = this.figAt(e);
+    if (fg && fg.key === 'w.len') {
+      const lf = this.lenFig;
+      askNumber(this.d.host, { clientX: e.clientX, clientY: e.clientY, target: fg.el }, `length mm, now ${Math.round(lf.len * 1000)}`, (x) => { this.setLength(lf, x / 1000); this.paint(); });
+      return;
+    }
     if (fg && fg.key === 'w.width') {
       const wf = this.winFig;
       askNumber(this.d.host, { clientX: e.clientX, clientY: e.clientY, target: fg.el }, `width mm, now ${Math.round(wf.W * 1000)}`, (x) => { if (x >= 300) this.api.windowWidth(wf.name, x / 1000); this.paint(); });

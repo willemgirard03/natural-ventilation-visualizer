@@ -502,3 +502,17 @@ test('a wall drawn to another wall\'s face (short of its line) still joins it an
   assert.equal(make([[4, 0.2], [4, 5.8]]).zones.length, 2, 'to the faces 0.2 m in: two rooms');
   assert.equal(make([[4, 1], [4, 5]]).zones.length, 1, 'a metre short: it stands free');
 });
+
+test('a zone\'s side pushed: only the piece of a longer drawn wall along it moves; the rest stays with the room beside', async () => {
+  const M = await import('../src/model/massing.js');
+  const m = M.massingBlank();
+  // two rooms stacked, the right-hand wall drawn once along both
+  for (const [a, b] of [[[0, 0], [10, 0]], [[10, 0], [10, 10]], [[10, 10], [0, 10]], [[0, 10], [0, 0]], [[0, 5], [10, 5]]]) M.addWall(m, { a, b, base: 0, top: 1 });
+  assert.equal(m.zones.length, 2);
+  const top = m.zones.findIndex((z) => Math.max(...z.plate.map((p) => p[1])) > 9), k = m.zones[top].plate.findIndex((p, j) => { const q = m.zones[top].plate[(j + 1) % 4]; return Math.abs(p[0] - 10) < 1e-6 && Math.abs(q[0] - 10) < 1e-6; });
+  M.pushFace(m, top, k, -2); // the upper room's right side in by 2 m
+  const right = m.walls.filter((w) => Math.abs(w.a[0] - w.b[0]) < 1e-6);
+  const at = (x) => right.filter((w) => Math.abs(w.a[0] - x) < 1e-6).map((w) => [Math.min(w.a[1], w.b[1]), Math.max(w.a[1], w.b[1])]);
+  assert.deepEqual(at(8), [[5, 10]], 'the upper room\'s piece moved with it');
+  assert.deepEqual(at(10), [[0, 5]], 'the lower room keeps its piece, and nothing stands beyond it');
+});

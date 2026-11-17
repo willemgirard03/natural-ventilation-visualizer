@@ -37,6 +37,7 @@ const fmt = (x, d = 2) => String(+Number(x).toFixed(d));
 //   onTake(record)     a view taken off the page: keep the record so Undo can put it back
 //   editorFor(drawing) a plan's editor (planedit.js), or null; toolsHTML: the modelling tools' buttons
 //   hasTools()         whether the tools apply (a massing is open)
+const EMPTY_CAM = { cx: 0, cy: 0, s: 30 };
 export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3d, onTake, editorFor = () => null, toolsHTML = '', hasTools = () => false }) {
   const kinds = { ...KIND_LABEL };
   const drawings = new Set();
@@ -191,8 +192,9 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       const vt = this.el.querySelector('.vtools'); if (vt) vt.hidden = !(want && hasTools());
     }
     // plan coordinates (m) to the drawing's pixels and back
-    toPx(u, v) { const c = this.cam, w = this.host.clientWidth, h = this.host.clientHeight; return [w / 2 + (u - c.cx) * c.s, h / 2 - (v - c.cy) * c.s]; }
-    fromPx(x, y) { const c = this.cam, w = this.host.clientWidth, h = this.host.clientHeight; return [(x - w / 2) / c.s + c.cx, -(y - h / 2) / c.s + c.cy]; }
+    // (an empty plan, before anything is drawn to frame: the plan's origin in the middle, 30 px a metre)
+    toPx(u, v) { const c = this.cam || EMPTY_CAM, w = this.host.clientWidth, h = this.host.clientHeight; return [w / 2 + (u - c.cx) * c.s, h / 2 - (v - c.cy) * c.s]; }
+    fromPx(x, y) { const c = this.cam || EMPTY_CAM, w = this.host.clientWidth, h = this.host.clientHeight; return [(x - w / 2) / c.s + c.cx, -(y - h / 2) / c.s + c.cy]; }
     frameNow() { return this.frame(); }
     // the bar's name: every plan and section by name
     options() {

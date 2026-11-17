@@ -35,6 +35,7 @@ import { WindowEditor } from './winedit.js';
 import { WallEnds3D } from './wallends.js';
 import { RAMPS, rampAt, rampCss, UNITS, niceRange, DEFAULT_RAMP, DEFAULT_RANGE, CAP_DEFAULT } from './ramps.js';
 import { openColorPicker } from './colorpick.js';
+import { commandLine } from './cmdline.js';
 import {
   massing0, massingBlank, massingEpJSON, applyMassing, massingWindow, breakOutWindow, massingGeometry, unitLayout, unitOf, isArray, brokenOf,
   faceLength, faceAxes, faceBearing, compassWord, zoneHeight, turnPlan, levelName, JUSTS, setJustify, deleteZone, floatingZones, zoneName,
@@ -2825,6 +2826,52 @@ function wallBetween(found) {
   const others = sharingFaces(massing, t.zone, t.face).map(([j]) => j);
   if (!others.length) return null;
   return { walls: wallsOn(massing, t.zone, t.face).map((j) => massing.walls[j].id), zones: [t.zone, ...others] };
+}
+
+// ---------- the command line (cmdline.js) ----------
+// Each command does what its button or key does; a massing's tools need a massing.
+{
+  const click = (id) => () => $(id)?.click();
+  const tool = (t) => () => { if (!massing) { popMessage('The modelling tools work on a massing: File ▸ New massing.'); return; } setPlacing(null); tools.start(t); };
+  const key = (k, o = {}) => () => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...o }));
+  const look = (d) => () => view.lookFrom(new THREE.Vector3(...d));
+  const proj = (p) => () => $('projection').querySelector(`[data-proj="${p}"]`)?.click();
+  commandLine(document.querySelector('.cmdline'), [
+    { name: 'Draw wall', also: ['Wall'], run: tool('wall'), title: 'Draw walls in a plan or in 3D' },
+    { name: 'Window', also: ['Add window'], run: () => setPlacing('window'), title: 'Put windows on walls' },
+    { name: 'Add zone', also: ['Zone'], run: tool('add') },
+    { name: 'Split zone', run: tool('split') },
+    { name: 'Split wall', run: tool('face') },
+    { name: 'Push pull', also: ['Pushpull', 'Extrude'], run: tool('push') },
+    { name: 'Corner', also: ['Trim'], run: tool('corner') },
+    { name: 'Extend', run: tool('extend') },
+    { name: 'Merge zones', run: tool('merge') },
+    { name: 'Merge walls', run: tool('mergefaces') },
+    { name: 'Remove seam', run: tool('seam') },
+    { name: 'Delete', run: key('Delete') },
+    { name: 'Undo', run: () => undo() },
+    { name: 'Redo', run: () => redo() },
+    { name: 'Clipping plane', also: ['Section', 'Cut'], run: () => model && view.sections.startPlacing('section', false) },
+    { name: 'Zoom selected', also: ['Zoom'], run: click('zoom-sel') },
+    { name: 'Zoom extents', also: ['Fit'], run: click('fit') },
+    { name: 'Full screen', run: click('full') },
+    { name: 'Perspective', run: proj('perspective') },
+    { name: 'Parallel', also: ['Orthographic'], run: proj('parallel') },
+    { name: 'Top', also: ['Plan view'], run: look([0, 0, 1]) },
+    { name: 'Front', run: look([0, -1, 0]) },
+    { name: 'Back', run: look([0, 1, 0]) },
+    { name: 'Left', run: look([-1, 0, 0]) },
+    { name: 'Right', run: look([1, 0, 0]) },
+    { name: 'North up', run: () => view.cube.orientNorth('true') },
+    { name: 'Building north up', run: () => view.cube.orientNorth('building') },
+    { name: 'Play day', also: ['Play', 'Pause'], run: click('play') },
+    { name: 'Restart air', run: click('restart-air') },
+    { name: 'Run EnergyPlus', also: ['EnergyPlus', 'Simulate'], run: click('run-eplus') },
+    { name: 'New massing', run: click('new-blank') },
+    { name: 'Example massing', run: click('new-massing') },
+    { name: 'Open', also: ['Import'], run: click('file') },
+    { name: 'Export', also: ['Save'], run: click('export') },
+  ], { taken: () => !!(tools.tool === 'wall' && tools.wall?.typed) });
 }
 
 // A window taken out of an imported model (a massing's windows are its arrays').
