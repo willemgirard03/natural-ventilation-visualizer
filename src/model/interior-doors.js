@@ -31,15 +31,39 @@ export function doorOnWall(vertices, door = DOOR) {
     .map(([s, z]) => [out[0] * d + right[0] * s, out[1] * d + right[1] * s, z]);
 }
 
-// Doors to add: one per pair of zones, on their largest shared wall that fits a door.
-export function interiorDoors(model, door = DOOR) {
+// The model's own doors (opaque Door subsurfaces, model.doors) as doors of the same shape as those
+// added: one of each pair between zones (partnerZone the zone across), or to outdoors (partnerZone
+// null). own: true (they are in the .epJSON already).
+export function modelDoors(model) {
+  const out = [], seen = new Set();
+  for (const d of Object.values(model.doors || {})) {
+    if (seen.has(d.name)) continue;
+    const p = d.partner && model.doors[d.partner], s = model.surfaces[d.parent];
+    if (p) seen.add(p.name);
+    const partnerZone = p ? p.zone : s?.boundary === 'Surface' ? s.adjacentZone : null;
+    out.push({
+      name: d.name, surface: d.parent, zone: d.zone, partnerName: p?.name ?? null, partnerSurface: p?.parent ?? null, partnerZone,
+      vertices: d.vertices, partnerVertices: p?.vertices ?? null, width: d.area / (d.height || 1), height: d.height, area: d.area, own: true,
+    });
+  }
+  return out;
+}
+
+// The doors between rooms: the model's own, and (add) one added per pair of zones that has none, on
+// their largest shared wall that fits a door.
+export function interiorDoors(model, door = DOOR, { add = true } = {}) {
+  const own = modelDoors(model);
+  if (!add) return own;
+  const pairKey = (a, b) => [a, b].sort().join('\u0000');
+  const joined = new Set(own.filter((d) => d.partnerZone).map((d) => pairKey(d.zone, d.partnerZone)));
   const pairs = new Map();
   for (const s of Object.values(model.surfaces)) {
     if (s.boundary !== 'Surface' || !s.adjacentZone || s.zone === s.adjacentZone || s.name > s.adjacentSurface) continue;
     if (Math.abs(s.tilt - 90) > 1 || !model.surfaces[s.adjacentSurface]) continue;
     const [a, b] = [s.zone, s.adjacentZone];
     if (ELEVATOR.test(a) || ELEVATOR.test(b) || !(isCirculation(a) || isCirculation(b))) continue;
-    const key = [a, b].sort().join('\u0000');
+    const key = pairKey(a, b);
+    if (joined.has(key)) continue;
     pairs.set(key, [...(pairs.get(key) || []), s]);
   }
   const doors = [];
@@ -57,5 +81,5 @@ export function interiorDoors(model, door = DOOR) {
       break;
     }
   }
-  return doors;
+  return [...own, ...doors];
 }

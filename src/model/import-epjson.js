@@ -67,6 +67,7 @@ export function importEpJSON(epjson, { fileName = null } = {}) {
       azimuth: azimuth(vertices, northAxis),
       tilt: tilt(vertices),
       windows: [],
+      doors: [],
     };
     if (zones[s.zone_name]) zones[s.zone_name].surfaces.push(name);
     else check('error', 'surface-zone-missing', `Surface ${name} belongs to zone ${s.zone_name}, which does not exist.`, [name]);
@@ -90,12 +91,19 @@ export function importEpJSON(epjson, { fileName = null } = {}) {
     }
   }
 
-  // Windows
-  const windows = {};
+  // Windows; opaque doors apart (model.doors), as they are no glazing
+  const windows = {}, doors = {};
   for (const [name, f] of objects(epjson, 'FenestrationSurface:Detailed')) {
     const parent = surfaces[f.building_surface_name];
     const zone = parent ? parent.zone : null;
     const vertices = place(verticesOf(f), zone);
+    if (f.surface_type === 'Door') {
+      if (!parent) { check('error', 'window-parent-missing', `Door ${name} sits on ${f.building_surface_name}, which does not exist.`, [name]); continue; }
+      const b = bounds(vertices);
+      doors[name] = { name, parent: parent.name, zone, partner: f.outside_boundary_condition_object || null, construction: f.construction_name, vertices, area: area(vertices), height: b.max[2] - b.min[2], bottom: b.min[2] };
+      parent.doors.push(name);
+      continue;
+    }
     const b = bounds(vertices);
     windows[name] = {
       name,
@@ -309,6 +317,7 @@ export function importEpJSON(epjson, { fileName = null } = {}) {
     zones,
     surfaces,
     windows,
+    doors,
     constructions,
     shading,
     checks,

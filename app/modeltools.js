@@ -130,6 +130,8 @@ export class ModelTools {
       if (e.key === 'Escape') { e.stopImmediatePropagation(); this.stop(); }
       if (e.key === 'Enter' && (this.tool === 'merge' || this.tool === 'mergefaces')) { e.preventDefault(); e.stopImmediatePropagation(); this.mergePicked(); }
       if (e.key === 'Enter' && this.tool === 'wall') { e.preventDefault(); e.stopImmediatePropagation(); this.stop(); }
+      // Enter (or a right click) finishes any other tool, as Esc does
+      if (e.key === 'Enter' && this.tool && this.tool !== 'merge' && this.tool !== 'mergefaces') { e.preventDefault(); e.stopImmediatePropagation(); this.stop(); }
       if (e.key === ' ' && this.tool === 'wall') { e.preventDefault(); e.stopImmediatePropagation(); this.flipWalls(); }
       if (e.key === ' ' && this.tool === 'split') { e.preventDefault(); e.stopImmediatePropagation(); this.dir++; if (this.last) this.preview(this.last); }
     };
@@ -431,7 +433,16 @@ export class ModelTools {
     const lvz = (L) => m.levels[L].z, over = (x) => Math.min(lvz(x.top), lvz(top)) - Math.max(lvz(x.base), lvz(base)) > 1e-6 || x.top === base;
     const segs = [...(m.walls || []).filter((w) => w.id !== skip && over(w)).map((w) => [w.a, w.b])];
     for (const zz of m.zones) if (over(zz)) zz.plate.forEach((p, k) => segs.push([p, zz.plate[(k + 1) % zz.plate.length]]));
-    const foot = (p, [a, b]) => { const ab = [b[0] - a[0], b[1] - a[1]], l2 = ab[0] ** 2 + ab[1] ** 2 || 1, t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2; return [t, [a[0] + ab[0] * t, a[1] + ab[1] * t]]; };
+    // a drawn wall's two finish faces too (its line is all the model has; the faces are where it is drawn)
+    for (const w of m.walls || []) {
+      if (w.id === skip || !over(w)) continue;
+      const L = Math.hypot(w.b[0] - w.a[0], w.b[1] - w.a[1]);
+      if (L < 1e-6) continue;
+      const n = [-(w.b[1] - w.a[1]) / L, (w.b[0] - w.a[0]) / L], t = this.wallThickness(w.asm) || 0.2, side = w.side || 1;
+      const off = w.line === 'exterior' ? -side * t / 2 : w.line === 'interior' ? side * t / 2 : 0;
+      for (const k of [off - t / 2, off + t / 2]) if (Math.abs(k) > 1e-4) segs.push([w.a, w.b].map((p) => [p[0] + n[0] * k, p[1] + n[1] * k]));
+    }
+    const foot =(p, [a, b]) => { const ab = [b[0] - a[0], b[1] - a[1]], l2 = ab[0] ** 2 + ab[1] ** 2 || 1, t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2; return [t, [a[0] + ab[0] * t, a[1] + ab[1] * t]]; };
     if (e.shiftKey && start) {
       const ang = Math.round(Math.atan2(raw[1] - start[1], raw[0] - start[0]) / (Math.PI / 4)) * (Math.PI / 4), u = [Math.cos(ang), Math.sin(ang)];
       const t = (raw[0] - start[0]) * u[0] + (raw[1] - start[1]) * u[1];

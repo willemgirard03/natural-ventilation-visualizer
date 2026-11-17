@@ -570,10 +570,13 @@ export class View3D {
     const doorMat = new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Door, side: THREE.DoubleSide, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
     this.doorMesh = new THREE.Mesh(polygonGeometry(doors, this.origin, null), doorMat);
     this.doorMesh.userData = { kind: 'door', items: doors };
+    // open doors: a faint leaf in the opening, to see and pick them by (air and particles pass)
+    this.openDoorMesh = new THREE.Mesh(polygonGeometry([], this.origin, null), new THREE.MeshBasicMaterial({ color: TYPE_COLORS.Door, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping }));
+    this.openDoorMesh.userData = { kind: 'door', items: [] };
 
     this.edges = new THREE.LineSegments(this.edgesGeometry(), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
 
-    this.group.add(this.front, this.back, this.glass, this.doorMesh, this.shading, this.edges, this.problemLayer());
+    this.group.add(this.front, this.back, this.glass, this.doorMesh, this.openDoorMesh, this.shading, this.edges, this.problemLayer());
     this.shadowSkins();
     this.setFloating(this.floatZones);
     if (keep) {
@@ -593,7 +596,7 @@ export class View3D {
     const holes = new Map();
     const hole = (surface, pts) => holes.set(surface, [...(holes.get(surface) || []), pts]);
     for (const w of this.windows) hole(w.parent, w.vertices);
-    for (const d of this.doors) { hole(d.surface, d.vertices); hole(d.partnerSurface, d.partnerVertices); }
+    for (const d of this.doors) { hole(d.surface, d.vertices); if (d.partnerSurface) hole(d.partnerSurface, d.partnerVertices); }
     const thicknessOf = (s) => this.model.constructions[s.construction]?.thickness || 0.2;
     // Floors take their thickness below their level, whatever the location line: a floor facing down
     // grows outwards from its zone, a ceiling (the other side of a floor) into its zone. So a slab
@@ -786,6 +789,10 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     this.doorMesh.geometry.dispose();
     this.doorMesh.geometry = polygonGeometry(closed, this.origin, null);
     this.doorMesh.userData.items = closed;
+    const opened = this.doors.filter((d) => open.has(d.name));
+    this.openDoorMesh.geometry.dispose();
+    this.openDoorMesh.geometry = polygonGeometry(opened, this.origin, null);
+    this.openDoorMesh.userData.items = opened;
     this.render();
   }
 
@@ -1239,7 +1246,7 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, this.camera);
-    const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.freeMesh ? [this.freeMesh] : []), ...(this.shading.visible ? [this.shading] : [])];
+    const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.openDoorMesh ? [this.openDoorMesh] : []), ...(this.freeMesh ? [this.freeMesh] : []), ...(this.shading.visible ? [this.shading] : [])];
     const hits = ray.intersectObjects(targets, false).filter((h) => !this.sections.removed(h.point));
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];
     if (!hit) return null;

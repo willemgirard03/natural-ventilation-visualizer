@@ -69,7 +69,7 @@ export function wallFrame(vertices) {
 // A window as a rectangle in its wall's frame: s from left jamb to right jamb (m along right), z from
 // sill to head. null when the wall or window is not upright.
 export function windowRect(model, name) {
-  const w = model.windows[name], wall = w && model.surfaces[w.parent];
+  const w = model.windows[name] || model.doors?.[name], wall = w && model.surfaces[w.parent];
   const f = wall && wallFrame(wall.vertices);
   if (!f) return null;
   const s = w.vertices.map((p) => dot(p, f.right)), z = w.vertices.map((p) => p[2]);
@@ -108,17 +108,19 @@ export function rectProblem(model, name, r) {
   return null;
 }
 
-// Whether a new window fits a wall at rectangle r of its frame (as rectProblem, with no window yet).
-export function openingProblem(model, surface, r) {
-  const wall = model.surfaces[surface], f = wall && wallFrame(wall.vertices);
-  if (!f) return 'Windows go in upright walls.';
-  if (r.s1 - r.s0 < WINDOW_MIN - 1e-9 || r.z1 - r.z0 < WINDOW_MIN - 1e-9) return `A window is at least ${WINDOW_MIN * 1000} mm each way.`;
-  const outline = wallOutline(wall, f), e = WINDOW_EDGE;
-  const corners = [[r.s0 - e, r.z0 - e], [r.s1 + e, r.z0 - e], [r.s1 + e, r.z1 + e], [r.s0 - e, r.z1 + e]];
-  if (!corners.every((c) => inside2(c, outline))) return 'The window would reach past the wall.';
-  for (const other of wall.windows) {
+// Whether a new window (or door: kind 'Door', standing just off the wall's foot) fits a wall at
+// rectangle r of its frame (as rectProblem, with no opening there yet), clear of its other windows and
+// doors.
+export function openingProblem(model, surface, r, kind = 'Window') {
+  const wall = model.surfaces[surface], f = wall && wallFrame(wall.vertices), word = kind === 'Door' ? 'door' : 'window';
+  if (!f) return `${kind}s go in upright walls.`;
+  if (r.s1 - r.s0 < WINDOW_MIN - 1e-9 || r.z1 - r.z0 < WINDOW_MIN - 1e-9) return `A ${word} is at least ${WINDOW_MIN * 1000} mm each way.`;
+  const outline = wallOutline(wall, f), e = WINDOW_EDGE, foot = kind === 'Door' ? Math.min(e, (r.z0 - Math.min(...outline.map((p) => p[1]))) / 2) : e;
+  const corners = [[r.s0 - e, r.z0 - foot], [r.s1 + e, r.z0 - foot], [r.s1 + e, r.z1 + e], [r.s0 - e, r.z1 + e]];
+  if (!corners.every((c) => inside2(c, outline))) return `The ${word} would reach past the wall.`;
+  for (const other of [...wall.windows, ...(wall.doors || [])]) {
     const o = windowRect(model, other);
-    if (o && r.s0 < o.s1 + e && r.s1 > o.s0 - e && r.z0 < o.z1 + e && r.z1 > o.z0 - e) return `The window would overlap ${other}.`;
+    if (o && r.s0 < o.s1 + e && r.s1 > o.s0 - e && r.z0 < o.z1 + e && r.z1 > o.z0 - e) return `The ${word} would overlap ${other}.`;
   }
   return null;
 }
@@ -134,28 +136,42 @@ export function wallExtent(model, surface) {
 // that wall, else in its zone, else in the model. On a wall between zones it is made on the other
 // side too, each naming the other. The zone's natural-ventilation opening area grows with its glazing,
 // so its operable fraction stays. Returns the window's name.
-export function addWindow(tx, model, surface, r) {
+// kind 'Door': an opaque door, with the construction of a door in the model, else a 40 mm wood door
+// made for it; the zone's opening area stays.
+export function addWindow(tx, model, surface, r, kind = 'Window') {
   const wall = model.surfaces[surface], f = wallFrame(wall.vertices);
   if (!f) throw new Error(`${surface} is not upright.`);
   const at = (s, z) => [f.right[0] * s + f.out[0] * f.plane, f.right[1] * s + f.out[1] * f.plane, z];
   const pts = [at(r.s0, r.z0), at(r.s1, r.z0), at(r.s1, r.z1), at(r.s0, r.z1)];
-  const ws = Object.values(model.windows).filter((w) => w.surfaceType !== 'Door');
-  const like = ws.find((w) => w.parent === surface) || ws.find((w) => w.zone === wall.zone) || ws[0];
-  const construction = like?.construction || Object.keys(tx.epjson['WindowMaterial:SimpleGlazingSystem'] || {})[0];
-  if (!construction) throw new Error('The model has no window construction to give it.');
+  const door = kind === 'Door';
+  let construction;
+  if (door) {
+    construction = Object.values(tx.epjson['FenestrationSurface:Detailed'] || {}).find((o) => o.surface_type === 'Door')?.construction_name;
+    if (!construction) {
+      const mat = freeName(tx.epjson, ['Material'], 'Door Wood');
+      Object.assign(tx.get('Material', mat, true), { roughness: 'MediumSmooth', thickness: 0.04, conductivity: 0.15, density: 600, specific_heat: 1600, thermal_absorptance: 0.9, solar_absorptance: 0.7, visible_absorptance: 0.7 });
+      construction = freeName(tx.epjson, ['Construction'], 'Door');
+      Object.assign(tx.get('Construction', construction, true), { outside_layer: mat });
+    }
+  } else {
+    const ws = Object.values(model.windows).filter((w) => w.surfaceType !== 'Door');
+    const like = ws.find((w) => w.parent === surface) || ws.find((w) => w.zone === wall.zone) || ws[0];
+    construction = like?.construction || Object.keys(tx.epjson['WindowMaterial:SimpleGlazingSystem'] || {})[0];
+    if (!construction) throw new Error('The model has no window construction to give it.');
+  }
   const relative = String(Object.values(tx.epjson.GlobalGeometryRules || {})[0]?.coordinate_system || 'Relative').toLowerCase() === 'relative';
   const put = (name, parent, zone, corners, other) => {
     const o = tx.get('FenestrationSurface:Detailed', name, true);
-    Object.assign(o, { surface_type: 'Window', construction_name: construction, building_surface_name: parent, ...(other ? { outside_boundary_condition_object: other } : {}), multiplier: 1, number_of_vertices: 4 });
+    Object.assign(o, { surface_type: kind, construction_name: construction, building_surface_name: parent, ...(other ? { outside_boundary_condition_object: other } : {}), multiplier: 1, number_of_vertices: 4 });
     writeVertices(o, relative ? toZone(corners, tx.epjson.Zone?.[zone] || {}) : corners);
   };
-  const name = freeName(tx.epjson, ['FenestrationSurface:Detailed'], `${surface} window`);
+  const word = door ? 'door' : 'window', name = freeName(tx.epjson, ['FenestrationSurface:Detailed'], `${surface} ${word}`);
   const adj = wall.boundary === 'Surface' && model.surfaces[wall.adjacentSurface];
-  const other = adj ? freeName({ ...tx.epjson, 'FenestrationSurface:Detailed': { ...tx.epjson['FenestrationSurface:Detailed'], [name]: {} } }, ['FenestrationSurface:Detailed'], `${adj.name} window`) : null;
+  const other = adj ? freeName({ ...tx.epjson, 'FenestrationSurface:Detailed': { ...tx.epjson['FenestrationSurface:Detailed'], [name]: {} } }, ['FenestrationSurface:Detailed'], `${adj.name} ${word}`) : null;
   put(name, surface, wall.zone, pts, other);
   if (adj) put(other, adj.name, adj.zone, [...pts].reverse(), name);
   const z = model.zones[wall.zone], added = area(pts);
-  if (!adj) scaleOpenings(tx, wall.zone, z.glazingArea, z.glazingArea + added);
+  if (!adj && !door) scaleOpenings(tx, wall.zone, z.glazingArea, z.glazingArea + added);
   return name;
 }
 

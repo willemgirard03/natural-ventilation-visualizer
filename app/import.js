@@ -20,6 +20,7 @@ import { SkyDome, VENT_BANDS, ventBandLabels } from './skydome.js';
 import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { addWindow, openingProblem, wallExtent } from '../src/model/edit.js';
+import { addDoor, deleteDoor, faceAxes as doorFaceAxes, massingGeometry as doorGeometry } from '../src/model/massing.js';
 import { readZoneResultsStream, mergeResults, zoneAtTime, windowAtTime, ventShare, surfaceAtTime, resultsTiming } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
@@ -112,7 +113,7 @@ function candidatesAt(e) {
   const own = near?.zone || front || h.item?.zone;
   zone(own);
   if (h.kind === 'window') add('window', h.item.name, `Window · ${h.item.zone}`);
-  if (h.kind === 'door') add('door', h.item.name, `Door · ${h.item.zone} – ${h.item.partnerZone}`);
+  if (h.kind === 'door') add('door', h.item.name, `Door · ${h.item.zone} – ${h.item.partnerZone ?? 'outdoors'}`);
   if (near) add('surface', near.name, `${near.csType} · ${near.zone}`);
   // the zone's floor: its largest piece
   const floor = model.zones[own]?.surfaces.map((n) => model.surfaces[n]).filter((x) => /floor/i.test(x.surfaceType)).sort((a, b) => b.area - a.area)[0];
@@ -246,7 +247,7 @@ const tools = new ModelTools(view, {
     for (const b of document.querySelectorAll('.mtools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
     $('keep-seams-l').hidden = tool !== 'merge';
     wallTab(tool === 'wall');
-    if (tool) { winEdit.stop(); view.select(null); hover.clear(); }
+    if (tool) { winEdit.stop(); view.select(null); hover.clear(); cmdLine?.remember(TOOL_COMMAND[tool]); }
   },
 });
 for (const b of document.querySelectorAll('#model-tools [data-tool]')) {
@@ -498,7 +499,8 @@ function conditionsAt(hourAt, outdoor, site, H = hourAt + 0.5, span = 0) {
     site, outdoor,
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
     open: Object.fromEntries(net.links.filter((l) => l.control === 'zone' || l.door).map((l) => {
-      if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : $('doors').value === 'open') ? l.openFactor : 0];
+      // doors between rooms as the Doors setting; a door to outdoors shut until opened
+      if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : l.to !== null && $('doors').value === 'open') ? l.openFactor : 0];
       // As in results: an airflow network run gives each window's opening; otherwise the zone's ventilation.
       // Each window opens as far as its sash allows towards the fraction asked of it.
       const reported = mode === 'results' && results ? windowAtTime(results, l.name, H, span) : null;
@@ -596,8 +598,8 @@ function solveAir() {
     const line = document.getElementById('co2-line');
     if (line) line.outerHTML = co2Line(line.dataset.zone);
   }, play ? Math.max(0, 1000 - (performance.now() - co2Last)) : 250);
-  const openNow = Object.entries(conditions.open).filter(([n, f]) => f > 0 && !n.endsWith(':door')).map(([n]) => n);
-  view.setOpenDoors(new Set(Object.entries(conditions.open).filter(([n, f]) => f > 0 && n.endsWith(':door')).map(([n]) => n)));
+  const openNow = Object.entries(conditions.open).filter(([n, f]) => f > 0 && !isDoor(n)).map(([n]) => n);
+  view.setOpenDoors(new Set(Object.entries(conditions.open).filter(([n, f]) => f > 0 && isDoor(n)).map(([n]) => n)));
   view.showWindows(new Set(openNow), new Map(openNow.map((n) => {
     const l = net.links.find((x) => x.name === n);
     return [n, { ...sashOf(n), angle: sashFor(l, conditions.open[n]).angle }];
@@ -605,7 +607,7 @@ function solveAir() {
   $('windows-reset').hidden = !windowSet.size && !roomSet.size;
   showKeyframes();
   // With a results file, temperatures belong to the results' own window states.
-  const differs = results && (modelEdited || mode !== 'results' || [...windowSet.keys()].some((n) => !n.endsWith(':door')) || roomSet.size);
+  const differs = results && (modelEdited || mode !== 'results' || [...windowSet.keys()].some((n) => !isDoor(n)) || roomSet.size);
   $('stale').hidden = !differs;
   if (differs && !rerunning) {
     const [a, b] = rerunWeek();
@@ -757,7 +759,7 @@ function linkStates() {
   for (const l of net.links) {
     if (l.door) {
       if (windowSet.has(l.name)) states[l.name] = windowSet.get(l.name);
-      else if ($('doors').value === 'closed') states[l.name] = false;
+      else if ($('doors').value === 'closed' || l.to === null) states[l.name] = false;
     } else if (l.control === 'zone') {
       if (windowSet.has(l.name)) states[l.name] = windowSet.get(l.name);
       else if (roomSet.has(l.from)) states[l.name] = roomSet.get(l.from);
@@ -1417,8 +1419,9 @@ function popContent(kind, item) {
     rows.push(...freeWallRows(w));
   } else if (kind === 'door') {
     title = 'Door';
-    rows.push(`Between ${esc(item.zone)} and ${esc(item.partnerZone)}`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m`,
-      '<span class="muted">Added by the tool for the airflow network; the model has no interior openings here.</span>');
+    rows.push(item.partnerZone ? `Between ${esc(item.zone)} and ${esc(item.partnerZone)}` : `${esc(item.zone)} to outdoors`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m`);
+    if (item.own) rows.push(`<div class="poprow"><button type="button" class="pbtn danger" data-act="door-del" data-name="${esc(item.name)}" title="Take this door out of the model (Delete); Ctrl+Z puts it back">Delete door</button></div>`);
+    else rows.push('<span class="muted" title="Added by the tool for the airflow network, as the model has no opening between these rooms. A door put here with the Door tool takes its place.">Added for the airflow network</span>');
   } else if (kind === 'zone') {
     title = `Zone · ${esc(item.name)}`;
     rows.push(`${fmt(item.floorArea.value, 1)} m² floor · ${fmt(item.volume.value, 0)} m³ · ${fmt(item.height, 2)} m high`);
@@ -2000,10 +2003,12 @@ function legend() {
   }
   if (Object.keys(model.windows).length) items.push(chip($('color-by').value === 'white' ? '#C4D0D2' : TYPE_COLORS.Glazing, $('show-air').checked ? 'Glazing, closed' : 'Glazing'));
   if ($('show-air').checked && airflow) {
-    const n = Object.entries(airflow.conditions.open).filter(([k, f]) => f > 0 && !k.endsWith(':door')).length;
+    const n = Object.entries(airflow.conditions.open).filter(([k, f]) => f > 0 && !isDoor(k)).length;
     if (n) items.push(chip(OPEN_WINDOW, `Window open (${n})`, 'Open to its operable fraction in the airflow. Select a window or a room to open or close it.'));
   }
-  if (view.doors.length) items.push(chip(TYPE_COLORS.Door, `Door, added (${view.doors.length})`, `The tool adds an open ${DOOR.width} × ${DOOR.height} m door between each room and the circulation zones it shares a wall with, and between adjoining circulation zones, so air can move through the building. Circulation is recognised by zone name (circulation, corridor, hall, lobby, stair, vestibule, foyer, atrium).`));
+  const ownDoors = view.doors.filter((d) => d.own).length, addedDoors = view.doors.length - ownDoors;
+  if (ownDoors) items.push(chip(TYPE_COLORS.Door, `Door (${ownDoors})`, 'The model\'s own doors: between rooms they stand open as the Doors setting says; to outdoors they are shut until opened.'));
+  if (addedDoors) items.push(chip(TYPE_COLORS.Door, `Door, added (${addedDoors})`, `The tool adds an open ${DOOR.width} × ${DOOR.height} m door between each room and the circulation zones it shares a wall with, and between adjoining circulation zones, so air can move through the building. Circulation is recognised by zone name (circulation, corridor, hall, lobby, stair, vestibule, foyer, atrium).`));
   if (model.shading.length) items.push(chip(TYPE_COLORS.Shading, 'Shading'));
   if (view.overlay) {
     const month = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][dateOf(Number($('day').value)).month - 1];
@@ -2481,7 +2486,7 @@ function saveKeyframe() {
 // What a keyframe holds, in a few words.
 function keyframeWords(s) {
   const mode = { open: 'all open', closed: 'all closed', results: 'as in results' }[s.windows] || s.windows;
-  const own = s.windowSet.filter(([n]) => !n.endsWith(':door')).length + s.roomSet.length, doors = s.windowSet.filter(([n]) => n.endsWith(':door')).length;
+  const own = s.windowSet.filter(([n]) => !isDoor(n)).length + s.roomSet.length, doors = s.windowSet.filter(([n]) => isDoor(n)).length;
   return [`windows ${mode}`, s.sash !== 'casement' ? s.sash : null, own ? `${own} set one by one` : null, s.amountSet.length ? `${s.amountSet.length} opening${s.amountSet.length === 1 ? '' : 's'} set` : null,
     `doors ${s.doors}${doors ? `, ${doors} set` : ''}`].filter(Boolean).join(', ');
 }
@@ -2648,6 +2653,8 @@ function render(m) {
   legend();
 }
 
+// A door's name: one the tool adds (…:door) or one of the model's own.
+function isDoor(n) { return n.endsWith(':door') || !!model?.doors?.[n]; }
 // ---------- editing the model ----------
 // Each edit changes the .epJSON (src/model/edit.js); the model is read again from it and everything
 // drawn and solved is rebuilt, keeping the camera, the cuts, the selection and the results (which
@@ -2673,34 +2680,58 @@ let placing = null, offer3d = null, offerMesh = null;
 // ends (its two jambs at the sill, model points), problem }. Sized as the wall's other windows (else the
 // zone's, else 1200 x 1500 mm), its sill 900 mm above the wall's foot; centred on the pointer, snapped
 // to the wall's middle within 150 mm, else to 50 mm along it.
+// The Door tool's offer is the same, a door: DOOR's size standing on the wall's foot; on a massing's wall,
+// the face it is on and how far along it (massing: { zone, face, u }), tried on a copy to see it is made.
 function offerAt(wall, p) {
-  const s = model?.surfaces[wall], ext = s && wallExtent(model, wall);
-  if (!ext || (massing && massingTarget({ kind: 'surface', item: s }))) return null;
-  const like = s.windows.map((n) => windowRect(model, n)).find(Boolean) || model.zones[s.zone].windows.map((n) => windowRect(model, n)).find(Boolean);
-  const w = like ? like.s1 - like.s0 : 1.2, h = like ? like.z1 - like.z0 : 1.5, sill = like ? like.z0 - ext.z0 : 0.9;
+  const s = model?.surfaces[wall], ext = s && wallExtent(model, wall), door = placing === 'door';
+  if (!ext) return null;
+  const mt = massing && massingTarget({ kind: 'surface', item: s });
+  if (mt && !door) return null;
+  let w, h, sill;
+  if (door) { w = DOOR.width; sill = DOOR.sill; h = Math.min(DOOR.height, ext.z1 - ext.z0 - sill - 0.05); }
+  else {
+    const like = s.windows.map((n) => windowRect(model, n)).find(Boolean) || model.zones[s.zone].windows.map((n) => windowRect(model, n)).find(Boolean);
+    w = like ? like.s1 - like.s0 : 1.2; h = like ? like.z1 - like.z0 : 1.5; sill = like ? like.z0 - ext.z0 : 0.9;
+  }
   const f = ext.frame, at = p[0] * f.right[0] + p[1] * f.right[1], mid = (ext.s0 + ext.s1) / 2;
   const c = Math.abs(at - mid) < 0.15 ? mid : Math.round(at / 0.05) * 0.05;
   const r = { s0: c - w / 2, s1: c + w / 2, z0: ext.z0 + sill, z1: ext.z0 + sill + h };
   const P = (ss, z) => [f.right[0] * ss + f.out[0] * f.plane, f.right[1] * ss + f.out[1] * f.plane, z];
-  return { wall, r, ends: [P(r.s0, r.z0), P(r.s1, r.z0)], corners: [P(r.s0, r.z0), P(r.s1, r.z0), P(r.s1, r.z1), P(r.s0, r.z1)], out: f.out, problem: openingProblem(model, wall, r) };
+  let problem = openingProblem(model, wall, r, door ? 'Door' : 'Window'), onMassing = null;
+  if (door && massing) {
+    if (!mt || !Number.isInteger(mt.face)) problem ||= 'Doors go in walls.';
+    else {
+      // the door's middle in the plan's own axes (before the building's turn), along the face
+      const q = turnPlan(P(c, 0), -(massing.rot || 0)), { A, U } = doorFaceAxes(massing, mt.zone, mt.face);
+      onMassing = { zone: mt.zone, face: mt.face, u: (q[0] - A[0]) * U[0] + (q[1] - A[1]) * U[1] };
+      if (!problem) {
+        const trial = structuredClone(massing), d = addDoor(trial, onMassing.zone, onMassing.face, onMassing.u);
+        if (typeof d === 'string') problem = d;
+        else if (!doorGeometry(trial).some((z) => z.doors.some((x) => x.id === d.id))) problem = 'The door does not fit there.';
+      }
+    }
+  }
+  return { kind: door ? 'door' : 'window', wall, r, ends: [P(r.s0, r.z0), P(r.s1, r.z0)], corners: [P(r.s0, r.z0), P(r.s1, r.z0), P(r.s1, r.z1), P(r.s0, r.z1)], out: f.out, problem, massing: onMassing };
 }
 function placeOffer(o) {
   if (!o || o.problem) return;
-  applyEdit((tx, m) => addWindow(tx, m, o.wall, o.r), `window added on ${o.wall}`, { geometry: true });
+  if (o.kind === 'door' && o.massing) { const { zone, face, u } = o.massing; massingChange((x) => { addDoor(x, zone, face, u); }, 'door added'); return; }
+  applyEdit((tx, m) => addWindow(tx, m, o.wall, o.r, o.kind === 'door' ? 'Door' : 'Window'), `${o.kind} added on ${o.wall}`, { geometry: true });
 }
 function setPlacing(kind) {
   placing = kind;
   $('place-window').setAttribute('aria-pressed', String(kind === 'window'));
+  $('place-door').setAttribute('aria-pressed', String(kind === 'door'));
   if (!kind) { offer3d = null; showOffer(null); }
-  if (kind) { view.select(null); tools.stop?.(); }
-  ws.repaint?.();
+  if (kind) { view.select(null); tools.stop?.(); cmdLine?.remember(TOOL_COMMAND[kind]); }
+  ws.selection?.(); // the plans' offers drawn again (gone)
 }
 // The offered window in 3D: its pane just out from the wall, glass (red where it does not fit).
 function showOffer(o) {
   if (offerMesh) { offerMesh.traverse((x) => { x.geometry?.dispose(); x.material?.dispose(); }); view.scene.remove(offerMesh); offerMesh = null; }
   if (o) {
     const og = view.origin, pts = o.corners.map((q) => new THREE.Vector3(q[0] - og[0] + o.out[0] * 0.04, q[1] - og[1] + o.out[1] * 0.04, q[2] - og[2]));
-    const col = o.problem ? '#C0442B' : '#2F6F68', g = new THREE.BufferGeometry().setFromPoints([pts[0], pts[1], pts[2], pts[0], pts[2], pts[3]]);
+    const col = o.problem ? '#C0442B' : o.kind === 'door' ? TYPE_COLORS.Door : '#2F6F68', g = new THREE.BufferGeometry().setFromPoints([pts[0], pts[1], pts[2], pts[0], pts[2], pts[3]]);
     offerMesh = new THREE.Group();
     offerMesh.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthTest: false })));
     offerMesh.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: col, depthTest: false })));
@@ -2711,6 +2742,7 @@ function showOffer(o) {
   view.render();
 }
 $('place-window').addEventListener('click', () => setPlacing(placing === 'window' ? null : 'window'));
+$('place-door').addEventListener('click', () => setPlacing(placing === 'door' ? null : 'door'));
 view.renderer.domElement.addEventListener('pointermove', (e) => {
   if (!placing || e.buttons) return;
   const h = view.hitAt(e), o = view.origin, s = h && (h.kind === 'surface' ? h.item : h.kind === 'window' ? model.surfaces[h.item.parent] : null);
@@ -2719,7 +2751,7 @@ view.renderer.domElement.addEventListener('pointermove', (e) => {
   showOffer(offer3d);
 });
 view.placeAt = () => { if (!placing) return false; placeOffer(offer3d); return true; };
-addEventListener('keydown', (e) => { if (placing && e.key === 'Escape') { setPlacing(null); e.stopImmediatePropagation(); } }, true);
+addEventListener('keydown', (e) => { if (placing && (e.key === 'Escape' || e.key === 'Enter')) { setPlacing(null); e.preventDefault(); e.stopImmediatePropagation(); } }, true);
 // ---------- the selection ----------
 let selection = new Set(), keepSelection = false;
 // Selects names (the last the one whose pop-up and handles show); add: to what is selected (one already
@@ -2754,9 +2786,11 @@ function deleteMany() {
   const zones = massing ? massingGeometry(massing) : [], zi = names.map((n) => zones.findIndex((z) => z.name === n)).filter((i) => i >= 0);
   const walls = names.filter((n) => String(n).startsWith('wall:')).map((n) => Number(n.slice(5)));
   const wins = !massing ? names.filter((n) => model.windows[n]) : [];
+  const doorIds = massing ? names.map(massingDoorId).filter((id) => id !== null) : [], doorsOwn = !massing ? names.filter((n) => model.doors?.[n]) : [];
   selection = new Set();
   view.select(null);
-  if (massing && (zi.length || walls.length)) massingChange((x) => { for (const id of walls) deleteWall(x, id); for (const i of zi.sort((a, b) => b - a)) deleteZone(x, i); }, `${zi.length + walls.length} deleted`);
+  if (massing && (zi.length || walls.length || doorIds.length)) massingChange((x) => { for (const id of doorIds) deleteDoor(x, id); for (const id of walls) deleteWall(x, id); for (const i of zi.sort((a, b) => b - a)) deleteZone(x, i); }, `${zi.length + walls.length + doorIds.length} deleted`);
+  if (doorsOwn.length) applyEdit((tx) => { for (const n of doorsOwn) { tx.remove('FenestrationSurface:Detailed', n); const p = model.doors[n].partner; if (p && tx.epjson['FenestrationSurface:Detailed']?.[p]) tx.remove('FenestrationSurface:Detailed', p); } }, `${doorsOwn.length} doors deleted`, { geometry: true });
   if (wins.length) applyEdit((tx) => { for (const n of wins) tx.remove('FenestrationSurface:Detailed', n); }, `${wins.length} windows deleted`, { geometry: true });
 }
 $('info').addEventListener('click', (e) => {
@@ -2829,6 +2863,9 @@ function wallBetween(found) {
 }
 
 // ---------- the command line (cmdline.js) ----------
+// the command each tool is (a tool begun from its button is the last command, for Enter to repeat)
+const TOOL_COMMAND = { wall: 'Draw wall', add: 'Add zone', split: 'Split zone', face: 'Split wall', push: 'Push pull', corner: 'Corner', extend: 'Extend', merge: 'Merge zones', mergefaces: 'Merge walls', seam: 'Remove seam', window: 'Window', door: 'Door' };
+let cmdLine = null;
 // Each command does what its button or key does; a massing's tools need a massing.
 {
   const click = (id) => () => $(id)?.click();
@@ -2836,9 +2873,10 @@ function wallBetween(found) {
   const key = (k, o = {}) => () => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...o }));
   const look = (d) => () => view.lookFrom(new THREE.Vector3(...d));
   const proj = (p) => () => $('projection').querySelector(`[data-proj="${p}"]`)?.click();
-  commandLine(document.querySelector('.cmdline'), [
+  cmdLine = commandLine(document.querySelector('.cmdline'), [
     { name: 'Draw wall', also: ['Wall'], run: tool('wall'), title: 'Draw walls in a plan or in 3D' },
     { name: 'Window', also: ['Add window'], run: () => setPlacing('window'), title: 'Put windows on walls' },
+    { name: 'Door', also: ['Add door'], run: () => setPlacing('door'), title: 'Put doors in walls' },
     { name: 'Add zone', also: ['Zone'], run: tool('add') },
     { name: 'Split zone', run: tool('split') },
     { name: 'Split wall', run: tool('face') },
@@ -2871,16 +2909,39 @@ function wallBetween(found) {
     { name: 'Example massing', run: click('new-massing') },
     { name: 'Open', also: ['Import'], run: click('file') },
     { name: 'Export', also: ['Save'], run: click('export') },
-  ], { taken: () => !!(tools.tool === 'wall' && tools.wall?.typed) });
+  ], {
+    taken: () => !!(tools.tool === 'wall' && tools.wall?.typed),
+    idle: () => !tools.tool && !placing && !view.sections.placing,
+    area: (t) => !!t?.closest?.('#viewer, .vrow') && !t.closest('input, select, textarea, button, .vfloat, #info, .pop'),
+  });
 }
 
-// A window taken out of an imported model (a massing's windows are its arrays').
+// A window taken out of an imported model (a massing's windows are its arrays'), with its other side
+// on a wall between zones.
 function deleteWindow(name) {
   if (!model?.windows[name]) return;
   view.select(null);
+  const other = model.epjson['FenestrationSurface:Detailed']?.[name]?.outside_boundary_condition_object;
   for (const m of [windowSet, sashSet, amountSet]) m.delete(name);
-  applyEdit((tx) => { tx.remove('FenestrationSurface:Detailed', name); }, `window ${name} deleted`, { geometry: true });
+  applyEdit((tx) => { tx.remove('FenestrationSurface:Detailed', name); if (other && tx.epjson['FenestrationSurface:Detailed']?.[other]) tx.remove('FenestrationSurface:Detailed', other); }, `window ${name} deleted`, { geometry: true });
 }
+// A massing's door, by the name it has in the model: its id in massing.doors, or null.
+function massingDoorId(name) {
+  if (!massing) return null;
+  for (const z of doorGeometry(massing)) { const d = z.doors.find((x) => x.name === name); if (d) return d.id; }
+  return null;
+}
+// A door of the model's own taken out: from the massing, or from the .epJSON with its other side.
+function deleteDoorNamed(name) {
+  const d = model?.doors?.[name];
+  if (!d) return;
+  view.select(null);
+  windowSet.delete(name);
+  const id = massingDoorId(name);
+  if (id !== null) { massingChange((x) => deleteDoor(x, id), 'door deleted'); return; }
+  applyEdit((tx) => { tx.remove('FenestrationSurface:Detailed', name); if (d.partner && tx.epjson['FenestrationSurface:Detailed']?.[d.partner]) tx.remove('FenestrationSurface:Detailed', d.partner); }, `door ${name} deleted`, { geometry: true });
+}
+$('info').addEventListener('click', (e) => { const b = e.target.closest('button[data-act="door-del"]'); if (b) deleteDoorNamed(b.dataset.name); });
 $('info').addEventListener('click', (e) => { const b = e.target.closest('button[data-act="win-del"]'); if (b) deleteWindow(b.dataset.name); });
 // A cap's swatch: the colour picker, the plane (or the 3D particles) taking the colour as it is picked;
 // one undo step for the whole pick.
@@ -2967,7 +3028,7 @@ function refreshModel(geometry = true) {
   field = null;
   startGrid(m);
   air.setGrid(rooms.g, Object.values(m.zones).reduce((s, z) => s + z.volume.value, 0));
-  for (const map of [windowSet, sashSet, amountSet]) for (const k of [...map.keys()]) if (!m.windows[k] && !k.endsWith(':door')) map.delete(k);
+  for (const map of [windowSet, sashSet, amountSet]) for (const k of [...map.keys()]) if (!m.windows[k] && !isDoor(k)) map.delete(k);
   view.cube.setNorth(-m.site.northAxis, buildingNorth(m));
   view.setColorBy($('color-by').value);
   view.setShadingVisible($('show-shading').checked);
@@ -3013,6 +3074,9 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
   } else if (e.key === 'Delete' && !massing && current()?.kind === 'window') {
     deleteWindow(current().item.name);
+    e.preventDefault();
+  } else if (e.key === 'Delete' && current()?.kind === 'door' && current().item.own) {
+    deleteDoorNamed(current().item.name);
     e.preventDefault();
   } else if (e.key === 'Delete' && massing && current()?.kind === 'wall') {
     const f = current();

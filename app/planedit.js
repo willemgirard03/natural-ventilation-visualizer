@@ -127,6 +127,12 @@ export class PlanEdit {
       const seg = cutLine(w.vertices.map(V), zc);
       if (seg) windows.push({ name: w.name, seg });
     }
+    // doors (the model's own and those added), where the cut passes through them
+    const doors = [];
+    for (const d of v.doors || []) {
+      const seg = cutLine(d.vertices.map(V), zc);
+      if (seg) doors.push({ name: d.name, seg });
+    }
     // the drawn walls standing free that the cut passes through: their footprint at their thickness
     const free = [];
     for (const w of v.freeList || []) {
@@ -135,7 +141,7 @@ export class PlanEdit {
       const Q = (p, s) => [p[0] + n[0] * s - o3[0], p[1] + n[1] * s - o3[1]];
       free.push({ name: `wall:${w.id}`, id: w.id, seg: [Q(w.a, w.off), Q(w.b, w.off)], loops: [[Q(w.a, s0), Q(w.b, s0), Q(w.b, s1), Q(w.a, s1)]] });
     }
-    this.cache = { key: this.d.key, walls, windows, free, zones: [...zones].map(([name, polys]) => ({ name, polys })) };
+    this.cache = { key: this.d.key, walls, windows, doors, free, zones: [...zones].map(([name, polys]) => ({ name, polys })) };
     return this.cache;
   }
 
@@ -147,6 +153,8 @@ export class PlanEdit {
     const near = (seg) => segDist([x, y], this.d.toPx(...seg[0]), this.d.toPx(...seg[1]));
     const win = c.windows.map((w) => [w, near(w.seg)]).filter(([, dd]) => dd < NEAR_PX).sort((a, b) => a[1] - b[1])[0];
     if (win) return { kind: 'window', name: win[0].name, item: win[0] };
+    const door = c.doors.map((d) => [d, near(d.seg)]).filter(([, dd]) => dd < NEAR_PX).sort((a, b) => a[1] - b[1])[0];
+    if (door) return { kind: 'door', name: door[0].name, item: door[0] };
     const fw = c.free.find((w) => w.loops.some((L) => inside(L, q)) || near(w.seg) < NEAR_PX);
     if (fw) return { kind: 'wall', name: fw.name, item: fw };
     // a wall: in its cut (drawn thick) or near its line; of a wall shared by two zones, the one on the
@@ -262,6 +270,7 @@ export class PlanEdit {
   find(name) {
     const c = this.picks();
     const w = c.windows.find((x) => x.name === name); if (w) return { kind: 'window', item: w };
+    const dr = c.doors.find((x) => x.name === name); if (dr) return { kind: 'door', item: dr };
     const s = c.walls.find((x) => x.name === name); if (s) return { kind: 'surface', item: s };
     const fw = c.free.find((x) => x.name === name); if (fw) return { kind: 'wall', item: fw };
     const z = c.zones.find((x) => x.name === name); if (z) return { kind: 'zone', item: z };

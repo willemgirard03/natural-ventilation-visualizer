@@ -273,6 +273,37 @@ function wallPieces(info, i, k) {
   return { A, U, len, pieces: out };
 }
 
+// ---------- doors ----------
+// A door is a point on a wall's line in plan (p, the building's axes before its turn), standing on a
+// level (level) with a width and height (w, h, m): it is made on whichever zone's face runs through it
+// on that level, on both sides of a wall between zones. m.doors [{ id, p, level, w, h }].
+export const DOOR_SILL = 0.02; // m: off the floor, as EnergyPlus keeps a subsurface inside its wall
+export const DOOR0 = { w: 0.9, h: 2.1 };
+export const nextDoorId = (m) => (m.doors || []).reduce((a, d) => Math.max(a, d.id + 1), 0);
+// Where door d falls on face k of zone i: its span along the face from its first corner { u0, u1 },
+// or null when it is not on that face (not in line, off its ends, or not on the zone's floor level).
+export function doorOn(m, d, i, k) {
+  const z = m.zones[i];
+  if (d.level !== z.base) return null;
+  const P = z.plate, A = P[k], B = P[(k + 1) % P.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+  if (len < 1e-9) return null;
+  const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len], off = (d.p[0] - A[0]) * U[1] - (d.p[1] - A[1]) * U[0], u = (d.p[0] - A[0]) * U[0] + (d.p[1] - A[1]) * U[1];
+  if (Math.abs(off) > 0.01 || u < 0 || u > len) return null;
+  return { u0: u - d.w / 2, u1: u + d.w / 2, len };
+}
+// The door at plan point p on face k of zone i, its middle held clear of the face's ends; or why not.
+export function addDoor(m, i, k, u, { w = DOOR0.w, h = DOOR0.h } = {}) {
+  const z = m.zones[i], P = z.plate, A = P[k], B = P[(k + 1) % P.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+  if (len < w + 2 * WINDOW_EDGE) return 'The wall is too short for the door.';
+  u = Math.min(len - w / 2 - WINDOW_EDGE, Math.max(w / 2 + WINDOW_EDGE, u));
+  const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
+  m.doors ||= [];
+  const d = { id: nextDoorId(m), p: [R6(A[0] + U[0] * u), R6(A[1] + U[1] * u)], level: z.base, w, h };
+  m.doors.push(d);
+  return d;
+}
+export function deleteDoor(m, id) { if (m.doors) m.doors = m.doors.filter((d) => d.id !== id); }
+
 // Every zone's surfaces and windows, in building coordinates (the plan turned by `rot`, degrees
 // clockwise), before they are written: the geometry the tests and the drawings read. Surfaces that
 // meet another zone's (a floor on a ceiling, two walls back to back) are paired by `partner`.
@@ -282,7 +313,7 @@ export function massingGeometry(m) {
   const turn = ([x, y, h]) => [x * c + y * sn, -x * sn + y * c, h];
   const info = m.zones.map((z, i) => {
     const [z0, z1] = zoneLevels(m, i);
-    return { name: zoneName(m, i), zone: i, z0, z1, plate: z.plate, area: Math.abs(polyArea(z.plate)), surfaces: [], windows: [] };
+    return { name: zoneName(m, i), zone: i, z0, z1, plate: z.plate, area: Math.abs(polyArea(z.plate)), surfaces: [], windows: [], doors: [] };
   });
   const pairs = new Map(); // where two surfaces meet: a key from their corners -> the surfaces there
   const keyOf = (pts) => pts.map((p) => p.map((x) => x.toFixed(3)).join(',')).sort().join('|');
@@ -312,6 +343,15 @@ export function massingGeometry(m) {
         if (!host) return;
         zone.windows.push({ name: `${host.name}:w${n}`, wall: host.name, face: k, index: w.index, width: w.u1 - w.u0, height: w.v1 - w.v0, azimuth: az, vertices: [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)].map(turn) });
       });
+      // the doors standing on this zone's floor along this face, each on the piece that holds it whole
+      for (const d of m.doors || []) {
+        const at2 = doorOn(m, d, i, k);
+        if (!at2) continue;
+        const v0 = zone.z0 + DOOR_SILL, v1 = Math.min(v0 + d.h, zone.z1 - (z.slab || 0) - WINDOW_EDGE);
+        const host = walls.find((p) => at2.u0 >= p.u0 + WINDOW_EDGE - 1e-9 && at2.u1 <= p.u1 - WINDOW_EDGE + 1e-9 && v0 >= p.z0 - 1e-9 && v1 <= p.z1 + 1e-9);
+        if (!host || v1 - v0 < 0.5) continue;
+        zone.doors.push({ name: `${host.name}:d${d.id}`, id: d.id, wall: host.name, other: host.other, face: k, width: at2.u1 - at2.u0, height: v1 - v0, vertices: [at(at2.u0, v0), at(at2.u1, v0), at(at2.u1, v1), at(at2.u0, v1)].map(turn) });
+      }
     });
     // the ceiling: under the zones above where they overlap, a roof elsewhere
     for (const cell of cellsOf(z)) {
@@ -323,6 +363,17 @@ export function massingGeometry(m) {
   for (const list of pairs.values()) {
     if (list.length === 2 && list[0].name.split(':')[0] !== list[1].name.split(':')[0]) { list[0].partner = list[1].name; list[1].partner = list[0].name; continue; }
     for (const s of list) s.kind = s.type === 'Floor' ? 'exposed' : s.type === 'Wall' ? 'facade' : 'roof', s.type = s.type === 'Ceiling' ? 'Roof' : s.type;
+  }
+  // a door between two zones is made on both sides, each naming the other; one whose other side found
+  // no piece to stand on (or whose wall is no longer paired) is not made
+  for (const zone of info) {
+    zone.doors = zone.doors.filter((d) => {
+      if (d.other === null) return true;
+      const wall = zone.surfaces.find((x) => x.name === d.wall), mate = info[d.other]?.doors.find((x) => x.id === d.id && x.other === zone.zone);
+      if (!wall?.partner || !mate) return false;
+      d.partner = mate.name;
+      return true;
+    });
   }
   return info;
 }
@@ -363,6 +414,7 @@ export const GENERIC_ASSEMBLIES = {
   partition: ['Generic Interior Wall', ['Unspecified partition 150mm']],
 };
 const MASSING_ASSEMBLIES_SLAB_T = GENERIC_ASSEMBLIES.slab[1].reduce((t, n) => t + UNSPECIFIED[n][0], 0);
+export const MASSING_DOOR = 'Massing Door'; // a 40 mm wood door, as the doors the airflow export adds
 export const MASSING_GLAZING = ['Massing Double Glazing', { u_factor: 1.4, solar_heat_gain_coefficient: 0.4, visible_transmittance: 0.6 }];
 
 // Office day profiles, hour by hour (public DOE prototype office shape).
@@ -486,6 +538,10 @@ export function massingEpJSON(m, { weather = null, runPeriod = null, ep: from = 
   // drawn walls' own assemblies, where they name one the model has (from ep, carried over)
   for (const w of m.walls || []) if (w.asm && !ep.Construction[w.asm] && from?.Construction?.[w.asm]) ep.Construction[w.asm] = structuredClone(from.Construction[w.asm]);
   ep['WindowMaterial:SimpleGlazingSystem'][MASSING_GLAZING[0]] = { ...MASSING_GLAZING[1] };
+  if (zones.some((z) => z.doors.length)) {
+    ep.Material['Massing Door Wood'] = { roughness: 'MediumSmooth', thickness: 0.04, conductivity: 0.15, density: 600, specific_heat: 1600, thermal_absorptance: 0.9, solar_absorptance: 0.7, visible_absorptance: 0.7 };
+    ep.Construction[MASSING_DOOR] = { outside_layer: 'Massing Door Wood' };
+  }
   construction(MASSING_GLAZING[0], [MASSING_GLAZING[0]]);
 
   // every zone takes the generic assemblies (of an unspecified material, until set); a wall on a drawn
@@ -516,6 +572,11 @@ export function massingEpJSON(m, { weather = null, runPeriod = null, ep: from = 
       operable += a; heights += a * w.height;
       ep['ZoneVentilation:WindandStackOpenArea'][`${Z}NatVent_Wind${k}`] = ventilation(Z, set, { opening_area: a, effective_angle: Math.round(w.azimuth), height_difference: 0, discharge_coefficient_for_opening: 0, opening_effectiveness: 'Autocalculate' });
     });
+    for (const d of zone.doors) {
+      const o = { surface_type: 'Door', construction_name: MASSING_DOOR, building_surface_name: d.wall, ...(d.partner ? { outside_boundary_condition_object: d.partner } : {}), multiplier: 1, number_of_vertices: 4 };
+      d.vertices.forEach(([x, y, z], j) => Object.assign(o, { [`vertex_${j + 1}_x_coordinate`]: +x.toFixed(6), [`vertex_${j + 1}_y_coordinate`]: +y.toFixed(6), [`vertex_${j + 1}_z_coordinate`]: +z.toFixed(6) }));
+      ep['FenestrationSurface:Detailed'][d.name] = o;
+    }
     if (operable > 0) ep['ZoneVentilation:WindandStackOpenArea'][`${Z}NatVent_Buoy`] = ventilation(Z, set, { opening_area: operable, effective_angle: 0, height_difference: heights / operable / 4, discharge_coefficient_for_opening: 0.6, opening_effectiveness: 0 });
 
     ep.People[`People ${Z}`] = { zone_or_zonelist_or_space_or_spacelist_name: Z, number_of_people_schedule_name: 'Office Occupancy', number_of_people_calculation_method: 'People/Area', people_per_floor_area: set.peoplePerArea, fraction_radiant: 0.3, sensible_heat_fraction: 'Autocalculate', activity_level_schedule_name: 'Activity', carbon_dioxide_generation_rate: 3.82e-8, work_efficiency_schedule_name: 'Work Efficiency', clothing_insulation_calculation_method: 'DynamicClothingModelASHRAE55', air_velocity_schedule_name: 'Air Speed', mean_radiant_temperature_calculation_type: 'ZoneAveraged', thermal_comfort_model_1_type: 'AdaptiveASH55', thermal_comfort_model_2_type: 'Fanger' };
@@ -582,7 +643,7 @@ export function applyMassing(tx, m, opts = {}) {
   for (const [n, v] of Object.entries(ep['ZoneVentilation:WindandStackOpenArea'] || {})) {
     const Z = v.zone_or_space_name;
     if (vent[Z] || !n.endsWith('_Buoy')) continue;
-    const glazing = Object.values(ep['FenestrationSurface:Detailed'] || {}).filter((w) => ep['BuildingSurface:Detailed']?.[w.building_surface_name]?.zone_name === Z);
+    const glazing = Object.values(ep['FenestrationSurface:Detailed'] || {}).filter((w) => w.surface_type !== 'Door' && ep['BuildingSurface:Detailed']?.[w.building_surface_name]?.zone_name === Z);
     const area = glazing.reduce((s, w) => s + windowArea(w), 0);
     vent[Z] = { fraction: area > 0 ? v.opening_area / area : null, controls: Object.fromEntries(KEEP_VENT.filter((k) => k in v).map((k) => [k, v[k]])) };
   }
@@ -1102,9 +1163,20 @@ function limited(m, i, x, act) {
 // The drawn walls along face k of zone i, each cut where the face ends: the pieces on the face (their
 // indices) go with it; the rest stay where they stand, as the walls of the zones beside it (a wall drawn
 // along two rooms' sides, one of them pushed, keeps the other's part).
-function wallsToFace(m, i, k) {
-  const P = m.zones[i].plate, a = P[k], b = P[(k + 1) % P.length], out = [];
-  for (const j of wallsOn(m, i, k)) {
+// With other faces in line with it (`more`, [[zone, face]], those moving with it), the span is all of them.
+function wallsToFace(m, i, k, more = []) {
+  const P = m.zones[i].plate, a0 = P[k], b0 = P[(k + 1) % P.length];
+  let lo = 0, hi = 1;
+  for (const [j, q] of more) { const Q = m.zones[j].plate; for (const p of [Q[q], Q[(q + 1) % Q.length]]) { const t = along(p, a0, b0)[0]; lo = Math.min(lo, t); hi = Math.max(hi, t); } }
+  const at0 = (t) => [a0[0] + (b0[0] - a0[0]) * t, a0[1] + (b0[1] - a0[1]) * t], a = at0(lo), b = at0(hi), out = [];
+  const z = m.zones[i];
+  const on = (m.walls || []).map((w, j) => j).filter((j) => {
+    const w = m.walls[j];
+    if (!levelsOverlap(m, w, z)) return false;
+    const [ta, oa] = along(w.a, a, b), [tb, ob] = along(w.b, a, b);
+    return Math.abs(oa) < 0.01 && Math.abs(ob) < 0.01 && Math.min(1, Math.max(ta, tb)) - Math.max(0, Math.min(ta, tb)) > 1e-4;
+  });
+  for (const j of on) {
     const w = m.walls[j], ta = along(a, w.a, w.b)[0], tb = along(b, w.a, w.b)[0];
     const t0 = Math.max(0, Math.min(ta, tb)), t1 = Math.min(1, Math.max(ta, tb)), L = len2(sub2(w.b, w.a));
     const at = (t) => [R6(w.a[0] + (w.b[0] - w.a[0]) * t), R6(w.a[1] + (w.b[1] - w.a[1]) * t)];
@@ -1117,7 +1189,85 @@ function wallsToFace(m, i, k) {
 }
 export function extrudeFace(m, i, k, d) {
   const shared = sharingFaces(m, i, k).length > 0, N = faceAxes(m, i, k).n;
-  return limited(m, i, d, (x, v) => { const ws = shared ? [] : wallsToFace(x, i, k), r = extrudeRaw(x, i, k, v); if (r === false) return false; shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]); });
+  return limited(m, i, d, (x, v) => {
+    const ws = shared ? [] : wallsToFace(x, i, k), ends = shared ? [] : endsOnFaces(x, [[i, k]], ws, N, false), r = extrudeRaw(x, i, k, v);
+    if (r === false) return false;
+    shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]);
+    followEnds(x, ends, N, r.d);
+  });
+}
+// The ends of drawn walls (not those in `skip`) that stand on the faces `list` ([[zone, face]]) - the
+// walls meeting them, square or not - which follow the faces when they move by d along N. Only the
+// walls running into the first zone follow, and with `both` those running out of it too (into zones
+// moving with it). [{ j, end, p, u }]: u the way along the wall, from that end.
+function endsOnFaces(m, list, skip, N, both) {
+  const out = [], z = m.zones[list[0][0]];
+  (m.walls || []).forEach((w, j) => {
+    if (skip.includes(j) || !levelsOverlap(m, w, z)) return;
+    for (const end of ['a', 'b']) {
+      const p = w[end], o = end === 'a' ? w.b : w.a, D = sub2(o, p), L = len2(D);
+      if (L < 1e-9) continue;
+      const u = [D[0] / L, D[1] / L], into = dot2(u, N);
+      if (Math.abs(into) < 1e-6 || (!both && into > 0)) continue; // along the face, or running away outside it
+      const on = list.some(([zi, k]) => { const P = m.zones[zi].plate, a = P[k], b = P[(k + 1) % P.length], [t, off] = along(p, a, b), l = len2(sub2(b, a)) || 1; return Math.abs(off) < 0.01 && t > -0.01 / l && t < 1 + 0.01 / l; });
+      if (on) out.push({ j, end, p: [...p], u });
+    }
+  });
+  return out;
+}
+// Those ends carried along their walls to where the faces now stand (d along N). An end that would be
+// drawn back along its wall stays where that piece of wall is still on a zone's face (another room's
+// wall); a wall left shorter than 5 cm goes.
+function followEnds(m, ends, N, d) {
+  if (!ends.length || Math.abs(d) < 1e-9) return;
+  const gone = new Set();
+  for (const { j, end, p, u } of ends) {
+    const w = m.walls[j], s = d / dot2(u, N), q = [R6(p[0] + u[0] * s), R6(p[1] + u[1] * s)];
+    if (s > 0) { const mid = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]; if (onZoneEdge(m, w, mid)) continue; }
+    w[end] = q;
+    if (len2(sub2(w.b, w.a)) < 0.05) gone.add(w.id);
+  }
+  if (gone.size) m.walls = m.walls.filter((w) => !gone.has(w.id));
+}
+// Whether point p lies on an edge of a zone on wall w's levels.
+function onZoneEdge(m, w, p) {
+  return m.zones.some((z) => levelsOverlap(m, w, z) && z.plate.some((a, k) => {
+    const b = z.plate[(k + 1) % z.plate.length], [t, off] = along(p, a, b);
+    return Math.abs(off) < 0.01 && t > 1e-6 && t < 1 - 1e-6;
+  }));
+}
+// The pieces of drawn walls on zone z0's levels lying along p -> q taken out (the walls cut there):
+// the wall between two zones made one.
+function cutWalls(m, z0, p, q) {
+  if (!m.walls?.length) return;
+  const L = len2(sub2(q, p));
+  if (L < 1e-6) return;
+  const keep = [];
+  let id = nextWallId(m);
+  for (const w of m.walls) {
+    const [ta, oa] = along(w.a, p, q), [tb, ob] = along(w.b, p, q);
+    if (!levelsOverlap(m, w, z0) || Math.abs(oa) > 0.01 || Math.abs(ob) > 0.01) { keep.push(w); continue; }
+    const s0 = Math.min(ta, tb), s1 = Math.max(ta, tb), flip = ta > tb;
+    if (s1 <= 1e-6 || s0 >= 1 - 1e-6) { keep.push(w); continue; }
+    // the wall's span along p -> q, less [0, 1]
+    const rest = [[s0, Math.min(s1, 0)], [Math.max(s0, 1), s1]].filter(([x, y]) => (y - x) * L > 0.05);
+    const at = (t) => [R6(p[0] + (q[0] - p[0]) * t), R6(p[1] + (q[1] - p[1]) * t)];
+    rest.forEach(([x, y], n) => { const a = at(flip ? y : x), b = at(flip ? x : y); keep.push(n ? { ...structuredClone(w), id: id++, a, b } : { ...w, a, b }); });
+  }
+  m.walls = keep;
+}
+// The lines along which zones in `list` meet (one's face back to back with another's): [[p, q], ...].
+function meetingLines(m, list) {
+  const out = [];
+  for (const i of list) m.zones[i].plate.forEach((a, k) => {
+    for (const [j, q] of sharingFaces(m, i, k)) {
+      if (!list.includes(j) || j < i) continue;
+      const P = m.zones[i].plate, b = P[(k + 1) % P.length], Q = m.zones[j].plate, ts = [Q[q], Q[(q + 1) % Q.length]].map((x) => along(x, a, b)[0]);
+      const lo = Math.max(0, Math.min(...ts)), hi = Math.min(1, Math.max(...ts)), at = (t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+      if (hi > lo) out.push([at(lo), at(hi)]);
+    }
+  });
+  return out;
 }
 
 // The faces of other zones that share face k of zone i: in line with it, facing the other way, along
@@ -1148,9 +1298,10 @@ export function pushWall(m, i, k, d) {
   if (!share.length) return extrudeFace(m, i, k, d);
   const N = faceAxes(m, i, k).n;
   return limited(m, [i, ...share.map(([j]) => j)], d, (x, v) => {
-    const ws = wallsToFace(x, i, k), r = extrudeRaw(x, i, k, v);
+    const ws = wallsToFace(x, i, k, share), ends = endsOnFaces(x, [[i, k], ...share], ws, N, true), r = extrudeRaw(x, i, k, v);
     if (r === false || !share.every(([j, q]) => extrudeRaw(x, j, q, -r.d) !== false)) return false;
     shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]);
+    followEnds(x, ends, N, r.d);
   });
 }
 
@@ -1297,6 +1448,8 @@ export function mergeZones(m, list, keepSeams = true) {
   if (union[0].length > 1) return 'Merged, they would enclose a courtyard: not yet possible.';
   let P = pieces(union)[0];
   if (keepSeams) P = withSeams(P, zs.flatMap((z) => z.plate));
+  // the drawn walls where they met go: the room is one
+  for (const [p, q] of meetingLines(m, list)) cutWalls(m, first, p, q);
   // begin the outline at the corner nearest where the first zone's began, so its faces keep their order
   const q = P.reduce((b, p, j) => (Math.hypot(p[0] - first.plate[0][0], p[1] - first.plate[0][1]) < Math.hypot(P[b][0] - first.plate[0][0], P[b][1] - first.plate[0][1]) ? j : b), 0);
   P = [...P.slice(q), ...P.slice(0, q)];

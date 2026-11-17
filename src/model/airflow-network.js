@@ -87,9 +87,10 @@ export function networkElements(model, options = {}) {
     const fraction = w.operableFraction?.value;
     links.push(opening({ name: w.name, from: w.zone, to: null, vertices: w.vertices, openFactor: fraction ? Math.min(1, fraction) : 1, control: fraction ? 'zone' : 'closed' }));
   }
-  const doors = o.doors ? interiorDoors(model) : [];
+  const doors = interiorDoors(model, undefined, { add: o.doors }); // the model's own, and those added
   for (const d of doors) {
-    links.push(opening({ name: d.name, from: d.zone, to: d.partnerZone, vertices: d.vertices, openFactor: 1, control: 'open', door: d, closedCoefficient: coefficient(o.doorLeakage50, o.flowExponent) }));
+    // a door between rooms stands open; one to outdoors is shut (a crack) until opened
+    links.push(opening({ name: d.name, from: d.zone, to: d.partnerZone, vertices: d.vertices, openFactor: 1, control: d.partnerZone ? 'open' : 'closed', door: d, closedCoefficient: coefficient(o.doorLeakage50, o.flowExponent) }));
   }
   if (o.states) for (const l of links) if (l.type === 'opening' && l.name in o.states) l.control = o.states[l.name] ? 'open' : 'closed';
   if (o.openFactors) for (const l of links) if (l.type === 'opening' && l.name in o.openFactors) l.openFactor = o.openFactors[l.name];
@@ -109,7 +110,7 @@ export function modelNetwork(model, o = NETWORK_DEFAULTS) {
   const detailed = ep['AirflowNetwork:MultiZone:Component:DetailedOpening'] || {};
   const links = [];
   for (const a of Object.values(list)) {
-    const name = a.surface_name, s = model.surfaces[name], w = model.windows[name], factor = a.window_door_opening_factor_or_crack_factor ?? 1;
+    const name = a.surface_name, s = model.surfaces[name], w = model.windows[name] || model.doors?.[name], factor = a.window_door_opening_factor_or_crack_factor ?? 1;
     const c = cracks[a.leakage_component_name], so = simple[a.leakage_component_name], dO = detailed[a.leakage_component_name];
     if (s && c) {
       const to = s.boundary === 'Surface' ? s.adjacentZone : null;
@@ -245,7 +246,7 @@ export function toAirflowNetwork(model, options = {}) {
       ventilation_control_mode: { zone: 'ZoneLevel', open: 'Constant', closed: 'NoVent' }[l.control],
     };
   }
-  if (doors.length) writeDoors(ep, doors);
+  if (doors.some((d) => !d.own)) writeDoors(ep, doors.filter((d) => !d.own));
   if (o.gradual) gradualVenting(ep, model, links, surfaces, setpointOf);
   ep['AirflowNetwork:MultiZone:Surface:Crack'] = cracks;
   ep['AirflowNetwork:MultiZone:Component:SimpleOpening'] = openings;

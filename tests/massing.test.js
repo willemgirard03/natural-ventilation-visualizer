@@ -516,3 +516,50 @@ test('a zone\'s side pushed: only the piece of a longer drawn wall along it move
   assert.deepEqual(at(8), [[5, 10]], 'the upper room\'s piece moved with it');
   assert.deepEqual(at(10), [[0, 5]], 'the lower room keeps its piece, and nothing stands beyond it');
 });
+
+test('walls meeting a pushed face follow it; rooms merged lose the wall between them', async () => {
+  const M = await import('../src/model/massing.js');
+  const make = () => { const m = M.massingBlank(); for (const [a, b] of [[[0, 0], [10, 0]], [[10, 0], [10, 6]], [[10, 6], [0, 6]], [[0, 6], [0, 0]], [[5, 0], [5, 6]]]) M.addWall(m, { a, b, base: 0, top: 1 }); return m; };
+  const face = (m, i, f) => m.zones[i].plate.findIndex((p, k) => f(p, m.zones[i].plate[(k + 1) % m.zones[i].plate.length]));
+  const west = (m) => m.zones.findIndex((z) => z.plate.some((p) => p[0] === 0));
+  for (const d of [2, -2]) {
+    const m = make(), i = west(m);
+    M.pushWall(m, i, face(m, i, (p, q) => p[0] === 0 && q[0] === 0), d);
+    assert.deepEqual(M.freeWalls(m), [], `pushed ${d}: no wall left standing free`);
+    assert.ok(m.walls.some((w) => [w.a, w.b].some((p) => p[0] === -d && p[1] === 0)), 'the side walls reach the moved face');
+  }
+  // the south of one room pulled in: the wall it shares with the other room keeps that room's side
+  const m = make(), i = west(m);
+  M.pushWall(m, i, face(m, i, (p, q) => p[1] === 0 && q[1] === 0), -2);
+  assert.deepEqual(M.freeWalls(m), []);
+  assert.ok(m.walls.some((w) => w.a[0] === 5 && w.b[0] === 5 && Math.min(w.a[1], w.b[1]) === 0), 'the shared wall still runs to the other room\'s corner');
+  // merged: the wall between goes
+  const n = make();
+  M.mergeZones(n, [0, 1], false);
+  assert.equal(n.walls.length, 4);
+  assert.deepEqual(M.freeWalls(n), []);
+});
+
+test('doors in a massing are written as Door subsurfaces and join rooms in the network', async () => {
+  const M = await import('../src/model/massing.js');
+  const { interiorDoors } = await import('../src/model/interior-doors.js');
+  const { networkElements } = await import('../src/model/airflow-network.js');
+  const m = M.massingBlank();
+  for (const [a, b] of [[[0, 0], [10, 0]], [[10, 0], [10, 6]], [[10, 6], [0, 6]], [[0, 6], [0, 0]], [[5, 0], [5, 6]]]) M.addWall(m, { a, b, base: 0, top: 1 });
+  const face = (i, f) => m.zones[i].plate.findIndex((p, k) => f(p, m.zones[i].plate[(k + 1) % m.zones[i].plate.length]));
+  M.addDoor(m, 0, face(0, (p, q) => p[0] === 5 && q[0] === 5), 3);
+  M.addDoor(m, 0, face(0, (p, q) => p[1] === 0 && q[1] === 0), 2);
+  const ep = massingEpJSON(m), fen = Object.values(ep['FenestrationSurface:Detailed']);
+  assert.equal(fen.filter((o) => o.surface_type === 'Door').length, 3, 'one outside, two back to back');
+  const model = importEpJSON(ep);
+  assert.equal(Object.keys(model.doors).length, 3);
+  assert.equal(Object.keys(model.windows).length, 0, 'doors are not glazing');
+  const doors = interiorDoors(model);
+  assert.equal(doors.length, 2);
+  assert.ok(doors.every((d) => d.own));
+  const links = networkElements(model).links.filter((l) => l.door);
+  assert.deepEqual(links.map((l) => [l.to === null ? 'out' : 'in', l.control]).sort(), [['in', 'open'], ['out', 'closed']]);
+  // taken out: the room pair gets no door of its own, and none is added (neither room is circulation)
+  M.deleteDoor(m, 0); M.deleteDoor(m, 1);
+  assert.equal(Object.keys(importEpJSON(massingEpJSON(m)).doors).length, 0);
+});
