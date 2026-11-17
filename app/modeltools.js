@@ -36,6 +36,10 @@
 //    that line lies on the first (a zone's side pushed, with the walls on it and those meeting it). With
 //    Multiple on, the first line stays for more walls; off, the next pick is a new line to align to. Esc
 //    lets the first line go, again stops.
+//  - Airflow path: in a plan, press and draw the way the air is meant to go; let go and the stroke is
+//    simplified to a smooth curve through a few control points (fewer, the smoother it is set). Where it
+//    crosses a zone's side it makes a door (a wall between rooms) or a window (outside), which belong to
+//    the path (src/model/airpath.js). The tool stays on for more paths.
 //  - Push/pull: over a face, the face outlined; dragged, it moves square to itself by 50 mm steps
 //    (100 mm with Shift), stepping out from a seam to make an L or in to make a notch, its neighbours
 //    stretching where it meets a corner; a click types how far. The tool stays on.
@@ -46,6 +50,7 @@ import { addWall, WALL_LINES, cornerWalls, extendWall, sharingFaces, pushWall, m
 import { addZone, splitZone, splitFace, extrudeFace, reentrantCorners, faceAxes, faceLength, zoneLevels, turnPlan, zoneFrame,
   mergeZones, mergeFaces, mergeCells, removeWallSeam, zoneSeams, cellAt, cellsOf } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
+import { addPath, simplify, toleranceOf, curveOf } from '../src/model/airpath.js';
 import { parseLength, lengthChar } from './units.js';
 
 const SNAP = 0.05; // m along a face
@@ -59,8 +64,8 @@ export class ModelTools {
   // wallProps() -> { asm, base, top, line, chain } for Draw wall.
   // wallThickness(asm) -> the assembly's thickness (m), for the wall drawn.
   // onWallLevels(base, top): a wall begun in a plan takes its level; the Place wall tab shows it.
-  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {}, wallProps = () => ({}), wallThickness = () => 0.2, onWallLevels = () => {}, alignMultiple = () => false }) {
-    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage, wallProps, wallThickness, onWallLevels, alignMultiple });
+  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {}, wallProps = () => ({}), wallThickness = () => 0.2, onWallLevels = () => {}, alignMultiple = () => false, pathSmooth = () => 0.5 }) {
+    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage, wallProps, wallThickness, onWallLevels, alignMultiple, pathSmooth });
     this.picked = [];
     this.tool = null;
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -105,6 +110,7 @@ export class ModelTools {
     const move = (e) => {
       this.last = e;
       if (this.pushing) { this.dragPush(e); return; }
+      if (this.sketch) { this.sketchTo(e); return; }
       const c = this.ctxAt(e);
       if (c !== this.ctx) { this.out.innerHTML = ''; this.ctx = c; }
       this.preview(e);
@@ -116,6 +122,7 @@ export class ModelTools {
     };
     const up = (e) => {
       if (this.pushing) { this.releasePush(e); return; }
+      if (this.sketch) { this.sketchDone(e); return; }
       if (this.dragged) { this.commit(e); this.stop(); }
     };
     const key = (e) => {
@@ -161,6 +168,7 @@ export class ModelTools {
     if (this.tool === 'wall') { this.wallClick(e); return; }
     if (this.tool === 'corner' || this.tool === 'extend') { this.trimClick(e); return; }
     if (this.tool === 'align') { this.alignClick(e); return; }
+    if (this.tool === 'path') { this.sketchStart(e); return; }
     if (this.tool === 'push') { this.pressPush(e); return; }
     if (this.tool === 'merge' || this.tool === 'mergefaces') { this.pick(e); return; }
     this.commit(e);
@@ -169,7 +177,7 @@ export class ModelTools {
   stop() {
     if (!this.tool) return;
     this.off?.();
-    this.tool = null; this.plan = null; this.alignRef = null;
+    this.tool = null; this.plan = null; this.alignRef = null; this.sketch = null;
     document.body.classList.remove('placedrag', 'placing');
     this.svg.innerHTML = '';
     for (const c of this.contexts) c.svg.innerHTML = '';
@@ -182,6 +190,7 @@ export class ModelTools {
     if (this.tool === 'wall') return this.wallAt(e);
     if (this.tool === 'corner' || this.tool === 'extend') return this.trimAt(e);
     if (this.tool === 'align') return this.alignAt(e);
+    if (this.tool === 'path') return this.sketchAt(e);
     const m = this.massing(), t = m && this.tgt(e);
     if (!t) return null;
     if (this.tool === 'add') return this.addAt(m, t);
@@ -369,6 +378,43 @@ export class ModelTools {
     if (this.tool === 'corner') this.onChange((x) => cornerWalls(x, f.w.id, h.w.id, f.t, h.t), 'walls joined at a corner');
     else this.onChange((x) => extendWall(x, f.w.id, h.w.id, h.t), 'wall extended');
     this.preview(e);
+  }
+
+  // ---------- Airflow path ----------
+  // pressed in a plan: the stroke begins (on that plan's level)
+  sketchStart(e) {
+    const L = this.ctx?.level?.();
+    if (!Number.isInteger(L)) { this.onMessage('Draw airflow paths in a plan view.'); return; }
+    this.sketch = { raw: [this.ctx.pointAt(e)], level: L, el: this.ctx.el };
+    this.sketch.el.setPointerCapture?.(e.pointerId);
+    this.preview(e);
+  }
+  sketchTo(e) {
+    const s = this.sketch, q = this.ctx?.pointAt(e), last = s.raw.at(-1);
+    if (q && Math.hypot(q[0] - last[0], q[1] - last[1]) > 0.05) s.raw.push(q);
+    this.preview(e);
+  }
+  sketchDone(e) {
+    const s = this.sketch;
+    this.sketch = null;
+    s.el.releasePointerCapture?.(e.pointerId);
+    const len = s.raw.reduce((t, p, i) => (i ? t + Math.hypot(p[0] - s.raw[i - 1][0], p[1] - s.raw[i - 1][1]) : 0), 0);
+    if (len < 0.5) { this.preview(e); return; }
+    this.onChange((x) => (addPath(x, { raw: s.raw, level: s.level, smooth: this.pathSmooth() }) ? undefined : false), 'airflow path drawn');
+    this.preview(e);
+  }
+  // the stroke as drawn, and the curve it will be
+  sketchAt(e) {
+    const s = this.sketch;
+    if (!s) return { what: '', mutate: null, draw: () => (e ? this.noteAt(e, 'press and draw the way the air goes') : '') };
+    return {
+      what: '', mutate: null,
+      draw: () => {
+        const raw = s.raw.map((q) => this.P(q)), curve = s.raw.length > 1 ? curveOf(simplify(s.raw, toleranceOf(this.pathSmooth()))).map((q) => this.P(q)) : [];
+        const pl = (pts, o) => `<polyline points="${pts.map((q) => q.map((v) => v.toFixed(1)).join(',')).join(' ')}" fill="none" ${o}/>`;
+        return pl(raw, 'stroke="#2E86AB" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"') + (curve.length > 1 ? pl(curve, 'stroke="#2E86AB" stroke-width="2.4" stroke-linecap="round"') : '');
+      },
+    };
   }
 
   // ---------- Align ----------

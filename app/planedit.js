@@ -19,6 +19,8 @@
 // Plan coordinates: u, v (m) on the cut, which for a plan are the view's x and y.
 
 import { cutSolid, chain } from './caps.js';
+import { pathCurve, movePathPoint } from '../src/model/airpath.js';
+export const PATH_COLOR = '#2E86AB'; // an airflow path, as drawn
 import { gripMark, label, line, poly, inside, segDist, CLICK_PX } from './handles.js';
 import { zoneLevels, turnPlan, faceAxes, faceLength, pushFace, pushWall, moveWallEnd, moveWall, unitLayout, bayExtents, setArraySpan, setCount, setSpacing, spreadSide, dragPitch } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
@@ -196,8 +198,19 @@ export class PlanEdit {
     const near = (seg) => segDist([x, y], this.d.toPx(...seg[0]), this.d.toPx(...seg[1]));
     const win = c.windows.map((w) => [w, near(w.seg)]).filter(([, dd]) => dd < NEAR_PX).sort((a, b) => a[1] - b[1])[0];
     if (win) return { kind: 'window', name: win[0].name, item: win[0] };
+    // an open window or door by what is drawn of it: the sash or leaf where it has swung to
+    for (const w of c.windows) {
+      const sw = this.sashSeen(w.name);
+      if (sw && (sw.arc ? segDist([x, y], sw.H, sw.T) < NEAR_PX : inside(sw.outline.map((p) => this.d.fromPx(...p)), q))) return { kind: 'window', name: w.name, item: w };
+    }
+    for (const d of c.doors) {
+      const Lf = this.api.view.doorLeafNow?.(d.name), o3 = this.api.view.origin || [0, 0, 0];
+      if (Lf && segDist([x, y], this.d.toPx(Lf.hinge[0] - o3[0], Lf.hinge[1] - o3[1]), this.d.toPx(Lf.tip[0] - o3[0], Lf.tip[1] - o3[1])) < NEAR_PX) return { kind: 'door', name: d.name, item: d };
+    }
     const door = c.doors.map((d) => [d, near(d.seg)]).filter(([, dd]) => dd < NEAR_PX).sort((a, b) => a[1] - b[1])[0];
     if (door) return { kind: 'door', name: door[0].name, item: door[0] };
+    const path = this.pathAt(e);
+    if (path) return path;
     const fw = c.free.find((w) => w.loops.some((L) => inside(L, q)) || near(w.seg) < NEAR_PX);
     if (fw) return { kind: 'wall', name: fw.name, item: fw };
     // a wall: in its cut (drawn thick) or near its line; of a wall shared by two zones, the one on the
@@ -258,7 +271,7 @@ export class PlanEdit {
     for (const n of this.api.selection?.() || []) { if (n === sel) continue; const f = this.find(n); if (f) g += this.selMark(f, false); }
     if (selPick) g += this.selMark(selPick, true);
     for (const n of this.chain || []) { const f = this.find(n); if (f) g += this.outline(f, { stroke: 'var(--glass)', w: 2.4, dash: '6 4' }); }
-    g += this.doorSwings();
+    g += this.doorSwings() + this.windowSwings();
     for (const n of this.api.mergeAsk?.() || []) { const f = this.find(n); if (f) g += this.outline(f, { stroke: '#D9822B', w: 3 }); }
     if (this.box) {
       const b = this.box, x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1);
@@ -268,6 +281,7 @@ export class PlanEdit {
     if (this.hover) { const f = this.find(this.hover.name); this.hover = f ? { ...f, name: this.hover.name } : null; }
     if (this.hover && this.hover.name !== sel && !this.api.tools.tool) g += this.outline(this.hover, { stroke: 'var(--glass)', w: 2.6, dash: '6 4' });
     this.grips = [];
+    g += this.pathsDrawn(sel);
     if (!this.drag) this.figs = null;
     const arrDrag = this.drag && (this.drag.span !== undefined || this.drag.fig || this.drag.pitch);
     if (!this.api.tools.tool) g += arrDrag ? this.dragDraw() : this.arrayFor(sel) + (this.drag ? this.dragDraw() : this.gripsFor(sel));
@@ -277,6 +291,80 @@ export class PlanEdit {
       g += line(a[0], a[1], b[0], b[1], { stroke: col, w: 4 }) + label((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 10, this.offer.problem || `${Math.round((this.offer.r.s1 - this.offer.r.s0) * 1000)} mm`, { size: 9, fill: col });
     }
     ov.innerHTML = g;
+  }
+  // The airflow paths drawn on this plan's level: each a curve with arrows the way the air is meant to
+  // go and a dot where it starts; the one selected heavier, with its control points (grips, dragged).
+  pathsDrawn(sel) {
+    const m = this.api.massing(), L = this.ctx.level();
+    if (!m?.paths?.length) return '';
+    let g = '';
+    for (const p of m.paths) {
+      if (p.level !== L) continue;
+      const on = sel === `path:${p.id}` || [...(this.api.selection?.() || [])].includes(`path:${p.id}`), dr = this.drag?.path === p.id && this.drag.q ? this.drag : null;
+      const pts = dr ? p.pts.map((q, i) => (i === dr.idx ? dr.q : q)) : p.pts;
+      const line = pathCurve({ pts }).map((q) => this.P(q));
+      g += `<polyline points="${line.map((q) => q.map((v) => v.toFixed(1)).join(',')).join(' ')}" fill="none" stroke="${PATH_COLOR}" stroke-width="${on ? 3 : 2}" stroke-linecap="round" stroke-linejoin="round" opacity="${on ? 1 : 0.85}"/>`;
+      // arrows about every 60 px along it, and a dot at its start
+      let run = 0;
+      for (let i = 1; i < line.length; i++) {
+        const a = line[i - 1], b = line[i], d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        run += d;
+        if (run < 60 || d < 1e-6) continue;
+        run = 0;
+        const u = [(b[0] - a[0]) / d, (b[1] - a[1]) / d], n = [-u[1], u[0]], s = 6;
+        g += `<polyline points="${b[0] - u[0] * s + n[0] * s * 0.7},${b[1] - u[1] * s + n[1] * s * 0.7} ${b[0]},${b[1]} ${b[0] - u[0] * s - n[0] * s * 0.7},${b[1] - u[1] * s - n[1] * s * 0.7}" fill="none" stroke="${PATH_COLOR}" stroke-width="2"/>`;
+      }
+      g += `<circle cx="${line[0][0]}" cy="${line[0][1]}" r="${on ? 4.5 : 3.5}" fill="${PATH_COLOR}"/>`;
+      if (on && !this.api.tools.tool) pts.forEach((q, i) => { const P = this.P(q); this.grips.push({ p: P, dir: [1, 0], path: p.id, idx: i }); g += gripMark(P[0], P[1], 4.5); });
+    }
+    return g;
+  }
+  // the airflow path under the pointer (within NEAR_PX of its curve), on this level
+  pathAt(e) {
+    const m = this.api.massing(), L = this.ctx.level();
+    if (!m?.paths?.length) return null;
+    const [x, y] = this.px(e);
+    let best = null;
+    for (const p of m.paths) {
+      if (p.level !== L) continue;
+      const line = pathCurve(p).map((q) => this.P(q));
+      for (let i = 1; i < line.length; i++) { const d = segDist([x, y], line[i - 1], line[i]); if (d < NEAR_PX && (!best || d < best.d)) best = { d, id: p.id }; }
+    }
+    return best ? { kind: 'path', name: `path:${best.id}`, item: { id: best.id } } : null;
+  }
+  // Each open window's sash as a plan draws it: a side-hung sash its leaf and the arc of its edge, as a
+  // door; one hung at its top or bottom the outline of the sash seen from above.
+  windowSwings() {
+    const c = this.picks(), v = this.api.view, o3 = v.origin || [0, 0, 0];
+    let g = '';
+    for (const w of c?.windows || []) {
+      const sw = this.sashSeen(w.name);
+      if (!sw) continue;
+      if (sw.arc) {
+        const { H, E, T } = sw, r = Math.hypot(E[0] - H[0], E[1] - H[1]), sweep = (E[0] - H[0]) * (T[1] - H[1]) - (E[1] - H[1]) * (T[0] - H[0]) > 0 ? 1 : 0;
+        g += `<path d="M${E[0].toFixed(1)},${E[1].toFixed(1)} A${r.toFixed(1)},${r.toFixed(1)} 0 0 ${sweep} ${T[0].toFixed(1)},${T[1].toFixed(1)}" fill="none" stroke="var(--ink3)" stroke-width="0.7" stroke-dasharray="3 2"/>`;
+        g += line(H[0], H[1], T[0], T[1], { stroke: 'var(--glass)', w: 2 });
+      } else g += poly(sw.outline, { stroke: 'var(--glass)', w: 1.2, fill: 'var(--glass)', op: 0.15 });
+      void o3;
+    }
+    return g;
+  }
+  // An open window's sash on this plan (px): { arc: true, H (hinge), E (where its edge shuts), T (where
+  // its edge is now) } for a side-hung one, else { outline }; null when it is shut.
+  sashSeen(name) {
+    const v = this.api.view, panel = v.swungPanel?.(name), w = v.model?.windows?.[name], o3 = v.origin || [0, 0, 0];
+    if (!panel || !w) return null;
+    const T = (p) => this.d.toPx(p[0] - o3[0], p[1] - o3[1]), sash = v.lastWindows?.[1]?.get(name);
+    if (sash?.type === 'casement') {
+      // seen from above, the sash and the window are each two points (their jambs); the hinge is the
+      // sash's jamb on one of the window's, the tip its other
+      const two = (P) => { const a = P[0], b = P.reduce((f, q) => (Math.hypot(q[0] - a[0], q[1] - a[1]) > Math.hypot(f[0] - a[0], f[1] - a[1]) ? q : f), a); return [a, b]; };
+      const [j0, j1] = two(w.vertices), [s0, s1] = two(panel), d = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+      const pairs = [[s0, s1, j0, j1], [s0, s1, j1, j0], [s1, s0, j0, j1], [s1, s0, j1, j0]].sort((x, y) => d(x[0], x[2]) - d(y[0], y[2]));
+      const [hinge, tip, , shut] = pairs[0];
+      return { arc: true, H: T(hinge), E: T(shut), T: T(tip) };
+    }
+    return { outline: panel.map(T) };
   }
   // Each open door cut here as a plan draws it: its leaf where it has swung to, and the arc its edge
   // swings through from shut.
@@ -332,6 +420,7 @@ export class PlanEdit {
     const c = this.picks();
     const w = c.windows.find((x) => x.name === name); if (w) return { kind: 'window', item: w };
     const dr = c.doors.find((x) => x.name === name); if (dr) return { kind: 'door', item: dr };
+    if (String(name).startsWith('path:')) return { kind: 'path', item: { id: Number(name.slice(5)) } };
     const s = c.walls.find((x) => x.name === name); if (s) return { kind: 'surface', item: s };
     const fw = c.free.find((x) => x.name === name); if (fw) return { kind: 'wall', item: fw };
     const z = c.zones.find((x) => x.name === name); if (z) return { kind: 'zone', item: z };
@@ -339,6 +428,12 @@ export class PlanEdit {
   }
   outline({ kind, item }, o) {
     const T = (p) => this.d.toPx(p[0], p[1]);
+    if (kind === 'path') return ''; // drawn heavier with its grips (pathsDrawn)
+    // an open door: its leaf where it has swung to
+    if (kind === 'door') {
+      const Lf = this.api.view.doorLeafNow?.(item.name), o3 = this.api.view.origin || [0, 0, 0];
+      if (Lf) item = { ...item, seg: [[Lf.hinge[0] - o3[0], Lf.hinge[1] - o3[1]], [Lf.tip[0] - o3[0], Lf.tip[1] - o3[1]]] };
+    }
     // a zone: the outline of its floor as one, the seams between its pieces left out
     if (kind === 'zone') return outerEdges(item.polys).map(([a, b]) => { const A = T(a), B = T(b); return line(A[0], A[1], B[0], B[1], { stroke: o.stroke, w: o.w, dash: o.dash }); }).join('');
     // a window: where it stands now (an open sash where it has swung to)
@@ -467,6 +562,7 @@ export class PlanEdit {
       const A = this.P([w.a[0] + r.dv[0], w.a[1] + r.dv[1]]), B = this.P([w.b[0] + r.dv[0], w.b[1] + r.dv[1]]);
       return line(A[0], A[1], B[0], B[1], { stroke: 'var(--glass)', w: 2.4 }) + label((A[0] + B[0]) / 2, (A[1] + B[1]) / 2 - 12, `${Math.round(Math.hypot(...r.dv) * 1000)} mm`, { size: 9, fill: 'var(--glass)' });
     }
+    if (r.path !== undefined) return '';
     if (r.end) {
       const w = m.walls?.find((x) => x.id === r.wall);
       if (!w) return '';
@@ -506,6 +602,7 @@ export class PlanEdit {
         this.paint();
         return;
       }
+      if (r.path !== undefined) { r.q = this.toMassing(e); this.paint(); return; }
       if (r.end) {
         const m = this.api.massing(), w = m?.walls?.find((x) => x.id === r.wall);
         if (w) { const s = this.api.tools.snapEnd(this.ctx, e, m, this.toMassing(e), w, r.end === 'a' ? w.b : w.a); r.p = s.p; r.kind = s.kind; }
@@ -598,6 +695,11 @@ export class PlanEdit {
       }
       if (r.free !== undefined) {
         if (r.dv[0] || r.dv[1]) this.api.change((m) => { moveWall(m, r.free, r.dv); }, 'wall moved');
+        this.paint();
+        return;
+      }
+      if (r.path !== undefined) {
+        if (r.moved && r.q) this.api.change((m) => { movePathPoint(m, r.path, r.idx, r.q); }, 'airflow path point moved');
         this.paint();
         return;
       }

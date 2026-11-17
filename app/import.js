@@ -21,6 +21,7 @@ import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { addWindow, openingProblem, wallExtent } from '../src/model/edit.js';
 import { addDoor, deleteDoor, addOpening, deleteOpening, massingOpening, setOpening, faceAxes as doorFaceAxes, massingGeometry as doorGeometry } from '../src/model/massing.js';
+import { pathOf, pathCurve, pathOpenings, setPathSmooth, deletePath, applyPath, releasePathOpening, isPathOpening } from '../src/model/airpath.js';
 import { readZoneResultsStream, mergeResults, zoneAtTime, windowAtTime, ventShare, surfaceAtTime, resultsTiming } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
@@ -243,6 +244,7 @@ const tools = new ModelTools(view, {
   onAdded: (j) => { const z = massingGeometry(massing)[j]; if (z && model.zones[z.name]) view.select(z.name); },
   keepSeams: () => $('keep-seams').checked,
   alignMultiple: () => $('align-multi').checked,
+  pathSmooth: () => Number($('path-smooth').value) / 100,
   wallThickness: (asm) => asmThickness(asm),
   onWallLevels: (b, t) => { if (Number($('wall-base').value) === b && Number($('wall-top').value) === t) return; $('wall-base').value = String(b); fillTop(); $('wall-top').value = String(t); },
   wallProps: () => ({ asm: $('wall-asm').value, base: Number($('wall-base').value), top: Number($('wall-top').value), line: $('wall-line').value, chain: $('wall-chain').checked }),
@@ -250,6 +252,7 @@ const tools = new ModelTools(view, {
     for (const b of document.querySelectorAll('.mtools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
     $('keep-seams-l').hidden = tool !== 'merge';
     $('align-multi-l').hidden = tool !== 'align';
+    $('path-smooth-l').hidden = tool !== 'path';
     wallTab(tool === 'wall');
     if (tool) { winEdit.stop(); view.select(null); hover.clear(); cmdLine?.remember(TOOL_COMMAND[tool]); }
   },
@@ -1432,6 +1435,15 @@ function popContent(kind, item) {
     if (r && !popInPlan) rows.push(`<button class="pbtn${winEdit.name === item.name ? ' on' : ''}" data-act="winedit" title="${winEdit.name === item.name ? 'Back to the building: the handles go (Esc)' : 'Its sill, head and jambs get handles in the view to push or pull; drag the glass to move it across its wall; click a handle or a figure to type it'}">${winEdit.name === item.name ? 'Done' : 'Edit window in 3D'}</button>`);
     if (!(massing && massingWindow(massing, item.name))) rows.push(`<div class="poprow"><button type="button" class="pbtn danger" data-act="win-del" data-name="${esc(item.name)}" title="Take this window out of the model (Delete); Ctrl+Z puts it back">Delete window</button></div>`);
     if (ms) rows.push(...sideRows(ms, winEdit.name === item.name));
+    rows.push(...pathRows(massing && massingOpening(massing, item.name)?.id));
+  } else if (kind === 'path') {
+    const p = massing && pathOf(massing, item.id);
+    if (!p) return { title: 'Airflow path', rows: [] };
+    title = `Airflow path ${p.id + 1}`;
+    const all = pathOpenings(massing), mine = (x) => x.path === p.id, nd = all.doors.filter(mine).length, nw = all.openings.filter(mine).length;
+    rows.push(`${p.pts.length} control points · ${nw} window${nw === 1 ? '' : 's'}, ${nd} door${nd === 1 ? '' : 's'}`,
+      `<label title="To the left every bend of the stroke kept, to the right only its broad way, with fewer control points. Points dragged by hand go when it is set again.">Smoothness <input type="range" data-act="path-smooth" data-id="${p.id}" min="0" max="100" value="${Math.round(p.smooth * 100)}"></label>`,
+      `<div class="poprow"><button type="button" class="pbtn" data-act="path-apply" data-id="${p.id}" title="Its doors and windows become the model's own, staying where they are; the path goes">Apply</button><button type="button" class="pbtn danger" data-act="path-del" data-id="${p.id}" title="Take the path out, with the doors and windows it makes (Delete); Ctrl+Z puts it back">Delete path</button></div>`);
   } else if (kind === 'wall') {
     const w = massing?.walls?.find((x) => x.id === item.id);
     if (!w) return { title: 'Wall', rows: [] };
@@ -1440,6 +1452,7 @@ function popContent(kind, item) {
   } else if (kind === 'door') {
     title = 'Door';
     rows.push(item.partnerZone ? `Between ${esc(item.zone)} and ${esc(item.partnerZone)}` : `${esc(item.zone)} to outdoors`, `${fmt(item.width, 2)} × ${fmt(item.height, 2)} m`);
+    rows.push(...pathRows(massingDoorId(item.name)));
     if (item.own) rows.push(`<div class="poprow"><button type="button" class="pbtn danger" data-act="door-del" data-name="${esc(item.name)}" title="Take this door out of the model (Delete); Ctrl+Z puts it back">Delete door</button></div>`);
     else rows.push('<span class="muted" title="Added by the tool for the airflow network, as the model has no opening between these rooms. A door put here with the Door tool takes its place.">Added for the airflow network</span>');
   } else if (kind === 'zone') {
@@ -2847,12 +2860,13 @@ function deleteMany() {
   const names = principalOf(selection);
   const zones = massing ? massingGeometry(massing) : [], zi = names.map((n) => zones.findIndex((z) => z.name === n)).filter((i) => i >= 0);
   const walls = names.filter((n) => String(n).startsWith('wall:')).map((n) => Number(n.slice(5)));
+  const paths = names.filter((n) => String(n).startsWith('path:')).map((n) => Number(n.slice(5)));
   const wins = !massing ? names.filter((n) => model.windows[n]) : [];
   const singles = massing ? names.map((n) => massingOpening(massing, n)?.id).filter((id) => id !== undefined) : [];
   const doorIds = massing ? names.map(massingDoorId).filter((id) => id !== null) : [], doorsOwn = !massing ? names.filter((n) => model.doors?.[n]) : [];
   selection = new Set();
   view.select(null);
-  if (massing && (zi.length || walls.length || doorIds.length || singles.length)) massingChange((x) => { for (const id of singles) deleteOpening(x, id); for (const id of doorIds) deleteDoor(x, id); for (const id of walls) deleteWall(x, id); for (const i of zi.sort((a, b) => b - a)) deleteZone(x, i); }, `${zi.length + walls.length + doorIds.length} deleted`);
+  if (massing && (zi.length || walls.length || doorIds.length || singles.length || paths.length)) massingChange((x) => { for (const id of paths) deletePath(x, id); for (const id of singles) deleteOpening(x, id); for (const id of doorIds) deleteDoor(x, id); for (const id of walls) deleteWall(x, id); for (const i of zi.sort((a, b) => b - a)) deleteZone(x, i); }, `${zi.length + walls.length + doorIds.length} deleted`);
   if (doorsOwn.length) applyEdit((tx) => { for (const n of doorsOwn) { tx.remove('FenestrationSurface:Detailed', n); const p = model.doors[n].partner; if (p && tx.epjson['FenestrationSurface:Detailed']?.[p]) tx.remove('FenestrationSurface:Detailed', p); } }, `${doorsOwn.length} doors deleted`, { geometry: true });
   if (wins.length) applyEdit((tx) => { for (const n of wins) tx.remove('FenestrationSurface:Detailed', n); }, `${wins.length} windows deleted`, { geometry: true });
 }
@@ -2927,7 +2941,7 @@ function wallBetween(found) {
 
 // ---------- the command line (cmdline.js) ----------
 // the command each tool is (a tool begun from its button is the last command, for Enter to repeat)
-const TOOL_COMMAND = { wall: 'Draw wall', add: 'Add zone', split: 'Split zone', face: 'Split wall', push: 'Push pull', corner: 'Corner', extend: 'Extend', align: 'Align', merge: 'Merge zones', mergefaces: 'Merge walls', seam: 'Remove seam', window: 'Window', door: 'Door' };
+const TOOL_COMMAND = { wall: 'Draw wall', add: 'Add zone', split: 'Split zone', face: 'Split wall', push: 'Push pull', corner: 'Corner', extend: 'Extend', align: 'Align', path: 'Airflow path', merge: 'Merge zones', mergefaces: 'Merge walls', seam: 'Remove seam', window: 'Window', door: 'Door' };
 let cmdLine = null;
 // Each command does what its button or key does; a massing's tools need a massing.
 {
@@ -2945,6 +2959,7 @@ let cmdLine = null;
     { name: 'Split wall', run: tool('face') },
     { name: 'Push pull', also: ['Pushpull', 'Extrude'], run: tool('push') },
     { name: 'Align', also: ['AL'], run: tool('align'), title: 'Align walls to a line' },
+    { name: 'Airflow path', also: ['Path', 'Draw path', 'Air path'], run: tool('path'), title: 'Draw the way the air is meant to go: doors and windows where it crosses walls' },
     { name: 'Corner', also: ['Trim'], run: tool('corner') },
     { name: 'Extend', run: tool('extend') },
     { name: 'Merge zones', run: tool('merge') },
@@ -3086,6 +3101,7 @@ function refreshModel(geometry = true) {
   axisCache = null; schedCache.clear();
   fillDetails(m);
   view.setModel(m, { doors: interiorDoors(m), walls: wallMode(), keep: true });
+  showPaths();
   hover.clear();
   if (geometry) {
     net = buildNetwork(m);
@@ -3143,6 +3159,11 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
   } else if (e.key === 'Delete' && current()?.kind === 'door' && current().item.own) {
     deleteDoorNamed(current().item.name);
+    e.preventDefault();
+  } else if (e.key === 'Delete' && massing && current()?.kind === 'path') {
+    const id = current().item.id;
+    view.select(null);
+    massingChange((x) => deletePath(x, id), 'airflow path deleted');
     e.preventDefault();
   } else if (e.key === 'Delete' && massing && current()?.kind === 'wall') {
     const f = current();
@@ -3213,6 +3234,27 @@ function onKey(e) {
   if (e.key === 'Enter' && t.matches('input.popname')) t.closest('.poprow')?.querySelector('[data-act=copy]')?.click();
   e.stopPropagation();
 }
+// A door or window an airflow path makes: which path, and a button to make it the model's own.
+function pathRows(id) {
+  if (!isPathOpening(id)) return [];
+  const n = Number(id.slice(1).split('.')[0]);
+  return [`<div class="poprow"><span class="muted">Made by airflow path ${n + 1}</span><button type="button" class="pbtn" data-act="path-release" data-id="${id}" title="Make it the model's own: it stays where it is as the path moves, and the path makes it no more">Release</button></div>`];
+}
+// the airflow path's pop-up: its smoothness (one step when let go), apply, delete; an opening released
+$('info').addEventListener('change', (e) => {
+  const t = e.target;
+  if (t.dataset?.act !== 'path-smooth' || !massing) return;
+  const id = Number(t.dataset.id);
+  massingChange((x) => { setPathSmooth(x, id, Number(t.value) / 100); }, 'airflow path smoothness set');
+});
+$('info').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act^="path-"]');
+  if (!b || !massing) return;
+  const act = b.dataset.act, id = b.dataset.id;
+  if (act === 'path-apply') { view.select(null); massingChange((x) => applyPath(x, Number(id)), 'airflow path applied'); }
+  else if (act === 'path-del') { view.select(null); massingChange((x) => deletePath(x, Number(id)), 'airflow path deleted'); }
+  else if (act === 'path-release') massingChange((x) => releasePathOpening(x, id), 'opening released from its path');
+});
 function onClick(e) {
   const b = e.target.closest('[data-act]');
   if (!b || !model || b.disabled) return;
@@ -3532,6 +3574,10 @@ function viewFromPlane(p, name) {
   void host;
   if (made) { showInfo(current()); ws.swapIn(made.id); }
 }
+// The airflow paths in 3D: each curve at 1.2 m over its level, in the building's axes.
+function showPaths() {
+  view.setPaths?.(massing ? (massing.paths || []).map((p) => ({ name: `path:${p.id}`, pts: pathCurve(p).map((q) => [...turnPlan(q, massing.rot || 0), massing.levels[p.level].z + 1.2]) })) : []);
+}
 function massingChange(mutate, what) {
   if (!massing) return false;
   const before = structuredClone(massing);
@@ -3541,7 +3587,7 @@ function massingChange(mutate, what) {
     if (JSON.stringify(before) === JSON.stringify(after)) { massing = before; massingUI.render(); return false; }
     // the massing changed, the model not (a wall standing free, a location line): an undo step of its
     // own, and the walls drawn again
-    const keep = selected, redraw = () => { view.setWalls(wallMode()); massingUI.render(); levelEdits.render(); if (keep && view.find(keep)) view.select(keep); else showInfo(current()); };
+    const keep = selected, redraw = () => { view.setWalls(wallMode()); showPaths(); ws.selection?.(); massingUI.render(); levelEdits.render(); if (keep && view.find(keep)) view.select(keep); else showInfo(current()); };
     undoStack.push({ undo: () => { massing = structuredClone(before); redraw(); }, redo: () => { massing = structuredClone(after); redraw(); }, what, view: true });
     if (undoStack.length > 100) undoStack.shift();
     redoStack.length = 0;

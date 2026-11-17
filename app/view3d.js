@@ -593,6 +593,7 @@ export class View3D {
 
     this.edges = new THREE.LineSegments(this.edgesGeometry(), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
 
+    this.drawPaths();
     this.group.add(this.front, this.back, this.glass, this.doorMesh, this.openDoorMesh, this.openDoorPick, this.shading, this.edges, this.problemLayer());
     this.shadowSkins();
     this.setFloating(this.floatZones);
@@ -830,6 +831,20 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     const step = (t) => { const k = Math.min(1, (t - t0) / WINDOW_SWING); draw(at(k)); if (k < 1) this.doorRaf = requestAnimationFrame(step); };
     this.doorRaf = requestAnimationFrame(step);
   }
+  // The airflow paths, as lines: [{ name, pts: [[x, y, z]] }] (model coordinates).
+  setPaths(paths) { this.pathData = paths; this.drawPaths(); this.render(); }
+  drawPaths() {
+    if (this.pathGroup) { this.pathGroup.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); }); this.group.remove(this.pathGroup); }
+    this.pathGroup = new THREE.Group();
+    const o = this.origin || [0, 0, 0];
+    for (const p of this.pathData || []) {
+      if (p.pts.length < 2) continue;
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(p.pts.map((q) => new THREE.Vector3(q[0] - o[0], q[1] - o[1], q[2] - o[2]))), new THREE.LineBasicMaterial({ color: '#2E86AB', clippingPlanes: this.clipping }));
+      line.userData.noSection = true;
+      this.pathGroup.add(line);
+    }
+    this.group.add(this.pathGroup);
+  }
   // An open door's leaf as it stands now (doorLeaf), or null when it is shut.
   doorLeafNow(name) {
     const a = this.doorNow?.get(name), d = this.doors?.find((x) => x.name === name);
@@ -1033,6 +1048,7 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
       this.sashGroup.add(mesh, pick, new THREE.LineSegments(edgeGeometry(panels, this.origin), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.6, clippingPlanes: this.clipping })));
     } else { this.sashMesh = null; this.openingPick = null; }
     this.group.add(this.sashGroup);
+    this.onDoors?.(); // the plans' window swings follow the sashes
     // a selected window's outline follows its sash
     if (this.selectedName && this.model.windows[this.selectedName] && (swung.has(this.selectedName) || this.highlightOnSash)) {
       this.highlightOnSash = swung.has(this.selectedName);
@@ -1076,7 +1092,9 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     if (m.surfaces[name]) return { kind: 'surface', item: m.surfaces[name], polys: [m.surfaces[name]] };
     if (m.windows[name]) return { kind: 'window', item: m.windows[name], polys: [m.windows[name]] };
     const door = this.doors.find((d) => d.name === name);
-    if (door) return { kind: 'door', item: door, polys: [door] };
+    if (door) { const L = this.doorLeafNow(name); return { kind: 'door', item: door, polys: [L ? { name, vertices: L.vertices } : door] }; }
+    // an airflow path (drawn in plans; a line here)
+    if (String(name).startsWith('path:')) return { kind: 'path', item: { name, id: Number(name.slice(5)) }, polys: [] };
     if (m.zones[name]) return { kind: 'zone', item: m.zones[name], polys: m.zones[name].surfaces.map((n) => m.surfaces[n]) };
     // a drawn wall standing free: its pieces' solids
     if (String(name).startsWith('wall:')) {

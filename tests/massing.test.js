@@ -590,3 +590,31 @@ test('doors and windows put one by one stand on their wall as it is pushed', asy
   const ep = massingEpJSON(m);
   assert.equal(Object.values(ep['FenestrationSurface:Detailed']).filter((o) => o.surface_type === 'Window').length, 1);
 });
+
+test('an airflow path makes a window where it comes in, a door through the wall between rooms, a window where it leaves', async () => {
+  const M = await import('../src/model/massing.js');
+  const A = await import('../src/model/airpath.js');
+  const m = M.massingBlank();
+  for (const [a, b] of [[[0, 0], [10, 0]], [[10, 0], [10, 6]], [[10, 6], [0, 6]], [[0, 6], [0, 0]], [[5, 0], [5, 6]]]) M.addWall(m, { a, b, base: 0, top: 1 });
+  const raw = [];
+  for (let x = -2; x <= 12; x += 0.1) raw.push([x, 3 + 0.3 * Math.sin(x * 2)]);
+  const p = A.addPath(m, { raw, level: 0, smooth: 0.5 });
+  assert.ok(p.pts.length >= 2 && p.pts.length < raw.length / 10, 'the stroke simplified to a few control points');
+  assert.ok(A.simplify(raw, A.toleranceOf(0)).length > A.simplify(raw, A.toleranceOf(1)).length, 'smoother, fewer points');
+  assert.deepEqual(A.pathCrossings(m, p).map((c) => (c.door ? 'door' : 'window')), ['window', 'door', 'window']);
+  const model = importEpJSON(massingEpJSON(m));
+  assert.equal(Object.keys(model.doors).length, 2, 'the door, on both sides of its wall');
+  assert.equal(Object.keys(model.windows).length, 2);
+  // the path moved: its door goes with it; changed, it keeps the change; taken out, it is made no more
+  const doorY = () => { const d = M.massingGeometry(m).flatMap((z) => z.doors)[0]; return d.vertices.reduce((t, v) => t + v[1], 0) / 4; };
+  const y0 = doorY();
+  p.pts = [p.pts[0], [4, 1.5], [6, 1.5], p.pts.at(-1)];
+  assert.ok(Math.abs(doorY() - y0) > 0.5, 'the door moved with the path');
+  M.deleteOpening(m, 'p0.0');
+  assert.equal(M.massingGeometry(m).flatMap((z) => z.windows).length, 1);
+  // applied: its openings the massing's own, the path gone
+  A.applyPath(m, 0);
+  assert.equal((m.paths || []).length, 0);
+  assert.equal(m.doors.length, 1); assert.equal(m.openings.length, 1);
+  assert.equal(Object.keys(importEpJSON(massingEpJSON(m)).doors).length, 2);
+});

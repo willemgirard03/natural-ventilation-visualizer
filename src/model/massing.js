@@ -34,6 +34,7 @@
 
 import pc from 'polygon-clipping';
 import { LAYER_FIELDS } from './constructions.js';
+import { pathOpenings, isPathOpening, setPathOpening, removePathOpening } from './airpath.js';
 import { glassWidth as unitWidth, glassHeights, setSize, setFigure, PRESETS, UNIT_KEYS } from './windows.js';
 
 export const SIDES = ['S', 'E', 'N', 'W']; // a storey plate's sides, in the order its faces are numbered
@@ -302,7 +303,7 @@ export function addDoor(m, i, k, u, { w = DOOR0.w, h = DOOR0.h } = {}) {
   m.doors.push(d);
   return d;
 }
-export function deleteDoor(m, id) { if (m.doors) m.doors = m.doors.filter((d) => d.id !== id); }
+export function deleteDoor(m, id) { if (isPathOpening(id)) return removePathOpening(m, id); if (m.doors) m.doors = m.doors.filter((d) => d.id !== id); }
 // A window put on its own (not of a side's array): as a door is, a point on a wall's line with its
 // width, height and sill (m above its zone's floor). m.openings [{ id, p, level, w, h, sill }].
 export function addOpening(m, i, k, u, { w = 1.2, h = 1.5, sill = 0.9 } = {}) {
@@ -315,7 +316,7 @@ export function addOpening(m, i, k, u, { w = 1.2, h = 1.5, sill = 0.9 } = {}) {
   m.openings.push(o);
   return o;
 }
-export function deleteOpening(m, id) { if (m.openings) m.openings = m.openings.filter((o) => o.id !== id); }
+export function deleteOpening(m, id) { if (isPathOpening(id)) return removePathOpening(m, id); if (m.openings) m.openings = m.openings.filter((o) => o.id !== id); }
 // A window put on its own, by its name in the model: { id, zone, face, z0 }, or null.
 export function massingOpening(m, name) {
   for (const zone of massingGeometry(m)) {
@@ -326,10 +327,12 @@ export function massingOpening(m, name) {
 }
 // Such a window moved or resized: its middle along face k of zone i at u, width w, sill and height.
 export function setOpening(m, id, i, k, u, { w, h, sill }) {
+  const z = m.zones[i], P = z.plate, A = P[k], B = P[(k + 1) % P.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]), U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
+  const q = [R6(A[0] + U[0] * u), R6(A[1] + U[1] * u)];
+  if (isPathOpening(id)) return setPathOpening(m, id, q, { w, h, sill });
   const o = m.openings?.find((x) => x.id === id);
   if (!o) return false;
-  const z = m.zones[i], P = z.plate, A = P[k], B = P[(k + 1) % P.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]), U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
-  Object.assign(o, { p: [R6(A[0] + U[0] * u), R6(A[1] + U[1] * u)], w, h, sill });
+  Object.assign(o, { p: q, w, h, sill });
   return true;
 }
 
@@ -345,6 +348,8 @@ export function massingGeometry(m) {
     return { name: zoneName(m, i), zone: i, z0, z1, plate: z.plate, area: Math.abs(polyArea(z.plate)), surfaces: [], windows: [], doors: [] };
   });
   const pairs = new Map(); // where two surfaces meet: a key from their corners -> the surfaces there
+  // doors and windows put one by one, and those the airflow paths make where they cross a side
+  const fromPaths = pathOpenings(m), allDoors = [...(m.doors || []), ...fromPaths.doors], allOpenings = [...(m.openings || []), ...fromPaths.openings];
   const keyOf = (pts) => pts.map((p) => p.map((x) => x.toFixed(3)).join(',')).sort().join('|');
   const add = (zone, type, kind, pts, extra = {}) => {
     const name = `${zone.name}:f${zone.surfaces.length}`, s = { name, type, kind, vertices: pts.map(turn), ...extra };
@@ -373,7 +378,7 @@ export function massingGeometry(m) {
         zone.windows.push({ name: `${host.name}:w${n}`, wall: host.name, face: k, index: w.index, width: w.u1 - w.u0, height: w.v1 - w.v0, azimuth: az, vertices: [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)].map(turn) });
       });
       // windows put one by one (the Window tool), on the outside piece that holds each whole
-      for (const o of m.openings || []) {
+      for (const o of allOpenings) {
         const at2 = doorOn(m, o, i, k);
         if (!at2) continue;
         const v0 = zone.z0 + o.sill, v1 = Math.min(v0 + o.h, zone.z1 - (z.slab || 0) - WINDOW_EDGE);
@@ -382,7 +387,7 @@ export function massingGeometry(m) {
         zone.windows.push({ name: `${host.name}:x${o.id}`, wall: host.name, face: k, opening: o.id, width: at2.u1 - at2.u0, height: v1 - v0, azimuth: az, vertices: [at(at2.u0, v0), at(at2.u1, v0), at(at2.u1, v1), at(at2.u0, v1)].map(turn) });
       }
       // the doors standing on this zone's floor along this face, each on the piece that holds it whole
-      for (const d of m.doors || []) {
+      for (const d of allDoors) {
         const at2 = doorOn(m, d, i, k);
         if (!at2) continue;
         const v0 = zone.z0 + DOOR_SILL, v1 = Math.min(v0 + d.h, zone.z1 - (z.slab || 0) - WINDOW_EDGE);
