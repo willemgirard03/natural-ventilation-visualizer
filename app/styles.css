@@ -521,3 +521,5 @@ body.bartucked .calcbar>.ribbon{display:none}
 
 /* a plan or section view's air (viewair.js): its fill and particles over the drawing, under the editor's layer */
 .draw2d canvas.viewair{position:absolute; left:0; top:0; pointer-events:none}
+.draw2d svg.viewprobe{position:absolute; left:0; top:0; pointer-events:none}
+.draw2d .viewtag{position:absolute; left:0; top:0; pointer-events:none; z-index:5}

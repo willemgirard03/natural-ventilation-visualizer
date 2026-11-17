@@ -38,11 +38,11 @@ const fmt = (x, d = 2) => String(+Number(x).toFixed(d));
 //   onTake(record)     a view taken off the page: keep the record so Undo can put it back
 //   editorFor(drawing) a plan's editor (planedit.js), or null; toolsHTML: the modelling tools' buttons
 //   hasTools()         whether the tools apply (a massing is open)
-//   onAirSettings(id, button)  a view's Air button: its settings for the air on its cut (viewair.js)
-//   airSpeed()         how fast particles move (as every view's)
+//   onAirSettings(id)  a view's Air button: the clipping plane linked to it (made if need be), picked
+//   slices             the planes' air (slices.js): a view shows its linked plane's cut (viewair.js)
+//   busy()             whether a tool or a placing is at work (the air's probe waits)
 const EMPTY_CAM = { cx: 0, cy: 0, s: 30 };
-export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3d, onTake, editorFor = () => null, toolsHTML = '', hasTools = () => false, onAirSettings = () => {}, airSpeed = () => 1 }) {
-  let airSample = null, airGrid = null; // the air as last sampled, for the views showing it
+export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3d, onTake, editorFor = () => null, toolsHTML = '', hasTools = () => false, onAirSettings = () => {}, slices = null, busy = () => false }) {
   const kinds = { ...KIND_LABEL };
   const drawings = new Set();
   let version = 0; // bumped when the geometry or a cut changes: the drawings cut again
@@ -159,8 +159,8 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       this.sel.addEventListener('change', () => { const v = this.sel.value; if (v === '3d') showIn(this.el, '3d'); else showIn(this.el, Number(v)); });
       this.el.querySelector('[data-cut3d]').addEventListener('click', () => { if (this.pin !== null) onCut3d(this.pin); this.bar3d(); });
       this.el.querySelector('[data-fit]').addEventListener('click', () => { this.cam = null; this.paint(); });
-      this.el.querySelector('[data-airset]').addEventListener('click', (e) => { if (this.pin !== null) onAirSettings(this.pin, e.currentTarget); });
-      this.airLayer = new ViewAir(this, { speed: airSpeed, origin: () => view.origin || [0, 0, 0] });
+      this.el.querySelector('[data-airset]').addEventListener('click', (e) => { if (this.pin !== null) onAirSettings(this.pin, e.currentTarget, this.host); this.bar3d(); });
+      this.airLayer = new ViewAir(this, { slices, plane: () => (this.item ? planeOf(this.item.id) : null), origin: () => view.origin || [0, 0, 0], busy: () => busy() || !!this.editor?.drag || !!this.editor?.box });
       this.el.querySelector('[data-vfull]').addEventListener('click', () => setFull(this.el, !this.el.classList.contains('full')));
       this.host.classList.add('draw2d');
       this.wire();
@@ -217,7 +217,10 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     bar3d() {
       const b = this.el.querySelector('[data-cut3d]'), v = this.item, p = v && planeOf(v.id);
       b.hidden = !v;
-      this.el.querySelector('[data-airset]').hidden = !v;
+      const ab = this.el.querySelector('[data-airset]');
+      ab.hidden = !v;
+      ab.setAttribute('aria-pressed', String(!!(p && !p.off && (p.air?.field || p.air?.particles))));
+      ab.title = p ? `The air on this cut is ${p.name}'s, as in 3D: click for its settings (shared with 3D)` : 'Show the air on this cut: a clipping plane is made here, linked to this view, and its settings open (they are the same in 3D and here)';
       b.setAttribute('aria-pressed', String(!!p));
       b.textContent = p ? 'Cut in 3D' : 'Cut 3D here';
       b.title = p ? `Linked to ${p.name}: moving either moves the other. Click to pick the plane.` : 'Add a clipping plane in the 3D view at this cut, linked to it: moving either moves the other';
@@ -284,21 +287,14 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       for (const o of [this.ov, this.tv]) { o.setAttribute('width', w); o.setAttribute('height', h); }
       this.editor?.paint();
       this.editor && tools()?.redrawIn(this.editor.ctx);
-      this.airLayer.follow(); // the air moved with the drawing now, sampled again when it rests
-      this.airSoon();
+      // the linked plane's cut of the air, drawn where it lies now (the same slice: nothing sampled again)
+      this.airLayer.draw(); this.airLayer.frame(); this.airLayer.hideProbe(); // the probe shows again as the pointer moves
       settle(this);
       const lv = levels(), p = planeOf(v.id);
       const where = v.kind === 'plan'
         ? (Number.isInteger(v.level) && lv?.[v.level] ? `<span class="m">${esc(lv[v.level].name)} <b>+ ${fmt(v.cut)} m</b></span>` : `<span class="m">cut at <b>${fmt(v.elev)} m</b></span>`)
         : '<span class="m">section</span>';
       this.foot.innerHTML = `<h3>${esc(v.name)}</h3>${where}${p ? `<span class="m">linked to <b>${esc(p.name)}</b></span>` : ''}<span class="m">1 m = <b>${fmt(this.cam.s, 0)} px</b></span>`;
-    }
-    // the air on the cut drawn again, a moment after the drawing moves (not at every step of a pan)
-    airSoon() {
-      clearTimeout(this.airTimer);
-      this.airTimer = setTimeout(() => this.airLayer.update(airSample, airGrid), 150);
-      const on = this.item?.air && (this.item.air.field || this.item.air.particles);
-      this.el.querySelector('[data-airset]')?.setAttribute('aria-pressed', String(!!on));
     }
     empty(text) {
       let e = this.host.querySelector('.vempty');
@@ -469,8 +465,9 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     // the selection changed: drawn again over each plan
     selection() { for (const d of drawings) d.editor?.paint(); },
     // the air sampled again (null: none to show): every view showing it draws it
-    setAir(sample, grid) { airSample = sample; airGrid = grid; for (const d of drawings) if (d.el.isConnected) d.airLayer.update(sample, grid); },
-    anyAir: () => views().some((v) => v.air && (v.air.field || v.air.particles)),
+    // the planes' air drawn again (a new slice), and moved on a frame (their particles)
+    airDrawn() { for (const d of drawings) if (d.el.isConnected) d.airLayer.draw(); },
+    airFrame() { for (const d of drawings) if (d.el.isConnected) d.airLayer.frame(); },
     setTools(t) { toolsRef = t; },
     setLevels(l) { levelsRef = l; for (const d of drawings) d.setEditor(); },
     drawings: () => [...drawings],

@@ -69,7 +69,10 @@ export class FieldSlices {
     this.clear();
     this.clearTrails();
     this.visible = false;
+    for (const p of this.view.sections.planes) p.slice = null;
     this.view.render();
+    this.onDrawn?.();
+    this.onFrame?.();
   }
 
   clearTrails(keep = new Set()) {
@@ -113,6 +116,7 @@ export class FieldSlices {
       box.expandByPoint(new THREE.Vector3(p[0] - o[0], p[1] - o[1], p[2] - o[2]));
     }
     const gmin = box.min, gmax = box.max;
+    for (const p of planes) p.slice = null;
     planes.forEach((p, i) => {
       const { field, particles } = p.air;
       if (p.off || (!field && !particles)) return;
@@ -123,6 +127,9 @@ export class FieldSlices {
       const start = f.o.clone().addScaledVector(f.u, u0).addScaledVector(f.v, v0).addScaledVector(f.n, -0.02);
       const value = field ? (x, y, z) => sample.value(field, x, y, z) : () => 0;
       const s = this.paint(sample, value, start, f.u, f.v, u1 - u0, v1 - v0, grid.h / 2, i, !!field);
+      // the slice as drawn (its colours filled in below), for the views linked to this plane: the same
+      // texture, at the same place (view coordinates: start + u x + v y, x and y in texels x step)
+      if (s && field) p.slice = { data: s.texture.image.data, W: s.W, H: s.H, step: s.step, start: start.clone(), u: f.u.clone(), v: f.v.clone(), stamp: performance.now() };
       // the particles' data on the slice, where it is not the fill's: sampled every other point
       let part = null;
       const by = p.air.color;
@@ -170,6 +177,7 @@ export class FieldSlices {
     }
     this.visible = out.length > 0;
     v.render();
+    this.onDrawn?.();
     void colour;
     return out.map((s) => s.plane);
   }
@@ -178,6 +186,7 @@ export class FieldSlices {
   setOpacity(p, k) {
     const i = this.view.sections.planes.indexOf(p);
     for (const m of this.group.children) if (m.userData.plane === i) m.material.opacity = k;
+    this.onDrawn?.();
     this.view.render();
   }
 
@@ -226,6 +235,25 @@ export class FieldSlices {
     }
     this.cross.geometry.setFromPoints(ends);
     this.cross.visible = true;
+    this.tag.innerHTML = this.probeHTML(found);
+    const r = this.view.container.getBoundingClientRect();
+    this.tag.style.transform = `translate(${e.clientX - r.left + 14}px, ${e.clientY - r.top - 30}px)`;
+    this.tag.hidden = false;
+    this.view.render();
+  }
+  // The room air's cell a point (model coordinates) falls in: its corners low and high in the grid's
+  // own axes, and a function turning a grid point back to model coordinates.
+  cellAt(point) {
+    const g = this.grid, F = g.frame;
+    const lp = F ? [F.cos * point[0] + F.sin * point[1], -F.sin * point[0] + F.cos * point[1], point[2]] : point;
+    const lo = [0, 1, 2].map((k) => g.min[k] + Math.floor((lp[k] - g.min[k]) / g.h) * g.h), hi = lo.map((x) => x + g.h);
+    const back = (q) => (F ? [F.cos * q[0] - F.sin * q[1], F.sin * q[0] + F.cos * q[1], q[2]] : q);
+    return { lo, hi, back };
+  }
+  // The values at a probed point: the plane's own first, then the others; its zone's averages and what
+  // is known of the zone.
+  probeHTML({ point, plane }) {
+    const s = this.sample;
     const [x, y, z] = point, vel = s.velocity(x, y, z);
     const parts = { temperature: `${s.temperature(x, y, z).toFixed(1)} °C`, speed: `${Math.hypot(...vel).toFixed(2)} m/s`, co2: `${Math.round(s.co2(x, y, z))} ppm` };
     const first = plane.air.field || 'temperature';
@@ -242,11 +270,7 @@ export class FieldSlices {
         if (k.t !== null) html += `<br><span class="probezone">${src}: ${k.t.toFixed(1)} °C${co2}</span>`;
       }
     }
-    this.tag.innerHTML = html;
-    const r = this.view.container.getBoundingClientRect();
-    this.tag.style.transform = `translate(${e.clientX - r.left + 14}px, ${e.clientY - r.top - 30}px)`;
-    this.tag.hidden = false;
-    this.view.render();
+    return html;
   }
 
   // One slice: a rectangle from `start` along unit vectors u and w (view coordinates), sized su x sw,
@@ -329,6 +353,7 @@ export class FieldSlices {
       const k = this.speed?.() ?? 1; // as fast as all the particles move (Layers ▸ Airflow particles)
       for (const t of this.trails.values()) this.advance(t, dt * k);
       this.view.render();
+      this.onFrame?.(); // the views linked to the planes draw the same particles
       requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);

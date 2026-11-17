@@ -77,6 +77,9 @@ const slices = new FieldSlices(view);
 // the cuts' particles as dense and as fast as the 3D particles (Layers ▸ Airflow particles)
 slices.density = () => air.densityScale ?? 1;
 slices.speed = () => air.speed ?? 1;
+// the plan and section views linked to the planes draw the planes' own cuts and particles (viewair.js)
+slices.onDrawn = () => { try { ws.airDrawn(); } catch { /* before the views are made */ } };
+slices.onFrame = () => { try { ws.airFrame(); } catch { /* before the views are made */ } };
 // The layer settings as the page opens them.
 air.setVisible($('show-air').checked);
 view.setProjection($('projection').querySelector('[aria-pressed="true"]').dataset.proj);
@@ -359,9 +362,8 @@ function drawSlices(now = false) {
   // While a baked day plays, its blended fields; otherwise the live room air.
   const simulated = $('room-air').value === 'grid';
   const grid = liveGrid(), field = liveField();
-  const W = (() => { try { return ws; } catch { return null; } })(); // the views (not made yet, at the start)
-  const onPlanes = view.sections.planes.some((p) => p.air.field || p.air.particles), onViews = !!W?.anyAir();
-  if ((!onPlanes && !onViews) || !model || !rooms || (simulated ? !gridLive : !field)) { slices.hide(); W?.setAir(null, null); sliceRanges = {}; legend(); return; }
+  const any = view.sections.planes.some((p) => p.air.field || p.air.particles);
+  if (!any || !model || !rooms || (simulated ? !gridLive : !field)) { slices.hide(); sliceRanges = {}; legend(); return; }
   const wait = 300 - (performance.now() - sliceLast);
   if (!now && wait > 0) { clearTimeout(sliceTimer); sliceTimer = setTimeout(() => drawSlices(true), wait); return; }
   sliceLast = performance.now();
@@ -404,9 +406,7 @@ function drawSlices(now = false) {
     const H = airflow.hourAt, r = results && zoneAtTime(results, name, airflow.H ?? H + 0.5);
     return { t: airflow.conditions.zones[name]?.t ?? null, fromResults: !!r, co2Results: r?.co2 ?? null, co2Tool: airflow.co2?.[name] ?? null };
   };
-  const sample = { inside: fluid, value, velocity, temperature, co2, zoneAt, zoneMean, zoneKnown };
-  if (onPlanes) sliceRanges = slices.update(sample, null, g); else { slices.hide(); sliceRanges = {}; }
-  W?.setAir(sample, g);
+  sliceRanges = slices.update({ inside: fluid, value, velocity, temperature, co2, zoneAt, zoneMean, zoneKnown }, null, g);
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
@@ -864,17 +864,6 @@ const airRecord = () => (airView === null ? null : namedViews().find((v) => v.id
 const current = () => (airRecord() ? { kind: 'viewair', item: airRecord() } : view.sections.selected ? { kind: 'plane', item: view.sections.selected } : view.find(selected));
 // what the air settings in the pop-up change: a view's, or the clipping plane's
 const airTarget = () => airRecord() || view.sections.selected;
-// A view's Air button: its settings in the pop-up, beside the button (a view new to them shows nothing yet)
-function openViewAir(id, button) {
-  const rec = namedViews().find((v) => v.id === id);
-  if (!rec) return;
-  rec.air ||= { ...AIR_DEFAULT, field: '', particles: false, color: 'none' };
-  view.sections.select(null);
-  const r = button.getBoundingClientRect(), host = button.closest('.view')?.querySelector('.draw2d') || button;
-  drawnPick = { el: host, x: 0, y: 0, cx: r.left, cy: r.bottom, time: performance.now() };
-  airView = id;
-  showInfo({ kind: 'viewair', item: rec });
-}
 
 // Section planes: added from the bar (dragged in, or a click on the button and then on the view), and
 // picked, moved and turned in the view (sections.js). The air on them follows every change.
@@ -3393,8 +3382,17 @@ const ws = workspace({
   levels: () => massing?.levels || null,
   planeOf: (id) => planeById(namedViews().find((v) => v.id === id)?.plane),
   onCut3d: cut3d,
-  onAirSettings: (id, button) => openViewAir(id, button),
-  airSpeed: () => air.speed ?? 1,
+  // a view's Air: the clipping plane linked to it (made, if it has none), its settings in the pop-up;
+  // the view shows that plane's own cut of the air
+  onAirSettings: (id, button, host) => {
+    // its pop-up opens over this view, under the button (the 3D view may be off the page)
+    const r = button.getBoundingClientRect();
+    drawnPick = { el: host, x: 0, y: 0, cx: r.left, cy: r.bottom, time: performance.now() };
+    if (planeById(namedViews().find((v) => v.id === id)?.plane)) popKey = null; // picked again: placed again
+    cut3d(id);
+  },
+  slices,
+  busy: () => !!tools.tool || !!placing,
   // a plan edited as the 3D view is: its zones, walls and windows picked and pushed, the tools at work
   editorFor: (d) => (d.host.addEventListener('pointerdown', (e) => {
     const r = d.host.getBoundingClientRect();
