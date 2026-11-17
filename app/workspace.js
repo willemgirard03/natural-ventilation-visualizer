@@ -41,8 +41,12 @@ const fmt = (x, d = 2) => String(+Number(x).toFixed(d));
 //   onAirSettings(id)  a view's Air button: the clipping plane linked to it (made if need be), picked
 //   slices             the planes' air (slices.js): a view shows its linked plane's cut (viewair.js)
 //   busy()             whether a tool or a placing is at work (the air's probe waits)
+//   norths()           { true, building }: each north's angle (degrees, anticlockwise from the model's
+//                      y, as the view cube's), for a plan turned to put one up
+//   wind()             the wind now: { speed (m/s), dir (degrees from true north, where it comes from) }
 const EMPTY_CAM = { cx: 0, cy: 0, s: 30 };
-export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3d, onTake, editorFor = () => null, toolsHTML = '', hasTools = () => false, onAirSettings = () => {}, slices = null, busy = () => false }) {
+export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3d, onTake, editorFor = () => null, toolsHTML = '', hasTools = () => false, onAirSettings = () => {}, slices = null, busy = () => false, norths = () => null, wind = () => null }) {
+  const turn = (a, b, r) => [a * Math.cos(r) - b * Math.sin(r), a * Math.sin(r) + b * Math.cos(r)];
   const kinds = { ...KIND_LABEL };
   const drawings = new Set();
   let version = 0; // bumped when the geometry or a cut changes: the drawings cut again
@@ -140,7 +144,12 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
   class Drawing {
     constructor(type, pin) {
       const shell = viewShell(type, { [type]: KIND_LABEL[type] }, {
-        controls: '<button type="button" class="minibtn" data-airset title="The air on this cut: fill it with the air\'s temperature, speed or CO2, and show particles moving with the air in it, as a clipping plane shows them">Air</button><button type="button" class="minibtn" data-cut3d>Cut 3D here</button>'
+        controls: '<details class="dd vlayers" data-plan-layers><summary title="What the plan shows over its drawing, and which north is up">Layers</summary><div class="ddmenu">'
+          + '<label class="chk" title="A compass in the corner: true north (N) and the building\'s own north (B); click it to put the other up"><input type="checkbox" data-pl="compass"> Compass</label>'
+          + '<label class="chk" title="The wind now (at the time picked): an arrow at the compass blowing the way it blows, its speed beside it"><input type="checkbox" data-pl="wind"> Wind</label>'
+          + '<div class="layrow"><span>Up</span><span class="seg mini"><button type="button" data-pl-north="true" title="True north up the view">True north</button><button type="button" data-pl-north="building" title="The building\'s own north up the view: its walls square to the view">Building</button></span></div>'
+          + '</div></details>'
+          + '<button type="button" class="minibtn" data-airset title="The air on this cut: fill it with the air\'s temperature, speed or CO2, and show particles moving with the air in it, as a clipping plane shows them">Air</button><button type="button" class="minibtn" data-cut3d>Cut 3D here</button>'
           + `<button type="button" class="minibtn vb iconbtn" data-fit title="Fit the drawing in the view">${RECENTRE}</button>`,
         info: type === 'plan'
           ? ['Plan', '<p>The building cut across at a height above a level, looking down. What the cut passes through is hatched; floors and walls below it, down to the level, are dotted.</p><p>Point at a room, a wall or a window and click to select it, as in 3D. A wall pressed and dragged moves, for every zone sharing it; a wall standing free moves whole. A selected zone has a grip on each wall: dragged, the wall moves for this zone alone (a wall it shares becomes two). A selected window shows its array: drag its ends, slide or type its number and spacing, or drag the window along the wall. The modelling tools work here too; walls drawn here stand on the level of this plan.</p><p>Wheel: zoom; right drag (or middle): pan; double click on nothing: fit.</p>']
@@ -159,6 +168,14 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       this.sel.addEventListener('change', () => { const v = this.sel.value; if (v === '3d') showIn(this.el, '3d'); else showIn(this.el, Number(v)); });
       this.el.querySelector('[data-cut3d]').addEventListener('click', () => { if (this.pin !== null) onCut3d(this.pin); this.bar3d(); });
       this.el.querySelector('[data-fit]').addEventListener('click', () => { this.cam = null; this.paint(); });
+      // the plan's layers and which north is up, kept on the view
+      const lay = this.el.querySelector('[data-plan-layers]');
+      lay.addEventListener('change', (e) => { const k = e.target.dataset.pl, v = this.item; if (!k || !v) return; v.layers = { ...this.layers(), [k]: e.target.checked }; this.paint(); });
+      lay.addEventListener('click', (e) => { const b = e.target.closest('[data-pl-north]'), v = this.item; if (!b || !v) return; this.setNorth(b.dataset.plNorth); });
+      this.lay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      this.lay.setAttribute('class', 'planlayers');
+      this.host.appendChild(this.lay);
+      this.lay.addEventListener('click', (e) => { if (e.target.closest('[data-compass]')) this.setNorth(this.northUp() === 'true' ? 'building' : 'true'); });
       this.el.querySelector('[data-airset]').addEventListener('click', (e) => { if (this.pin !== null) onAirSettings(this.pin, e.currentTarget, this.host); this.bar3d(); });
       this.airLayer = new ViewAir(this, { slices, plane: () => (this.item ? planeOf(this.item.id) : null), origin: () => view.origin || [0, 0, 0], busy: () => busy() || !!this.editor?.drag || !!this.editor?.box });
       this.el.querySelector('[data-vfull]').addEventListener('click', () => setFull(this.el, !this.el.classList.contains('full')));
@@ -197,10 +214,20 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       if (want === 'section' && !this.editor) this.editor = new SectionLevels(this);
       const vt = this.el.querySelector('.vtools'); if (vt) vt.hidden = !(want && hasTools());
     }
-    // plan coordinates (m) to the drawing's pixels and back
-    // (an empty plan, before anything is drawn to frame: the plan's origin in the middle, 30 px a metre)
-    toPx(u, v) { const c = this.cam || EMPTY_CAM, w = this.host.clientWidth, h = this.host.clientHeight; return [w / 2 + (u - c.cx) * c.s, h / 2 - (v - c.cy) * c.s]; }
-    fromPx(x, y) { const c = this.cam || EMPTY_CAM, w = this.host.clientWidth, h = this.host.clientHeight; return [(x - w / 2) / c.s + c.cx, -(y - h / 2) / c.s + c.cy]; }
+    // plan coordinates (m) to the drawing's pixels and back, turned (rot, radians anticlockwise) to put
+    // the north chosen up the view (an empty plan, before anything is drawn to frame: the plan's origin
+    // in the middle, 30 px a metre)
+    toPx(u, v) { const c = this.cam || EMPTY_CAM, w = this.host.clientWidth, h = this.host.clientHeight, [a, b] = turn(u - c.cx, v - c.cy, this.rot); return [w / 2 + a * c.s, h / 2 - b * c.s]; }
+    fromPx(x, y) { const c = this.cam || EMPTY_CAM, w = this.host.clientWidth, h = this.host.clientHeight, [a, b] = turn((x - w / 2) / c.s, -(y - h / 2) / c.s, -this.rot); return [a + c.cx, b + c.cy]; }
+    // which north is up a plan ('true' or 'building'), and the turn that puts it up (0 for a section)
+    northUp() { return this.item?.north || 'true'; }
+    get rot() {
+      if (this.type !== 'plan' || !this.item) return 0;
+      const a = norths()?.[this.northUp()];
+      return Number.isFinite(a) ? -(a * Math.PI) / 180 : 0;
+    }
+    layers() { return { compass: true, wind: true, ...(this.item?.layers || {}) }; }
+    setNorth(which) { const v = this.item; if (!v) return; v.north = which; this.cam = null; this.paint(); }
     frameNow() { return this.frame(); }
     // the bar's name: every plan and section by name
     options() {
@@ -249,7 +276,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       const key = JSON.stringify([version, fr.f.o, fr.f.u, fr.f.v, fr.f.n]);
       if (this.geo && this.key === key) return;
       this.key = key;
-      this.geo = cutGeometry(view, fr.f, { depth: fr.depth });
+      this.geo = cutGeometry(view, fr.f, { depth: fr.depth, sashes: this.item.kind !== 'plan' });
       this.marks = this.item.kind === 'plan' ? { labels: zoneLabels(fr.f, fr.depth) } : { levels: levelMarks(this.geo) };
     }
     paint() {
@@ -274,14 +301,22 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       if (!this.geo) return;
       const b = this.geo.box;
       if (!this.cam) {
-        if (b) { const bw = Math.max(1, b[2] - b[0]), bh = Math.max(1, b[3] - b[1]); this.cam = { cx: (b[0] + b[2]) / 2, cy: (b[1] + b[3]) / 2, s: Math.min((w - 48) / bw, (h - 48) / bh) }; } else this.cam = { cx: 0, cy: 0, s: 20 };
+        if (b) {
+          // the box as the plan is turned: its corners turned, their bounds; its middle turned back
+          const R = this.rot, cs = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]].map(([u, v]) => turn(u, v, R));
+          const x0 = Math.min(...cs.map((q) => q[0])), x1 = Math.max(...cs.map((q) => q[0])), y0 = Math.min(...cs.map((q) => q[1])), y1 = Math.max(...cs.map((q) => q[1]));
+          const [cx, cy] = turn((x0 + x1) / 2, (y0 + y1) / 2, -R);
+          this.cam = { cx, cy, s: Math.min((w - 48) / Math.max(1, x1 - x0), (h - 48) / Math.max(1, y1 - y0)) };
+        } else this.cam = { cx: 0, cy: 0, s: 20 };
       }
       let marks = this.marks;
       if (marks?.levels) {
         const dl = this.dragLevel, sgn = Math.sign(this.geo.frame.v.z) || 1;
         marks = { ...marks, sel: levelsRef?.selected ?? null, levels: marks.levels.map((x) => (dl && x[3] === dl.L ? [x[0] + dl.dz * sgn, x[1], `${dl.dz > 0 ? '+' : ''}${Math.round(dl.dz * 1000)} mm`, x[3], null] : x)) };
       }
-      const svg = drawSVG(this.geo, { w, h, ...this.cam }, marks).replace('<svg ', '<svg class="dwg" ');
+      let svg = drawSVG(this.geo, { w, h, ...this.cam }, marks).replace('<svg ', '<svg class="dwg" ');
+      // a plan turned to put a north up: the drawing turned about the view's middle, as toPx turns
+      if (this.rot) svg = svg.replace('</defs>', `</defs><g transform="rotate(${(-this.rot * 180) / Math.PI} ${w / 2} ${h / 2})">`).replace(/<\/svg>$/, '</g></svg>');
       const old = this.host.querySelector('svg.dwg');
       if (old) old.outerHTML = svg; else this.ov.insertAdjacentHTML('beforebegin', svg);
       for (const o of [this.ov, this.tv]) { o.setAttribute('width', w); o.setAttribute('height', h); }
@@ -289,12 +324,48 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       this.editor && tools()?.redrawIn(this.editor.ctx);
       // the linked plane's cut of the air, drawn where it lies now (the same slice: nothing sampled again)
       this.airLayer.draw(); this.airLayer.frame(); this.airLayer.hideProbe(); // the probe shows again as the pointer moves
+      this.drawLayers();
       settle(this);
       const lv = levels(), p = planeOf(v.id);
       const where = v.kind === 'plan'
         ? (Number.isInteger(v.level) && lv?.[v.level] ? `<span class="m">${esc(lv[v.level].name)} <b>+ ${fmt(v.cut)} m</b></span>` : `<span class="m">cut at <b>${fmt(v.elev)} m</b></span>`)
         : '<span class="m">section</span>';
       this.foot.innerHTML = `<h3>${esc(v.name)}</h3>${where}${p ? `<span class="m">linked to <b>${esc(p.name)}</b></span>` : ''}<span class="m">1 m = <b>${fmt(this.cam.s, 0)} px</b></span>`;
+    }
+    // The plan's layers over its drawing: the compass in a corner (true north and the building's north;
+    // a click puts the other up) and the wind now, blowing past it.
+    drawLayers() {
+      const w = this.host.clientWidth, h = this.host.clientHeight, L = this.layers(), plan = this.type === 'plan' && this.item;
+      this.lay.setAttribute('width', w); this.lay.setAttribute('height', h);
+      const lay = this.el.querySelector('[data-plan-layers]');
+      lay.hidden = !plan;
+      for (const cb of lay.querySelectorAll('[data-pl]')) cb.checked = !!L[cb.dataset.pl];
+      for (const b of lay.querySelectorAll('[data-pl-north]')) b.setAttribute('aria-pressed', String(b.dataset.plNorth === this.northUp()));
+      const ns = norths();
+      if (!plan || !ns || (!L.compass && !L.wind)) { this.lay.innerHTML = ''; return; }
+      // a model direction (anticlockwise angle from y, degrees) as a direction on the view (y down)
+      const dirOf = (deg) => { const a = (deg * Math.PI) / 180, [x, y] = turn(-Math.sin(a), Math.cos(a), this.rot); return [x, -y]; };
+      const cx = w - 52, cy = 78, r = 20, N = dirOf(ns.true), B = dirOf(ns.building);
+      let g = '';
+      if (L.compass) {
+        const up = this.northUp() === 'true' ? 'building' : 'true';
+        g += `<g data-compass style="cursor:pointer;pointer-events:all"><title>True north (N) and the building's north (B): click to put ${up === 'true' ? 'true north' : "the building's north"} up</title>`
+          + `<circle cx="${cx}" cy="${cy}" r="${r + 9}" fill="var(--panel)" fill-opacity="0.85" stroke="var(--rule)"/>`
+          + `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--ink3)" stroke-width="0.8"/>`
+          + `<path d="M${cx + N[0] * r},${cy + N[1] * r} L${cx - N[1] * 5},${cy + N[0] * 5} L${cx + N[1] * 5},${cy - N[0] * 5} Z" fill="var(--ink)"/>`
+          + `<text x="${cx + N[0] * (r + 8)}" y="${cy + N[1] * (r + 8) + 3}" text-anchor="middle" font-size="9" font-weight="600" fill="var(--ink)">N</text>`
+          + (Math.abs(ns.true - ns.building) > 0.5 ? `<line x1="${cx}" y1="${cy}" x2="${cx + B[0] * r}" y2="${cy + B[1] * r}" stroke="var(--glass)" stroke-width="1.6"/><text x="${cx + B[0] * (r + 8)}" y="${cy + B[1] * (r + 8) + 3}" text-anchor="middle" font-size="8.5" fill="var(--glass)">B</text>` : '')
+          + '</g>';
+      }
+      const wv = L.wind ? wind() : null;
+      if (wv && wv.speed > 0) {
+        // where it comes from: true north turned clockwise by its direction; it blows the other way
+        const F = dirOf(ns.true - wv.dir), len = 14 + Math.min(26, wv.speed * 4), x0 = cx + F[0] * (r + 30), y0 = cy + F[1] * (r + 30), x1 = x0 - F[0] * len, y1 = y0 - F[1] * len;
+        g += `<g><title>Wind ${wv.speed.toFixed(1)} m/s from ${Math.round(wv.dir)}°</title><line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="#C0442B" stroke-width="2.4"/>`
+          + `<path d="M${x1 - F[0] * 7},${y1 - F[1] * 7} L${x1 + F[1] * 4.5},${y1 - F[0] * 4.5} L${x1 - F[1] * 4.5},${y1 + F[0] * 4.5} Z" fill="#C0442B"/>`
+          + `<text x="${x0 + F[0] * 8}" y="${y0 + F[1] * 8 + 3}" text-anchor="middle" font-size="9" fill="#C0442B" font-family="var(--mono)">${wv.speed.toFixed(1)} m/s</text></g>`;
+      }
+      this.lay.innerHTML = g;
     }
     empty(text) {
       let e = this.host.querySelector('.vempty');
@@ -308,10 +379,12 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       h.addEventListener('wheel', (e) => {
         if (!this.cam) return;
         e.preventDefault();
-        const r = h.getBoundingClientRect(), k = Math.exp(-e.deltaY * 0.0015), c = this.cam;
-        const mx = (e.clientX - r.left - r.width / 2) / c.s + c.cx, my = -(e.clientY - r.top - r.height / 2) / c.s + c.cy;
-        const s = Math.max(0.5, Math.min(2000, c.s * k));
-        this.cam = { s, cx: mx - (mx - c.cx) * c.s / s, cy: my - (my - c.cy) * c.s / s };
+        // zoomed about the pointer: the plan point under it stays under it (as the plan is turned)
+        const r = h.getBoundingClientRect(), k = Math.exp(-e.deltaY * 0.0015), c = this.cam, x = e.clientX - r.left, y = e.clientY - r.top;
+        const m0 = this.fromPx(x, y);
+        this.cam = { ...c, s: Math.max(0.5, Math.min(2000, c.s * k)) };
+        const m1 = this.fromPx(x, y);
+        this.cam = { ...this.cam, cx: this.cam.cx + m0[0] - m1[0], cy: this.cam.cy + m0[1] - m1[1] };
         this.paint();
       }, { passive: false });
       h.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -323,7 +396,9 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
         const x0 = e.clientX, y0 = e.clientY, c0 = { ...this.cam };
         h.setPointerCapture(e.pointerId);
         h.classList.add('panning');
-        const move = (m) => { this.cam = { ...c0, cx: c0.cx - (m.clientX - x0) / c0.s, cy: c0.cy + (m.clientY - y0) / c0.s }; this.paint(); };
+        // panned: the plan point pressed kept under the pointer (as the plan is turned)
+        const r0 = h.getBoundingClientRect(), p0 = this.fromPx(x0 - r0.left, y0 - r0.top);
+        const move = (m) => { this.cam = c0; const p1 = this.fromPx(m.clientX - r0.left, m.clientY - r0.top); this.cam = { ...c0, cx: c0.cx - (p1[0] - p0[0]), cy: c0.cy - (p1[1] - p0[1]) }; this.paint(); };
         const up = () => { h.classList.remove('panning'); h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', up); };
         h.addEventListener('pointermove', move); h.addEventListener('pointerup', up);
       });
@@ -468,6 +543,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     // the planes' air drawn again (a new slice), and moved on a frame (their particles)
     airDrawn() { for (const d of drawings) if (d.el.isConnected) d.airLayer.draw(); },
     airFrame() { for (const d of drawings) if (d.el.isConnected) d.airLayer.frame(); },
+    layersChanged() { for (const d of drawings) if (d.el.isConnected) d.drawLayers(); },
     setTools(t) { toolsRef = t; },
     setLevels(l) { levelsRef = l; for (const d of drawings) d.setEditor(); },
     drawings: () => [...drawings],

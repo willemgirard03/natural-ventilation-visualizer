@@ -80,6 +80,11 @@ slices.speed = () => air.speed ?? 1;
 // the plan and section views linked to the planes draw the planes' own cuts and particles (viewair.js)
 slices.onDrawn = () => { try { ws.airDrawn(); } catch { /* before the views are made */ } };
 slices.onFrame = () => { try { ws.airFrame(); } catch { /* before the views are made */ } };
+// the windows opened or shut: the plans and sections cut again (their glass where it stands now)
+view.onWindowsSet = () => { try { ws.redraw(); } catch { /* before the views are made */ } };
+// the wind changed (the time, or set by hand): the plans' wind drawn again
+const planLayers = () => { try { ws.layersChanged(); } catch { /* before the views are made */ } };
+for (const id of ['wind', 'wind-dir']) $(id).addEventListener('input', planLayers);
 // The layer settings as the page opens them.
 air.setVisible($('show-air').checked);
 view.setProjection($('projection').querySelector('[aria-pressed="true"]').dataset.proj);
@@ -1078,6 +1083,7 @@ function applyHour() {
   $('when').textContent = when;
   $('when').title = `${weather.location.name}, ${weather.fileName || 'weather file'}: ${weatherHour.t} °C, wind ${weatherHour.windSpeed} m/s from ${weatherHour.windDirection}°, ${(weatherHour.w * 1000).toFixed(1)} g/kg humidity`;
   solveAir();
+  planLayers();
   drawRose();
   if (model) showInfo(current());
 }
@@ -3393,6 +3399,8 @@ const ws = workspace({
   },
   slices,
   busy: () => !!tools.tool || !!placing,
+  norths: () => view.cube.norths || null,
+  wind: () => (weather ? { speed: Number($('wind').value) || 0, dir: Number($('wind-dir').value) || 0 } : null),
   // a plan edited as the 3D view is: its zones, walls and windows picked and pushed, the tools at work
   editorFor: (d) => (d.host.addEventListener('pointerdown', (e) => {
     const r = d.host.getBoundingClientRect();

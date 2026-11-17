@@ -1049,6 +1049,9 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     } else { this.sashMesh = null; this.openingPick = null; }
     this.group.add(this.sashGroup);
     this.onDoors?.(); // the plans' window swings follow the sashes
+    // which windows are swung (their glass gone from its place) changed: the drawings cut again
+    const which = [...swung].sort().join('\u0000');
+    if (!quick && which !== this.swungKey) { this.swungKey = which; this.onWindowsSet?.(); }
     // a selected window's outline follows its sash
     if (this.selectedName && this.model.windows[this.selectedName] && (swung.has(this.selectedName) || this.highlightOnSash)) {
       this.highlightOnSash = swung.has(this.selectedName);

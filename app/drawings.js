@@ -87,7 +87,8 @@ function seenRuns(view, f, A, B) {
 // The plane as seen: a frame { o, u, v, n } in view coordinates; the side n points to is removed, the
 // eye is there, looking along -n. Seen from there, u runs right and v up when u x v = n; otherwise the
 // drawing is mirrored so it is never seen from behind.
-export function cutGeometry(view, f, { depth = Infinity, near = 4 } = {}) {
+// sashes: false leaves the swung sashes out (a plan draws them itself, where they stand now)
+export function cutGeometry(view, f, { depth = Infinity, near = 4, sashes = true } = {}) {
   const mirror = f.u.clone().cross(f.v).dot(f.n) < 0 ? -1 : 1;
   const P = (q) => [mirror * q.x, q.y]; // a point on the plane, (u, v) as seen
   const poche = [], slabs = [], lines = [], glass = [], beyond = [], far = [];
@@ -105,7 +106,7 @@ export function cutGeometry(view, f, { depth = Infinity, near = 4 } = {}) {
     const g = view.front.geometry, tris = (g.index ? g.toNonIndexed() : g).getAttribute('position').array;
     for (const [a, b] of cutSolid(tris, f)) lines.push([P(a), P(b)]);
   }
-  for (const m of [view.glass, view.sashMesh]) {
+  for (const m of [view.glass, sashes ? view.sashMesh : null]) {
     if (!m?.geometry) continue;
     const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry;
     for (const [a, b] of cutSolid(g.getAttribute('position').array, f)) glass.push([P(a), P(b)]);

@@ -523,3 +523,6 @@ body.bartucked .calcbar>.ribbon{display:none}
 .draw2d canvas.viewair{position:absolute; left:0; top:0; pointer-events:none}
 .draw2d svg.viewprobe{position:absolute; left:0; top:0; pointer-events:none}
 .draw2d .viewtag{position:absolute; left:0; top:0; pointer-events:none; z-index:5}
+.draw2d svg.planlayers{position:absolute; left:0; top:0; pointer-events:none; z-index:3}
+.vlayers .ddmenu{min-width:190px; padding:6px 8px}
+.vlayers .layrow{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:4px}
