@@ -518,3 +518,6 @@ body.bartucked .calcbar>.ribbon{display:none}
 .cmdline .cmdlist{position:absolute; right:0; top:calc(100% + 3px); z-index:70; min-width:200px; background:var(--panel); border:1px solid var(--rule); border-radius:4px; box-shadow:0 3px 10px rgba(0,0,0,.13); padding:3px; display:flex; flex-direction:column}
 .cmdline .cmdlist button{text-align:left; font:12px var(--sans); color:var(--ink2); background:none; border:0; padding:4px 8px; border-radius:3px; cursor:pointer}
 .cmdline .cmdlist button.on,.cmdline .cmdlist button:hover{background:var(--glass); color:#fff}
+
+/* a plan or section view's air (viewair.js): its fill and particles over the drawing, under the editor's layer */
+.draw2d canvas.viewair{position:absolute; left:0; top:0; pointer-events:none}

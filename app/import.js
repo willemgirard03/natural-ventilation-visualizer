@@ -13,7 +13,7 @@ import { GridFlow } from '../src/solver/grid.js';
 import { co2Generation, outdoorAirSupply, outdoorCO2, stepCO2 } from '../src/solver/co2.js';
 import { cellAt } from '../src/solver/roomflow.js';
 import { gridFrame, inGridFrame, toGrid, fromGrid } from '../src/solver/frame.js';
-import { FieldSlices, rampTemperature } from './slices.js';
+import { FieldSlices, rampTemperature, AIR_DEFAULT } from './slices.js';
 import { standardPressure } from '../src/solver/air.js';
 import { AirflowParticles, temperatureColor, speedColor, SPEED_RANGE } from './particles.js';
 import { SkyDome, VENT_BANDS, ventBandLabels } from './skydome.js';
@@ -359,8 +359,9 @@ function drawSlices(now = false) {
   // While a baked day plays, its blended fields; otherwise the live room air.
   const simulated = $('room-air').value === 'grid';
   const grid = liveGrid(), field = liveField();
-  const any = view.sections.planes.some((p) => p.air.field || p.air.particles);
-  if (!any || !model || !rooms || (simulated ? !gridLive : !field)) { slices.hide(); sliceRanges = {}; legend(); return; }
+  const W = (() => { try { return ws; } catch { return null; } })(); // the views (not made yet, at the start)
+  const onPlanes = view.sections.planes.some((p) => p.air.field || p.air.particles), onViews = !!W?.anyAir();
+  if ((!onPlanes && !onViews) || !model || !rooms || (simulated ? !gridLive : !field)) { slices.hide(); W?.setAir(null, null); sliceRanges = {}; legend(); return; }
   const wait = 300 - (performance.now() - sliceLast);
   if (!now && wait > 0) { clearTimeout(sliceTimer); sliceTimer = setTimeout(() => drawSlices(true), wait); return; }
   sliceLast = performance.now();
@@ -403,7 +404,9 @@ function drawSlices(now = false) {
     const H = airflow.hourAt, r = results && zoneAtTime(results, name, airflow.H ?? H + 0.5);
     return { t: airflow.conditions.zones[name]?.t ?? null, fromResults: !!r, co2Results: r?.co2 ?? null, co2Tool: airflow.co2?.[name] ?? null };
   };
-  sliceRanges = slices.update({ inside: fluid, value, velocity, temperature, co2, zoneAt, zoneMean, zoneKnown }, null, g);
+  const sample = { inside: fluid, value, velocity, temperature, co2, zoneAt, zoneMean, zoneKnown };
+  if (onPlanes) sliceRanges = slices.update(sample, null, g); else { slices.hide(); sliceRanges = {}; }
+  W?.setAir(sample, g);
   legend();
 }
 let net = null, airflow = null; // the network for the loaded model, and its latest solution
@@ -855,7 +858,23 @@ $('time-interp').addEventListener('change', () => { timeSteps(); applyHour(); })
 
 
 // What is selected now: a section plane, or a surface, window, door or zone.
-const current = () => (view.sections.selected ? { kind: 'plane', item: view.sections.selected } : view.find(selected));
+// the air settings of a plan or section view open in the pop-up (its id), or null
+let airView = null;
+const airRecord = () => (airView === null ? null : namedViews().find((v) => v.id === airView) || null);
+const current = () => (airRecord() ? { kind: 'viewair', item: airRecord() } : view.sections.selected ? { kind: 'plane', item: view.sections.selected } : view.find(selected));
+// what the air settings in the pop-up change: a view's, or the clipping plane's
+const airTarget = () => airRecord() || view.sections.selected;
+// A view's Air button: its settings in the pop-up, beside the button (a view new to them shows nothing yet)
+function openViewAir(id, button) {
+  const rec = namedViews().find((v) => v.id === id);
+  if (!rec) return;
+  rec.air ||= { ...AIR_DEFAULT, field: '', particles: false, color: 'none' };
+  view.sections.select(null);
+  const r = button.getBoundingClientRect(), host = button.closest('.view')?.querySelector('.draw2d') || button;
+  drawnPick = { el: host, x: 0, y: 0, cx: r.left, cy: r.bottom, time: performance.now() };
+  airView = id;
+  showInfo({ kind: 'viewair', item: rec });
+}
 
 // Section planes: added from the bar (dragged in, or a click on the button and then on the view), and
 // picked, moved and turned in the view (sections.js). The air on them follows every change.
@@ -1278,7 +1297,8 @@ function showInfo(found) {
   if (mergeAsk && found?.kind === 'zone') { const i = massingGeometry(massing).findIndex((z) => z.name === found.item.name); if (mergeAsk.zones.includes(i)) { mergeKeep(i); return; } }
   // The selection: many things at once (a box, Shift, a zone with its walls, Tab's chain). A plain
   // pick of one thing selects it alone; with Shift it is added (or, already selected, let go).
-  const nm = found && found.kind !== 'plane' ? found.item?.name : null;
+  if (found?.kind !== 'viewair') airView = null;
+  const nm = found && found.kind !== 'plane' && found.kind !== 'viewair' ? found.item?.name : null;
   if (!keepSelection) {
     const add = view.addMode && !!selected && !!nm;
     if (add) { const s = new Set(selection.size ? selection : [selected]); if (s.has(nm) && s.size > 1) s.delete(nm); else s.add(nm); selection = s; }
@@ -1293,7 +1313,7 @@ function showInfo(found) {
   // a massing's zone or surface: its handles
   const mt = massing && massingTarget(found);
   if (mt) massEdit.start(mt); else massEdit.stop();
-  if (found?.kind !== 'plane') selected = found?.item?.name ?? null;
+  if (found?.kind !== 'plane' && found?.kind !== 'viewair') selected = found?.item?.name ?? null;
   queueMicrotask(() => ws.selection());
   if (winEdit.active && !(found?.kind === 'window' && found.item.name === winEdit.name)) winEdit.stop();
   if (!found) { box.hidden = true; box.dataset.kind = ''; popKey = null; popShut = null; view.clicked = false; return; }
@@ -1415,6 +1435,7 @@ function popContent(kind, item) {
   const rows = [];
   const deg = (x) => (x === null ? '' : `${Math.round(x)}°`);
   if (kind === 'plane') return { title: esc(item.name), rows: planeRows(item) };
+  if (kind === 'viewair') return { title: `Air · ${esc(item.name)}`, rows: airRows(item, false) };
   let title;
   if (kind === 'surface') {
     title = `${esc(item.csType)} · ${esc(item.zone)}`;
@@ -1485,7 +1506,7 @@ function popContent(kind, item) {
 // A plane's fill or particles: their gradient (picked from a list showing each; the swatch beside
 // flips it) and their range (typed; Sync sets it once to what this cut shows, rounded).
 function gradientRows(which, field, shown) {
-  const p = view.sections.selected, a = p.air, key = `${which}Ramp`, flipKey = `${which}Flip`, rangeKey = `${which}Range`;
+  const p = airTarget(), a = p.air, key = `${which}Ramp`, flipKey = `${which}Flip`, rangeKey = `${which}Range`;
   const now = a[key] || shown?.ramp || 'coolwarm', flip = !!a[flipKey], unit = UNITS[field], d = field === 'co2' ? 0 : field === 'speed' ? 3 : 1;
   const f = (v) => (v === null || v === undefined ? '' : String(+Number(v).toFixed(d)));
   const per = field === 'co2' ? 2 : field === 'speed' ? 0.002 : 0.05; // a value a pixel, dragged
@@ -1516,18 +1537,27 @@ function planeRows(p) {
     ...made.map((v) => `<span class="popkv"><span class="tipped" title="A ${v.kind} view made from this plane, linked to it: moving either moves the other">View</span><button type="button" class="pbtn" data-plview-open="${v.id}" title="Show it">${esc(v.name)}</button></span>`),
     `<div class="poprow"><input class="popname" data-plview-name placeholder="${esc(suggest)}" title="The view's name (Tab takes the suggestion)"><button type="button" class="pbtn" data-plview title="A ${kindWord} view of this cut, named and linked to this plane: show it from its name here, or pick it in a plan or section view">Create ${kindWord} view</button></div>`,
     `<label class="chk" title="Switch the plane's clipping off without removing it: the building, the air and the particles show whole; switch it on again to clip as before"><input type="checkbox" data-air="on"${p.off ? '' : ' checked'}> Clip on</label>`,
+    ...airRows(p, true),
+  ];
+}
+// The air on a cut (a clipping plane's, or a plan or section view's): its fill and its particles.
+// plane: a clipping plane (it may show the 3D particles beyond it).
+function airRows(p, plane) {
+  const a = p.air, opt = (list, now) => list.map(([v, l]) => `<option value="${v}"${v === now ? ' selected' : ''}>${l}</option>`).join('');
+  const fields = [['', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂']];
+  return [
     `<span class="popkv"><span class="tipped" title="Fill the cut where it passes through rooms with the air's temperature, speed or CO2, at the opacity beside (drag it left or right, or type it). Point at the cut to read the values there, and its zone's averages.">Clip fill</span><span class="popv"><select class="popsel" data-air="field">${opt(fields, a.field)}</select>${a.field ? ` <input class="popnum short scrubnum" data-air="fillOpacity" data-min="5" data-max="100" value="${Math.round((a.fillOpacity ?? 0.82) * 100)}" title="Opacity: drag left or right, or type">%` : ''}</span></span>`,
     ...(a.field ? gradientRows('fill', a.field, p.shown?.fill) : []),
     popSec('Particle data', 'Particles moving with the air within this plane, trailing, as in a 2D section: its own, apart from the 3D particles'),
     `<span class="popkv"><span class="tipped" title="Particles in this plane, coloured by the air's temperature, speed or CO2 where each is, or plain black, at the opacity beside (drag it left or right, or type it); None: no particles in it">Clip particles</span><span class="popv"><select class="popsel" data-air="color">${opt([['none', 'None'], ['temperature', 'Temperature'], ['speed', 'Speed'], ['co2', 'CO₂'], ['plain', 'Plain (black)']], a.particles ? a.color : 'none')}</select>${a.particles ? ` <input class="popnum short scrubnum" data-air="partOpacity" data-min="5" data-max="100" value="${Math.round((a.partOpacity ?? 1) * 100)}" title="Opacity: drag left or right, or type">%` : ''}</span></span>`,
     ...(a.particles && a.color !== 'plain' ? gradientRows('part', a.color, p.shown?.part) : []),
     ...(a.particles ? [`<span class="popkv"><span class="tipped" title="How many particles in this plane: a share of all the particles' density (Layers ▸ Airflow particles), which with their speed is set there for every view alike">Density</span><span class="popv"><input type="range" data-air="density" min="0" max="1" step="0.05" value="${Math.min(1, a.density ?? 1)}"> <output>×${+Math.min(1, a.density ?? 1).toFixed(2)}</output></span></span>`] : []),
-    `<label class="chk" title="The 3D airflow particles seen through this cut: off, only the cut's own particles show there. Each plane decides for what is seen through it."><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`,
-  ];
+    ...(plane ? [`<label class="chk" title="The 3D airflow particles seen through this cut: off, only the cut's own particles show there. Each plane decides for what is seen through it."><input type="checkbox" data-air="beyond"${a.beyond ? ' checked' : ''}> Show 3D particles beyond</label>`] : []),
+  ].map((r) => r.replace('Fill the cut where', plane ? 'Fill the cut where' : 'Fill the view\'s cut where').replace('>Clip fill<', plane ? '>Clip fill<' : '>Fill<').replace('>Clip particles<', plane ? '>Clip particles<' : '>Particles<'));
 }
 // Its settings changed: the cut redrawn (density and speed as the slider moves).
 function onAir(e) {
-  const t = e.target, key = t.dataset?.air, p = view.sections.selected;
+  const t = e.target, key = t.dataset?.air, p = airTarget();
   if (!key || !p) return;
   const a = p.air;
   if (key === 'on') { p.off = !t.checked; view.sections.changed(); drawSlices(true); showInfo(current()); legend(); return; }
@@ -1566,7 +1596,7 @@ function onAir(e) {
 $('info').addEventListener('input', onAir);
 // A plane's gradient picked or flipped, a range synced once to what the cut shows
 $('info').addEventListener('click', (e) => {
-  const p = view.sections.selected, b = e.target.closest('[data-ramp-pick], [data-air-flip], [data-air-sync]');
+  const p = airTarget(), b = e.target.closest('[data-ramp-pick], [data-air-flip], [data-air-sync]');
   if (!b || !p) return;
   if (b.dataset.rampPick) p.air[`${b.dataset.which}Ramp`] = b.dataset.rampPick;
   else if (b.dataset.airFlip) p.air[b.dataset.airFlip] = !p.air[b.dataset.airFlip];
@@ -3035,7 +3065,7 @@ document.addEventListener('click', (e) => {
     openColorPicker(b, cap[end], (hex) => { cap[end] = hex; b.style.background = hex; legend(); });
     return;
   }
-  const p = view.sections.selected;
+  const p = airTarget();
   if (!p) return;
   const before = view.sections.state(), ck = `${which}Cap`;
   openColorPicker(b, ({ ...CAP_DEFAULT, ...p.air[ck] })[end], (hex) => {
@@ -3048,7 +3078,7 @@ document.addEventListener('click', (e) => {
 // when the pop-up was pressed, against how they are after a change or a click in it; and the same for
 // the window settings on the Modelling tab.
 let popBefore = null;
-const popSnap = () => ({ win: windowState(), planes: view.sections.selected ? view.sections.state() : null });
+const popSnap = () => ({ win: windowState(), planes: view.sections.selected ? view.sections.state() : null, viewAir: airRecord() ? { rec: airRecord(), air: structuredClone(airRecord().air) } : null });
 function setWindowState(s) {
   $('windows').value = s.windows; $('doors').value = s.doors; $('sash-type').value = s.sash;
   windowSet.clear(); roomSet.clear(); sashSet.clear(); amountSet.clear();
@@ -3065,12 +3095,23 @@ function popCommit() {
   popBefore = null;
   if (!b || !model) return;
   const win = windowState();
+  // nothing changed yet (a list opened by a click, its choice to come): the state before is kept for it
+  const planesSame = !b.planes || JSON.stringify(b.planes.map((p) => p.air)) === JSON.stringify(view.sections.planes.map((p) => p.air));
+  if (sameState(b.win, win) && planesSame && (!b.viewAir || JSON.stringify(b.viewAir.air) === JSON.stringify(b.viewAir.rec.air))) { popBefore = b; return; }
   if (!sameState(b.win, win)) {
     undoStack.push({ undo: () => setWindowState(b.win), redo: () => setWindowState(win), what: 'windows set', view: true });
     if (undoStack.length > 100) undoStack.shift();
     redoStack.length = 0;
   }
   if (b.planes && JSON.stringify(b.planes.map((p) => p.air)) !== JSON.stringify(view.sections.planes.map((p) => p.air))) view.sections.commit(b.planes, 'clipping plane settings changed');
+  // a plan or section view's air settings: one step back to how they were
+  const va = b.viewAir;
+  if (va && JSON.stringify(va.air) !== JSON.stringify(va.rec.air)) {
+    const was = va.air, now = structuredClone(va.rec.air), set = (x) => { va.rec.air = structuredClone(x); drawSlices(true); if (airView === va.rec.id) showInfo(current()); legend(); };
+    undoStack.push({ undo: () => set(was), redo: () => set(now), what: 'view air settings changed', view: true });
+    if (undoStack.length > 100) undoStack.shift();
+    redoStack.length = 0;
+  }
 }
 for (const el of [$('info'), $('windows'), $('doors'), $('sash-type'), $('windows-reset')]) {
   el.addEventListener('pointerdown', () => { popBefore = popSnap(); }, true);
@@ -3352,6 +3393,8 @@ const ws = workspace({
   levels: () => massing?.levels || null,
   planeOf: (id) => planeById(namedViews().find((v) => v.id === id)?.plane),
   onCut3d: cut3d,
+  onAirSettings: (id, button) => openViewAir(id, button),
+  airSpeed: () => air.speed ?? 1,
   // a plan edited as the 3D view is: its zones, walls and windows picked and pushed, the tools at work
   editorFor: (d) => (d.host.addEventListener('pointerdown', (e) => {
     const r = d.host.getBoundingClientRect();
