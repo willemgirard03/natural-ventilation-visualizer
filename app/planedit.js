@@ -127,6 +127,7 @@ export class PlanEdit {
     const out = [];
     for (const w of [...c.walls, ...c.free]) if (test(w.loops.length ? w.loops : [w.seg])) out.push(w.name);
     for (const w of c.windows) if (test([w.seg])) out.push(w.name);
+    for (const d of c.doors || []) if (test([d.seg])) out.push(d.name);
     for (const z of c.zones) if (test(z.polys)) out.push(z.name);
     return out;
   }
@@ -276,6 +277,8 @@ export class PlanEdit {
     if (this.box) {
       const b = this.box, x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1);
       g += `<rect x="${x}" y="${y}" width="${Math.abs(b.x1 - b.x0)}" height="${Math.abs(b.y1 - b.y0)}" fill="var(--glass)" fill-opacity="0.06" stroke="var(--glass)" stroke-width="1"${b.x1 < b.x0 ? ' stroke-dasharray="5 3"' : ''}/>`;
+      // what letting go now would select, shown as it will be
+      for (const n of this.inBox(b)) { const f = this.find(n); if (f) g += this.selMark(f, false); }
     }
     // the hover as the plan is now (after an edit, the thing under the pointer may have moved or gone)
     if (this.hover) { const f = this.find(this.hover.name); this.hover = f ? { ...f, name: this.hover.name } : null; }
@@ -444,7 +447,9 @@ export class PlanEdit {
     }
     if ((kind === 'surface' || kind === 'wall') && item.loops.length) return item.loops.map((L) => poly(L.map(T), o)).join('');
     // a line: a narrow box around it
-    const [a, b] = item.seg.map(T), dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1, h = kind === 'window' ? 4 : 3, nx = -dy / l * h, ny = dx / l * h;
+    // half as wide as a glazing unit or a door leaf is deep (50 mm) at the drawing's scale, so it keeps
+    // to the pane as the plan is zoomed (as drawings.js draws the glass)
+    const [a, b] = item.seg.map(T), dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1, h = Math.max(1.2, 0.05 * (this.d.cam?.s || 20)), nx = -dy / l * h, ny = dx / l * h;
     return poly([[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]], o);
   }
   // A massing's window, or wall with windows, selected: its array bracketed outside the wall, as in 3D -
@@ -514,8 +519,12 @@ export class PlanEdit {
     }
     for (const k of faces) {
       const { A, U, n } = faceAxes(m, t.zone, k), len = faceLength(m, t.zone, k), mid = [A[0] + U[0] * len / 2, A[1] + U[1] * len / 2];
-      const p = this.P(mid), q = this.P([mid[0] + n[0], mid[1] + n[1]]);
-      this.grips.push({ p, dir: [q[0] - p[0], q[1] - p[1]], zone: t.zone, face: k, shared: t.face !== null });
+      const p0 = this.P(mid), q = this.P([mid[0] + n[0], mid[1] + n[1]]), dir = [q[0] - p0[0], q[1] - p0[1]], L = Math.hypot(...dir) || 1;
+      // a zone's handle stands 14 px inside it, off the wall (dragged, the wall moves for this zone
+      // alone); a wall selected alone has its handle on it, moving it for every zone sharing it
+      const inset = t.face === null ? 14 : 0, p = [p0[0] - (dir[0] / L) * inset, p0[1] - (dir[1] / L) * inset];
+      this.grips.push({ p, dir, zone: t.zone, face: k, shared: t.face !== null });
+      if (inset) g += line(p0[0], p0[1], p[0], p[1], { stroke: 'var(--glass)', w: 1 });
       g += gripMark(p[0], p[1], 5);
     }
     return g;
@@ -657,10 +666,12 @@ export class PlanEdit {
       this.d.host.setPointerCapture?.(e.pointerId);
       return;
     }
-    // the selected window pressed again: dragged along its wall, it sets the spacing
-    const sel = this.api.selected(), h = this.pickAt(e), t = sel && h?.kind === 'window' && h.name === sel && this.api.massingTarget(sel);
+    // a window of an array pressed: dragged along its wall, it sets the spacing (it is selected, so its
+    // array shows as it goes); let go where pressed, it is picked. This wins over a box.
+    const h = this.pickAt(e), t = h?.kind === 'window' && this.api.massingTarget(h.name);
     if (t && Number.isInteger(t.window)) {
-      this.drag = { pitch: true, zone: t.zone, face: t.face, index: t.window, u: 0, x0: e.clientX, y0: e.clientY, moved: false };
+      if (this.api.selected() !== h.name && !e.shiftKey) this.api.selectNames([h.name]);
+      this.drag = { pitch: true, zone: t.zone, face: t.face, index: t.window, u: 0, x0: e.clientX, y0: e.clientY, moved: false, press: h.name };
       this.d.host.setPointerCapture?.(e.pointerId);
       return;
     }

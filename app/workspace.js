@@ -284,6 +284,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
       for (const o of [this.ov, this.tv]) { o.setAttribute('width', w); o.setAttribute('height', h); }
       this.editor?.paint();
       this.editor && tools()?.redrawIn(this.editor.ctx);
+      this.airLayer.follow(); // the air moved with the drawing now, sampled again when it rests
       this.airSoon();
       settle(this);
       const lv = levels(), p = planeOf(v.id);
@@ -295,7 +296,7 @@ export function workspace({ host, view3dEl, view, views, levels, planeOf, onCut3
     // the air on the cut drawn again, a moment after the drawing moves (not at every step of a pan)
     airSoon() {
       clearTimeout(this.airTimer);
-      this.airTimer = setTimeout(() => this.airLayer.update(airSample, airGrid), 60);
+      this.airTimer = setTimeout(() => this.airLayer.update(airSample, airGrid), 150);
       const on = this.item?.air && (this.item.air.field || this.item.air.particles);
       this.el.querySelector('[data-airset]')?.setAttribute('aria-pressed', String(!!on));
     }

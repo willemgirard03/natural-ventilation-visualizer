@@ -76,6 +76,9 @@ export class ViewAir {
     // the fill: each sample a pixel of a small image, stretched over the view
     const fc = this.fill.getContext('2d');
     fc.clearRect(0, 0, w, h);
+    // drawn for the view as it is now (follow() moves it with the drawing until it is drawn again)
+    this.drawnCam = { ...(this.d.cam || { cx: 0, cy: 0, s: 20 }) };
+    this.fill.style.transform = '';
     if (a.field) {
       const img = new ImageData(W, H), sh = this.d.item.shown.fill;
       values.forEach((val, k) => {
@@ -98,6 +101,18 @@ export class ViewAir {
       Object.assign(this.dots, { where, step, f, mir, bounds: [u0, u0 + W * step, v0, v0 + H * step] });
       if (!this.running) this.run();
     } else { this.dots = null; this.parts.getContext('2d').clearRect(0, 0, w, h); }
+  }
+
+  // The drawing panned or zoomed: the fill, drawn for the view as it was, moved and scaled with it at
+  // once (it is sampled again a moment after the drawing comes to rest). The particles are drawn every
+  // frame at the view as it is, so they follow by themselves.
+  follow() {
+    const a = this.drawnCam, c = this.d.cam;
+    if (!a || !c) return;
+    const w = this.d.host.clientWidth, h = this.d.host.clientHeight, k = c.s / a.s;
+    const tx = w / 2 - (w / 2) * k + (a.cx - c.cx) * c.s, ty = h / 2 - (h / 2) * k - (a.cy - c.cy) * c.s;
+    this.fill.style.transformOrigin = '0 0';
+    this.fill.style.transform = `matrix(${k},0,0,${k},${tx},${ty})`;
   }
 
   run() {
