@@ -20,7 +20,7 @@ import { SkyDome, VENT_BANDS, ventBandLabels } from './skydome.js';
 import { windRoseData, windRoseGroup, windArrow, windSpeedAt, BAND_COLORS, SPEED_BANDS } from './windrose.js';
 import { dateOf, hourIndex, outdoorAt, parseEPW } from '../src/model/weather.js';
 import { addWindow, openingProblem, wallExtent } from '../src/model/edit.js';
-import { addDoor, deleteDoor, faceAxes as doorFaceAxes, massingGeometry as doorGeometry } from '../src/model/massing.js';
+import { addDoor, deleteDoor, addOpening, deleteOpening, massingOpening, setOpening, faceAxes as doorFaceAxes, massingGeometry as doorGeometry } from '../src/model/massing.js';
 import { readZoneResultsStream, mergeResults, zoneAtTime, windowAtTime, ventShare, surfaceAtTime, resultsTiming } from '../src/model/results.js';
 import { SASH_TYPES, sashAngle, freeFraction } from '../src/model/sash.js';
 import { daylightSavingDays, hourlyValues } from '../src/model/schedules.js';
@@ -184,9 +184,11 @@ const winEdit = new WindowEditor(view, {
   },
   onCommit: (name, r) => (massing && massingWindow(massing, name)
     ? massingWindowEdit(name, r)
+    : massing && massingOpening(massing, name) ? openingEdit(name, r)
     : applyEdit((tx, m) => setWindowRect(tx, m, name, r), `window ${name} moved or resized`, { geometry: true })),
 });
 view.onRender = () => followPop();
+view.onDoors = () => { try { ws.selection?.(); } catch { /* before the workspace is made */ } }; // the plans' door swings follow the leaves
 // A massing's zone pushed, pulled, moved and turned in the view (app/massedit.js).
 const massEdit = new MassingEditor(view, {
   massing: () => massing, onChange: massingChange,
@@ -240,12 +242,14 @@ const tools = new ModelTools(view, {
   onChange: (mutate, what) => massingChange(mutate, what),
   onAdded: (j) => { const z = massingGeometry(massing)[j]; if (z && model.zones[z.name]) view.select(z.name); },
   keepSeams: () => $('keep-seams').checked,
+  alignMultiple: () => $('align-multi').checked,
   wallThickness: (asm) => asmThickness(asm),
   onWallLevels: (b, t) => { if (Number($('wall-base').value) === b && Number($('wall-top').value) === t) return; $('wall-base').value = String(b); fillTop(); $('wall-top').value = String(t); },
   wallProps: () => ({ asm: $('wall-asm').value, base: Number($('wall-base').value), top: Number($('wall-top').value), line: $('wall-line').value, chain: $('wall-chain').checked }),
   onTool: (tool) => {
     for (const b of document.querySelectorAll('.mtools [data-tool]')) b.setAttribute('aria-pressed', b.dataset.tool === tool);
     $('keep-seams-l').hidden = tool !== 'merge';
+    $('align-multi-l').hidden = tool !== 'align';
     wallTab(tool === 'wall');
     if (tool) { winEdit.stop(); view.select(null); hover.clear(); cmdLine?.remember(TOOL_COMMAND[tool]); }
   },
@@ -481,6 +485,11 @@ const defaultAmount = (l) => Math.min(1, sashFor(l, l.openFactor).angle / maxAng
 const amountOf = (l) => (amountSet.has(l.name) ? amountSet.get(l.name) : defaultAmount(l));
 // The free fraction of the opening at a window's amount: the opening factor EnergyPlus gets.
 const openFraction = (l) => freeFraction(sashOf(l.name).type, l.width, l.height, amountOf(l) * maxAngleOf(l));
+// A door opens on its hinge, up to 90°: its amount (1, wide open, unless set) and the free fraction of
+// its opening at that angle (as a casement's, hinged at the side).
+const DOOR_MAX_ANGLE = 90;
+const doorAmountOf = (name) => (amountSet.has(name) ? amountSet.get(name) : 1);
+const doorFraction = (l) => freeFraction('casement', l.door?.width || 0.9, l.door?.height || 2.1, doorAmountOf(l.name) * DOOR_MAX_ANGLE);
 let weather = null, weatherHour = null, roseLabels = true; // the weather file and the hour picked from it
 let results = null; // zone conditions hour by hour from a results file, for the loaded model
 let esoSource = null; // where the results file in use comes from: { name, blob() }, for Export .eso
@@ -500,7 +509,7 @@ function conditionsAt(hourAt, outdoor, site, H = hourAt + 0.5, span = 0) {
     zones: Object.fromEntries(net.zones.map((z) => [z, inside(z)])),
     open: Object.fromEntries(net.links.filter((l) => l.control === 'zone' || l.door).map((l) => {
       // doors between rooms as the Doors setting; a door to outdoors shut until opened
-      if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : l.to !== null && $('doors').value === 'open') ? l.openFactor : 0];
+      if (l.door) return [l.name, (windowSet.has(l.name) ? windowSet.get(l.name) : l.to !== null && $('doors').value === 'open') ? l.openFactor * doorFraction(l) : 0];
       // As in results: an airflow network run gives each window's opening; otherwise the zone's ventilation.
       // Each window opens as far as its sash allows towards the fraction asked of it.
       const reported = mode === 'results' && results ? windowAtTime(results, l.name, H, span) : null;
@@ -599,7 +608,8 @@ function solveAir() {
     if (line) line.outerHTML = co2Line(line.dataset.zone);
   }, play ? Math.max(0, 1000 - (performance.now() - co2Last)) : 250);
   const openNow = Object.entries(conditions.open).filter(([n, f]) => f > 0 && !isDoor(n)).map(([n]) => n);
-  view.setOpenDoors(new Set(Object.entries(conditions.open).filter(([n, f]) => f > 0 && isDoor(n)).map(([n]) => n)));
+  const doorsOpen = Object.entries(conditions.open).filter(([n, f]) => f > 0 && isDoor(n)).map(([n]) => n);
+  view.setOpenDoors(new Set(doorsOpen), new Map(doorsOpen.map((n) => [n, doorAmountOf(n) * DOOR_MAX_ANGLE])));
   view.showWindows(new Set(openNow), new Map(openNow.map((n) => {
     const l = net.links.find((x) => x.name === n);
     return [n, { ...sashOf(n), angle: sashFor(l, conditions.open[n]).angle }];
@@ -916,7 +926,7 @@ $('sash-type').addEventListener('change', () => { sashSet.clear(); amountSet.cle
 $('info').addEventListener('input', (e) => {
   if (e.target.dataset?.act !== 'amount') return;
   const name = e.target.dataset.name, a = Number(e.target.value) / 100, l = net.links.find((x) => x.name === name);
-  for (const n of scopeOf(name)) { amountSet.set(n, a); windowSet.set(n, a > 0); }
+  for (const n of l?.door ? [name] : scopeOf(name)) { amountSet.set(n, a); windowSet.set(n, a > 0); }
   view.swingDirect = true; // the sash follows the slider itself
   solveAir();
   view.swingDirect = false;
@@ -1214,18 +1224,28 @@ async function loadText(name, read) {
   $('status').textContent = `Reading ${name}…`;
   massing = null; $('massing').hidden = true; $('mass-open').hidden = false; massEdit.stop(); tools.stop(); $('model-tools').hidden = true;
   try {
-    const epjson = JSON.parse(await read());
+    const text = await read();
+    let epjson;
+    // an .idf (EnergyPlus's text input) read into epJSON first, by EnergyPlus's own field order
+    if (/\.idf$/i.test(name) || !/^\s*\{/.test(text)) {
+      const [{ parseIDF }, idd] = await Promise.all([import('../src/model/idf.js'), import('../src/model/idd-fields.js').then((x) => x.default)]);
+      const r = parseIDF(text, idd);
+      if (!r.count) throw new Error('no EnergyPlus objects found in it');
+      epjson = r.epjson;
+      if (r.unknown.length) console.warn(`Not EnergyPlus ${idd.version} objects, left out: ${r.unknown.join(', ')}`);
+    } else epjson = JSON.parse(text);
     model = importEpJSON(epjson, { fileName: name });
   } catch (err) {
     model = null;
     $('status').innerHTML = `<span class="error-text">Could not read ${esc(name)}: ${esc(err.message)}</span>`;
     $('results').hidden = true;
-    $('export').disabled = true;
+    $('export').disabled = true; $('export-idf').disabled = true;
     return;
   }
   $('status').textContent = '';
   document.title = `${name} · Natural Ventilation Visualizer`;
   $('export').disabled = false;
+  $('export-idf').disabled = false;
   render(model);
 }
 
@@ -1835,9 +1855,10 @@ function airLines(kind, item) {
       lines.push(`<span class="warning-text">At its ${SASH_TYPES[s.type].maxAngle}° limit this sash frees ${fmt(100 * need.maxFraction, 0)}% of the opening, not the ${fmt(100 * l.openFactor, 0)}% the model asks for; the airflow uses ${fmt(100 * need.maxFraction, 0)}%.</span>`);
     }
   }
+  if (l.door) lines.push(`Opening <input type="range" data-act="amount" data-name="${esc(l.name)}" min="0" max="100" step="1" value="${Math.round(100 * (airflow.conditions.open[l.name] > 0 ? doorAmountOf(l.name) : 0))}" title="How far the door swings open, as a share of ${DOOR_MAX_ANGLE}°"> <output data-for="${esc(l.name)}">${esc(amountText(l))}</output>`);
   if (l.control === 'zone' || l.door) {
     const open = airflow.conditions.open[l.name] > 0, what = l.door ? 'door' : 'window';
-    if (l.door) lines.push(open ? 'Open' : `Closed: leaks like a 1 cm gap under it`);
+    if (l.door && !open) lines.push(`Closed: leaks like a 1 cm gap under it`);
     lines.push(`<button class="quiet" data-act="window" data-name="${esc(l.name)}" data-open="${open ? 0 : 1}">${open ? 'Close' : 'Open'} this ${what}</button>`);
   }
   return lines;
@@ -1848,6 +1869,7 @@ function airLines(kind, item) {
 function amountText(l) {
   const now = airflow.conditions.open[l.name];
   if (!(now > 0)) return 'closed';
+  if (l.door) { const angle = doorAmountOf(l.name) * DOOR_MAX_ANGLE; return `${fmt(angle, 0)}°, ${fmt(100 * now, 0)}% free`; }
   const angle = sashFor(l, now).angle;
   return `${fmt((100 * angle) / maxAngleOf(l), 0)}% of its travel: ${fmt(angle, 0)}°, ${fmt(100 * now, 0)}% free (EnergyPlus opening factor ${fmt(now, 2)})`;
 }
@@ -2686,37 +2708,77 @@ function offerAt(wall, p) {
   const s = model?.surfaces[wall], ext = s && wallExtent(model, wall), door = placing === 'door';
   if (!ext) return null;
   const mt = massing && massingTarget({ kind: 'surface', item: s });
-  if (mt && !door) return null;
   let w, h, sill;
   if (door) { w = DOOR.width; sill = DOOR.sill; h = Math.min(DOOR.height, ext.z1 - ext.z0 - sill - 0.05); }
   else {
     const like = s.windows.map((n) => windowRect(model, n)).find(Boolean) || model.zones[s.zone].windows.map((n) => windowRect(model, n)).find(Boolean);
     w = like ? like.s1 - like.s0 : 1.2; h = like ? like.z1 - like.z0 : 1.5; sill = like ? like.z0 - ext.z0 : 0.9;
   }
-  const f = ext.frame, at = p[0] * f.right[0] + p[1] * f.right[1], mid = (ext.s0 + ext.s1) / 2;
-  const c = Math.abs(at - mid) < 0.15 ? mid : Math.round(at / 0.05) * 0.05;
+  const f = ext.frame, at = p[0] * f.right[0] + p[1] * f.right[1];
+  // snapped within 150 mm to the wall's middle, or to the middle of either face of the wall as drawn
+  // (its thickness), or to stand clear of either face's ends; else to 50 mm
+  const snaps = [(ext.s0 + ext.s1) / 2, ...faceSnaps(wall, f, w)].map((x) => [x, Math.abs(x - at)]).filter(([, d]) => d < 0.15).sort((a, b) => a[1] - b[1]);
+  const c = snaps.length ? snaps[0][0] : Math.round(at / 0.05) * 0.05;
   const r = { s0: c - w / 2, s1: c + w / 2, z0: ext.z0 + sill, z1: ext.z0 + sill + h };
   const P = (ss, z) => [f.right[0] * ss + f.out[0] * f.plane, f.right[1] * ss + f.out[1] * f.plane, z];
   let problem = openingProblem(model, wall, r, door ? 'Door' : 'Window'), onMassing = null;
-  if (door && massing) {
-    if (!mt || !Number.isInteger(mt.face)) problem ||= 'Doors go in walls.';
+  if (massing) {
+    if (!mt || !Number.isInteger(mt.face)) problem ||= door ? 'Doors go in walls.' : 'Windows go in walls.';
+    else if (!door && s.boundary === 'Surface') problem ||= 'Windows go in outside walls.';
     else {
-      // the door's middle in the plan's own axes (before the building's turn), along the face
-      const q = turnPlan(P(c, 0), -(massing.rot || 0)), { A, U } = doorFaceAxes(massing, mt.zone, mt.face);
-      onMassing = { zone: mt.zone, face: mt.face, u: (q[0] - A[0]) * U[0] + (q[1] - A[1]) * U[1] };
+      onMassing = { zone: mt.zone, face: mt.face, u: alongFace(mt, P(c, 0)), w, h, sill };
+      // tried on a copy: made there, or not
       if (!problem) {
-        const trial = structuredClone(massing), d = addDoor(trial, onMassing.zone, onMassing.face, onMassing.u);
+        const trial = structuredClone(massing), d = door ? addDoor(trial, mt.zone, mt.face, onMassing.u) : addOpening(trial, mt.zone, mt.face, onMassing.u, { w, h, sill });
         if (typeof d === 'string') problem = d;
-        else if (!doorGeometry(trial).some((z) => z.doors.some((x) => x.id === d.id))) problem = 'The door does not fit there.';
+        else if (!doorGeometry(trial).some((z) => (door ? z.doors.some((x) => x.id === d.id) : z.windows.some((x) => x.opening === d.id)))) problem = `The ${door ? 'door' : 'window'} does not fit there.`;
       }
     }
   }
   return { kind: door ? 'door' : 'window', wall, r, ends: [P(r.s0, r.z0), P(r.s1, r.z0)], corners: [P(r.s0, r.z0), P(r.s1, r.z0), P(r.s1, r.z1), P(r.s0, r.z1)], out: f.out, problem, massing: onMassing };
 }
+// Where an opening w wide may stand on a wall drawn thick (its solid in the 3D view): at the middle of
+// each of its two faces, and against each face's ends (WINDOW_EDGE clear). Positions along the wall's
+// frame (s); none for a wall drawn thin.
+function faceSnaps(wall, f, w) {
+  const tris = view.solidOf?.get(wall), o = view.origin || [0, 0, 0];
+  if (!tris?.length) return [];
+  const pts = [];
+  for (let i = 0; i < tris.length; i += 3) {
+    const x = tris[i] + o[0], y = tris[i + 1] + o[1];
+    pts.push([x * f.right[0] + y * f.right[1], x * f.out[0] + y * f.out[1] - f.plane]);
+  }
+  const lo = Math.min(...pts.map((q) => q[1])), hi = Math.max(...pts.map((q) => q[1])), out = [], e = 0.02;
+  for (const side of [lo, hi]) {
+    const s = pts.filter((q) => Math.abs(q[1] - side) < 1e-3).map((q) => q[0]);
+    if (!s.length) continue;
+    const a = Math.min(...s), b = Math.max(...s);
+    out.push((a + b) / 2, a + w / 2 + e, b - w / 2 - e);
+  }
+  return out;
+}
+// How far along face (mt: { zone, face }) of the massing a model point is: in the plan's own axes
+// (before the building's turn), from the face's first corner.
+function alongFace(mt, p) {
+  const q = turnPlan(p, -(massing.rot || 0)), { A, U } = doorFaceAxes(massing, mt.zone, mt.face);
+  return (q[0] - A[0]) * U[0] + (q[1] - A[1]) * U[1];
+}
 function placeOffer(o) {
   if (!o || o.problem) return;
-  if (o.kind === 'door' && o.massing) { const { zone, face, u } = o.massing; massingChange((x) => { addDoor(x, zone, face, u); }, 'door added'); return; }
+  if (o.massing) {
+    const { zone, face, u, w, h, sill } = o.massing;
+    if (o.kind === 'door') massingChange((x) => { addDoor(x, zone, face, u); }, 'door added');
+    else massingChange((x) => { addOpening(x, zone, face, u, { w, h, sill }); }, 'window added');
+    return;
+  }
   applyEdit((tx, m) => addWindow(tx, m, o.wall, o.r, o.kind === 'door' ? 'Door' : 'Window'), `${o.kind} added on ${o.wall}`, { geometry: true });
+}
+// A massing's window put on its own, moved or resized in its wall (r: edit.js's rectangle).
+function openingEdit(name, r) {
+  const at = massingOpening(massing, name), f = windowRect(model, name)?.frame;
+  if (!at || !f) return false;
+  const c = (r.s0 + r.s1) / 2, u = alongFace(at, [f.right[0] * c + f.out[0] * f.plane, f.right[1] * c + f.out[1] * f.plane]);
+  return massingChange((x) => { setOpening(x, at.id, at.zone, at.face, u, { w: r.s1 - r.s0, h: r.z1 - r.z0, sill: r.z0 - at.z0 }); }, 'window moved or resized');
 }
 function setPlacing(kind) {
   placing = kind;
@@ -2786,10 +2848,11 @@ function deleteMany() {
   const zones = massing ? massingGeometry(massing) : [], zi = names.map((n) => zones.findIndex((z) => z.name === n)).filter((i) => i >= 0);
   const walls = names.filter((n) => String(n).startsWith('wall:')).map((n) => Number(n.slice(5)));
   const wins = !massing ? names.filter((n) => model.windows[n]) : [];
+  const singles = massing ? names.map((n) => massingOpening(massing, n)?.id).filter((id) => id !== undefined) : [];
   const doorIds = massing ? names.map(massingDoorId).filter((id) => id !== null) : [], doorsOwn = !massing ? names.filter((n) => model.doors?.[n]) : [];
   selection = new Set();
   view.select(null);
-  if (massing && (zi.length || walls.length || doorIds.length)) massingChange((x) => { for (const id of doorIds) deleteDoor(x, id); for (const id of walls) deleteWall(x, id); for (const i of zi.sort((a, b) => b - a)) deleteZone(x, i); }, `${zi.length + walls.length + doorIds.length} deleted`);
+  if (massing && (zi.length || walls.length || doorIds.length || singles.length)) massingChange((x) => { for (const id of singles) deleteOpening(x, id); for (const id of doorIds) deleteDoor(x, id); for (const id of walls) deleteWall(x, id); for (const i of zi.sort((a, b) => b - a)) deleteZone(x, i); }, `${zi.length + walls.length + doorIds.length} deleted`);
   if (doorsOwn.length) applyEdit((tx) => { for (const n of doorsOwn) { tx.remove('FenestrationSurface:Detailed', n); const p = model.doors[n].partner; if (p && tx.epjson['FenestrationSurface:Detailed']?.[p]) tx.remove('FenestrationSurface:Detailed', p); } }, `${doorsOwn.length} doors deleted`, { geometry: true });
   if (wins.length) applyEdit((tx) => { for (const n of wins) tx.remove('FenestrationSurface:Detailed', n); }, `${wins.length} windows deleted`, { geometry: true });
 }
@@ -2864,7 +2927,7 @@ function wallBetween(found) {
 
 // ---------- the command line (cmdline.js) ----------
 // the command each tool is (a tool begun from its button is the last command, for Enter to repeat)
-const TOOL_COMMAND = { wall: 'Draw wall', add: 'Add zone', split: 'Split zone', face: 'Split wall', push: 'Push pull', corner: 'Corner', extend: 'Extend', merge: 'Merge zones', mergefaces: 'Merge walls', seam: 'Remove seam', window: 'Window', door: 'Door' };
+const TOOL_COMMAND = { wall: 'Draw wall', add: 'Add zone', split: 'Split zone', face: 'Split wall', push: 'Push pull', corner: 'Corner', extend: 'Extend', align: 'Align', merge: 'Merge zones', mergefaces: 'Merge walls', seam: 'Remove seam', window: 'Window', door: 'Door' };
 let cmdLine = null;
 // Each command does what its button or key does; a massing's tools need a massing.
 {
@@ -2881,6 +2944,7 @@ let cmdLine = null;
     { name: 'Split zone', run: tool('split') },
     { name: 'Split wall', run: tool('face') },
     { name: 'Push pull', also: ['Pushpull', 'Extrude'], run: tool('push') },
+    { name: 'Align', also: ['AL'], run: tool('align'), title: 'Align walls to a line' },
     { name: 'Corner', also: ['Trim'], run: tool('corner') },
     { name: 'Extend', run: tool('extend') },
     { name: 'Merge zones', run: tool('merge') },
@@ -2921,6 +2985,8 @@ let cmdLine = null;
 function deleteWindow(name) {
   if (!model?.windows[name]) return;
   view.select(null);
+  const single = massing && massingOpening(massing, name);
+  if (single) { for (const m of [windowSet, sashSet, amountSet]) m.delete(name); massingChange((x) => deleteOpening(x, single.id), 'window deleted'); return; }
   const other = model.epjson['FenestrationSurface:Detailed']?.[name]?.outside_boundary_condition_object;
   for (const m of [windowSet, sashSet, amountSet]) m.delete(name);
   applyEdit((tx) => { tx.remove('FenestrationSurface:Detailed', name); if (other && tx.epjson['FenestrationSurface:Detailed']?.[other]) tx.remove('FenestrationSurface:Detailed', other); }, `window ${name} deleted`, { geometry: true });
@@ -3072,7 +3138,7 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'Delete' && massing && wallBetween(current())?.zones.length > 1) {
     deleteWallAsk(wallBetween(current()));
     e.preventDefault();
-  } else if (e.key === 'Delete' && !massing && current()?.kind === 'window') {
+  } else if (e.key === 'Delete' && current()?.kind === 'window' && (!massing || massingOpening(massing, current().item.name))) {
     deleteWindow(current().item.name);
     e.preventDefault();
   } else if (e.key === 'Delete' && current()?.kind === 'door' && current().item.own) {
@@ -3267,6 +3333,7 @@ const ws = workspace({
       const m = (R.s0 + R.s1) / 2, r = clampRect(model, name, { ...R, s0: m - w / 2, s1: m + w / 2 });
       if (rectProblem(model, name, r)) { popMessage(rectProblem(model, name, r)); return false; }
       if (massing && massingWindow(massing, name)) massingWindowEdit(name, r);
+      else if (massing && massingOpening(massing, name)) openingEdit(name, r);
       else applyEdit((tx, mm) => setWindowRect(tx, mm, name, r), `window ${name} width set`, { geometry: true });
       return true;
     },
@@ -3560,6 +3627,7 @@ function newMassing(m) {
   $('status').textContent = '';
   document.title = 'Massing · Natural Ventilation Visualizer';
   $('export').disabled = false;
+  $('export-idf').disabled = false;
   render(model);
   $('mass-open').hidden = false;
   $('model-tools').hidden = false;
@@ -3694,12 +3762,23 @@ $('export-eso').addEventListener('click', async () => {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   } catch (err) { $('results-status').innerHTML = `<span class="error-text">Could not save the results file: ${esc(err.message)}</span>`; }
 });
+// The model as EnergyPlus's text input (.idf), in its fields' order, each field named after it.
+$('export-idf').addEventListener('click', async () => {
+  if (!model) return;
+  const [{ writeIDF }, idd] = await Promise.all([import('../src/model/idf.js'), import('../src/model/idd-fields.js').then((x) => x.default)]);
+  const blob = new Blob([writeIDF(exportEpJSON(model), idd)], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (model.source.fileName || 'model').replace(/\.(epjson|json|idf)$/i, '') + (modelEdited || undoStack.length ? '_edited' : '_export') + '.idf';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
 $('export').addEventListener('click', () => {
   if (!model) return;
   const blob = new Blob([serializeEpJSON(exportEpJSON(model))], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = (model.source.fileName || 'model').replace(/\.(epjson|json)$/i, '') + (modelEdited || undoStack.length ? '_edited' : '_export') + '.epJSON';
+  a.download = (model.source.fileName || 'model').replace(/\.(epjson|json|idf)$/i, '') + (modelEdited || undoStack.length ? '_edited' : '_export') + '.epJSON';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });

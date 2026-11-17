@@ -563,3 +563,30 @@ test('doors in a massing are written as Door subsurfaces and join rooms in the n
   M.deleteDoor(m, 0); M.deleteDoor(m, 1);
   assert.equal(Object.keys(importEpJSON(massingEpJSON(m)).doors).length, 0);
 });
+
+test('a wall drawn off the millimetre still splits the room it crosses, in two pieces or one', async () => {
+  const M = await import('../src/model/massing.js');
+  // walls as a pointer puts them (a fraction of a millimetre off), the room closed by them
+  const m = M.massingBlank();
+  for (const [a, b] of [[[-14.999803, -7.280195], [-2.999805, -7.280195]], [[-2.999805, -7.280195], [-2.999805, 0.719805]], [[-2.999805, 0.719805], [-14.999803, 0.719805]], [[-14.999803, 0.719805], [-14.999803, -7.280195]], [[-8.999804, -7.280195], [-8.999804, 0.719805]]]) M.addWall(m, { a, b, base: 0, top: 1, line: 'exterior' });
+  assert.equal(m.zones.length, 2);
+  M.addWall(m, { a: [-14.999803, -3.280195], b: [-11.999803, -3.280195], base: 0, top: 1 });
+  M.addWall(m, { a: [-11.999803, -3.280195], b: [-8.999804, -3.280195], base: 0, top: 1 });
+  assert.equal(m.zones.length, 3, 'the left room is cut in two');
+  assert.ok(Math.abs(m.zones.reduce((t, z) => t + Math.abs(M.polyArea(z.plate)), 0) - 96) < 0.01, 'no floor lost');
+});
+
+test('doors and windows put one by one stand on their wall as it is pushed', async () => {
+  const M = await import('../src/model/massing.js');
+  const m = M.massingBlank();
+  for (const [a, b] of [[[0, 0], [10, 0]], [[10, 0], [10, 6]], [[10, 6], [0, 6]], [[0, 6], [0, 0]]]) M.addWall(m, { a, b, base: 0, top: 1 });
+  const k = m.zones[0].plate.findIndex((p, j) => { const q = m.zones[0].plate[(j + 1) % 4]; return p[1] === 0 && q[1] === 0; });
+  M.addDoor(m, 0, k, 3); M.addOpening(m, 0, k, 7);
+  const count = () => { const g = M.massingGeometry(m)[0]; return [g.doors.length, g.windows.filter((w) => w.opening !== undefined).length]; };
+  assert.deepEqual(count(), [1, 1]);
+  M.pushWall(m, 0, k, 1.5);
+  assert.deepEqual(count(), [1, 1], 'both still made after the wall moved');
+  assert.equal(m.doors[0].p[1], -1.5);
+  const ep = massingEpJSON(m);
+  assert.equal(Object.values(ep['FenestrationSurface:Detailed']).filter((o) => o.surface_type === 'Window').length, 1);
+});

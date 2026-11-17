@@ -281,6 +281,20 @@ const centroid = (pts) => pts.reduce((s, p) => [s[0] + p[0] / pts.length, s[1] +
 // The sash of a window swung open: the rough opening's rectangle turned about its hinge edge by the
 // angle, outwards for casements and awnings, inwards for hoppers. null for windows that are not
 // upright rectangles (skylights), which stay drawn in place.
+// A door's leaf swung `angle` degrees about its hinge (the jamb to the left seen from outside), into
+// its own zone: { hinge, shut (the other jamb where the leaf shuts), tip (where the leaf's edge is now),
+// width, z0, z1, vertices } in model coordinates.
+export function doorLeaf(d, angle) {
+  const V = d.vertices, n = unitNormal(V), h = Math.hypot(n[0], n[1]) || 1, out = [n[0] / h, n[1] / h];
+  const along = [-out[1], out[0]], s = V.map((p) => p[0] * along[0] + p[1] * along[1]);
+  const i0 = s.indexOf(Math.min(...s)), i1 = s.indexOf(Math.max(...s));
+  const H = [V[i0][0], V[i0][1]], E = [V[i1][0], V[i1][1]], w = Math.hypot(E[0] - H[0], E[1] - H[1]) || 1;
+  const u = [(E[0] - H[0]) / w, (E[1] - H[1]) / w], a = (angle * Math.PI) / 180;
+  const dir = [u[0] * Math.cos(a) - out[0] * Math.sin(a), u[1] * Math.cos(a) - out[1] * Math.sin(a)];
+  const T = [H[0] + dir[0] * w, H[1] + dir[1] * w], z0 = Math.min(...V.map((p) => p[2])), z1 = Math.max(...V.map((p) => p[2]));
+  return { hinge: H, shut: E, tip: T, width: w, z0, z1, vertices: [[H[0], H[1], z0], [T[0], T[1], z0], [T[0], T[1], z1], [H[0], H[1], z1]] };
+}
+
 function sashPanel(w, sash, depth = 0) {
   if (!w || !sash) return null;
   const n = unitNormal(w.vertices);
@@ -570,13 +584,16 @@ export class View3D {
     const doorMat = new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Door, side: THREE.DoubleSide, clippingPlanes: this.clipping, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
     this.doorMesh = new THREE.Mesh(polygonGeometry(doors, this.origin, null), doorMat);
     this.doorMesh.userData = { kind: 'door', items: doors };
-    // open doors: a faint leaf in the opening, to see and pick them by (air and particles pass)
-    this.openDoorMesh = new THREE.Mesh(polygonGeometry([], this.origin, null), new THREE.MeshBasicMaterial({ color: TYPE_COLORS.Door, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: this.clipping }));
+    // open doors: their leaves swung open, and the openings, unseen, to pick them by
+    this.openDoorMesh = new THREE.Mesh(polygonGeometry([], this.origin, null), new THREE.MeshLambertMaterial({ color: TYPE_COLORS.Door, transparent: true, opacity: 0.85, side: THREE.DoubleSide, clippingPlanes: this.clipping }));
     this.openDoorMesh.userData = { kind: 'door', items: [] };
+    this.openDoorPick = new THREE.Mesh(polygonGeometry([], this.origin, null), new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }));
+    this.openDoorPick.userData = { kind: 'door', items: [] };
+    this.doorNow = new Map();
 
     this.edges = new THREE.LineSegments(this.edgesGeometry(), new THREE.LineBasicMaterial({ color: this.edgeColor, transparent: true, opacity: 0.45, clippingPlanes: this.clipping }));
 
-    this.group.add(this.front, this.back, this.glass, this.doorMesh, this.openDoorMesh, this.shading, this.edges, this.problemLayer());
+    this.group.add(this.front, this.back, this.glass, this.doorMesh, this.openDoorMesh, this.openDoorPick, this.shading, this.edges, this.problemLayer());
     this.shadowSkins();
     this.setFloating(this.floatZones);
     if (keep) {
@@ -782,20 +799,42 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     return g;
   }
 
-  // Draws the closed doors as panels; open ones leave their opening clear. open: a Set of door names.
-  setOpenDoors(open) {
+  // Draws the closed doors as panels in their openings; open ones swing their leaves to their angles
+  // (into their own zone), over a moment as the window sashes do. open: a Set of door names; angles:
+  // name -> degrees (90 when not given).
+  setOpenDoors(open, angles = new Map()) {
     if (!this.doorMesh) return;
     const closed = this.doors.filter((d) => !open.has(d.name));
     this.doorMesh.geometry.dispose();
     this.doorMesh.geometry = polygonGeometry(closed, this.origin, null);
     this.doorMesh.userData.items = closed;
     const opened = this.doors.filter((d) => open.has(d.name));
-    this.openDoorMesh.geometry.dispose();
-    this.openDoorMesh.geometry = polygonGeometry(opened, this.origin, null);
-    this.openDoorMesh.userData.items = opened;
-    this.render();
+    this.openDoorPick.geometry.dispose();
+    this.openDoorPick.geometry = polygonGeometry(opened, this.origin, null);
+    this.openDoorPick.userData.items = opened;
+    const from = this.doorNow || new Map(), to = new Map(opened.map((d) => [d.name, angles.get(d.name) ?? 90]));
+    const names = new Set([...from.keys(), ...to.keys()]), at = (k) => new Map([...names].map((n) => [n, (from.get(n) || 0) + ((to.get(n) || 0) - (from.get(n) || 0)) * k]));
+    const draw = (now) => {
+      this.doorNow = now;
+      const leaves = this.doors.filter((d) => now.get(d.name) > 0.5).map((d) => ({ name: d.name, door: d, vertices: doorLeaf(d, now.get(d.name)).vertices }));
+      this.openDoorMesh.geometry.dispose();
+      this.openDoorMesh.geometry = polygonGeometry(leaves, this.origin, null);
+      this.openDoorMesh.userData.items = leaves.map((l) => l.door);
+      this.onDoors?.();
+      this.render();
+    };
+    cancelAnimationFrame(this.doorRaf);
+    const moves = [...names].some((n) => Math.abs((from.get(n) || 0) - (to.get(n) || 0)) > 0.5);
+    if (!moves || this.swingDirect) { draw(to); return; }
+    const t0 = performance.now();
+    const step = (t) => { const k = Math.min(1, (t - t0) / WINDOW_SWING); draw(at(k)); if (k < 1) this.doorRaf = requestAnimationFrame(step); };
+    this.doorRaf = requestAnimationFrame(step);
   }
-
+  // An open door's leaf as it stands now (doorLeaf), or null when it is shut.
+  doorLeafNow(name) {
+    const a = this.doorNow?.get(name), d = this.doors?.find((x) => x.name === name);
+    return d && a > 0.5 ? doorLeaf(d, a) : null;
+  }
   // How far a window's glazing sits from its modelled plane (along the wall's outward normal): at the
   // drawn wall's exterior face, centre or interior face (this.windowDepth). Thin walls: in the plane.
   windowOffset(w) {
@@ -1246,7 +1285,7 @@ if (mod((gl_FragCoord.x - gl_FragCoord.y) * 0.70710678, ${(6 * dpr).toFixed(2)})
     const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, this.camera);
-    const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.openDoorMesh ? [this.openDoorMesh] : []), ...(this.freeMesh ? [this.freeMesh] : []), ...(this.shading.visible ? [this.shading] : [])];
+    const targets = [this.front, this.back, this.glass, ...(this.sashMesh ? [this.sashMesh, this.openingPick] : []), this.doorMesh, ...(this.openDoorMesh ? [this.openDoorMesh, this.openDoorPick] : []), ...(this.freeMesh ? [this.freeMesh] : []), ...(this.shading.visible ? [this.shading] : [])];
     const hits = ray.intersectObjects(targets, false).filter((h) => !this.sections.removed(h.point));
     const hit = hits.find((h) => h.object !== this.shading) || hits[0];
     if (!hit) return null;

@@ -142,3 +142,22 @@ test('lengths typed in any unit: mm by default, metric and imperial suffixes, fe
   for (const [t, m] of [['1200', 1.2], ['1.2m', 1.2], ['120 cm', 1.2], ['48in', 1.2192], ['48"', 1.2192], ['4 ft', 1.2192], ["5'6\"", 1.6764], ["5' 6", 1.6764], ['5ft 6in', 1.6764], ['3 1/2"', 0.0889], ['-300', -0.3], ['2 metres', 2]]) near2(parseLength(t), m);
   for (const t of ['abc', '12 parsecs', '']) assert.equal(parseLength(t), null, t);
 });
+
+test('an .idf reads into epJSON as EnergyPlus reads it, and writes back the same', async () => {
+  const { parseIDF, writeIDF } = await import('../src/model/idf.js');
+  const idd = (await import('../src/model/idd-fields.js')).default;
+  const text = `Version,23.1;  ! a comment
+    zone, Office 1, 0, 0,0,0, 1, 1, autocalculate;
+    BuildingSurface:Detailed, Office 1 Floor, FLOOR, Slab, Office 1, , ground, , nosun, nowind, 0, 4,
+      0,0,0, 0,5,0, 5,5,0, 5,0,0;
+    Timestep,6;`;
+  const { epjson, count, unknown } = parseIDF(text, idd);
+  assert.equal(count, 4); assert.deepEqual(unknown, []);
+  assert.deepEqual(epjson.Version, { 'Version 1': { version_identifier: '23.1' } });
+  assert.equal(epjson.Zone['Office 1'].ceiling_height, 'Autocalculate', 'a choice takes the schema\'s spelling');
+  const s = epjson['BuildingSurface:Detailed']['Office 1 Floor'];
+  assert.equal(s.surface_type, 'Floor'); assert.equal(s.outside_boundary_condition, 'Ground'); assert.equal(s.sun_exposure, 'NoSun');
+  assert.equal(s.vertices.length, 4); assert.deepEqual(s.vertices[2], { vertex_x_coordinate: 5, vertex_y_coordinate: 5, vertex_z_coordinate: 0 });
+  assert.equal(epjson.Timestep['Timestep 1'].number_of_timesteps_per_hour, 6);
+  assert.deepEqual(parseIDF(writeIDF(epjson, idd), idd).epjson, epjson);
+});

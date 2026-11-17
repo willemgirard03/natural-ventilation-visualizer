@@ -303,6 +303,35 @@ export function addDoor(m, i, k, u, { w = DOOR0.w, h = DOOR0.h } = {}) {
   return d;
 }
 export function deleteDoor(m, id) { if (m.doors) m.doors = m.doors.filter((d) => d.id !== id); }
+// A window put on its own (not of a side's array): as a door is, a point on a wall's line with its
+// width, height and sill (m above its zone's floor). m.openings [{ id, p, level, w, h, sill }].
+export function addOpening(m, i, k, u, { w = 1.2, h = 1.5, sill = 0.9 } = {}) {
+  const z = m.zones[i], P = z.plate, A = P[k], B = P[(k + 1) % P.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+  if (len < w + 2 * WINDOW_EDGE) return 'The wall is too short for the window.';
+  u = Math.min(len - w / 2 - WINDOW_EDGE, Math.max(w / 2 + WINDOW_EDGE, u));
+  const U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
+  m.openings ||= [];
+  const o = { id: (m.openings || []).reduce((a, x) => Math.max(a, x.id + 1), 0), p: [R6(A[0] + U[0] * u), R6(A[1] + U[1] * u)], level: z.base, w, h, sill };
+  m.openings.push(o);
+  return o;
+}
+export function deleteOpening(m, id) { if (m.openings) m.openings = m.openings.filter((o) => o.id !== id); }
+// A window put on its own, by its name in the model: { id, zone, face, z0 }, or null.
+export function massingOpening(m, name) {
+  for (const zone of massingGeometry(m)) {
+    const w = zone.windows.find((x) => x.name === name && x.opening !== undefined);
+    if (w) return { id: w.opening, zone: zone.zone, face: w.face, z0: zone.z0 };
+  }
+  return null;
+}
+// Such a window moved or resized: its middle along face k of zone i at u, width w, sill and height.
+export function setOpening(m, id, i, k, u, { w, h, sill }) {
+  const o = m.openings?.find((x) => x.id === id);
+  if (!o) return false;
+  const z = m.zones[i], P = z.plate, A = P[k], B = P[(k + 1) % P.length], len = Math.hypot(B[0] - A[0], B[1] - A[1]), U = [(B[0] - A[0]) / len, (B[1] - A[1]) / len];
+  Object.assign(o, { p: [R6(A[0] + U[0] * u), R6(A[1] + U[1] * u)], w, h, sill });
+  return true;
+}
 
 // Every zone's surfaces and windows, in building coordinates (the plan turned by `rot`, degrees
 // clockwise), before they are written: the geometry the tests and the drawings read. Surfaces that
@@ -343,6 +372,15 @@ export function massingGeometry(m) {
         if (!host) return;
         zone.windows.push({ name: `${host.name}:w${n}`, wall: host.name, face: k, index: w.index, width: w.u1 - w.u0, height: w.v1 - w.v0, azimuth: az, vertices: [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)].map(turn) });
       });
+      // windows put one by one (the Window tool), on the outside piece that holds each whole
+      for (const o of m.openings || []) {
+        const at2 = doorOn(m, o, i, k);
+        if (!at2) continue;
+        const v0 = zone.z0 + o.sill, v1 = Math.min(v0 + o.h, zone.z1 - (z.slab || 0) - WINDOW_EDGE);
+        const host = walls.find((p) => p.other === null && at2.u0 >= p.u0 + WINDOW_EDGE - 1e-9 && at2.u1 <= p.u1 - WINDOW_EDGE + 1e-9 && v0 >= p.z0 + WINDOW_EDGE - 1e-9 && v1 <= p.z1 + 1e-9);
+        if (!host || v1 - v0 < 0.2) continue;
+        zone.windows.push({ name: `${host.name}:x${o.id}`, wall: host.name, face: k, opening: o.id, width: at2.u1 - at2.u0, height: v1 - v0, azimuth: az, vertices: [at(at2.u0, v0), at(at2.u1, v0), at(at2.u1, v1), at(at2.u0, v1)].map(turn) });
+      }
       // the doors standing on this zone's floor along this face, each on the piece that holds it whole
       for (const d of m.doors || []) {
         const at2 = doorOn(m, d, i, k);
@@ -695,7 +733,7 @@ function windowArea(w) {
 // (as massingGeometry numbers them), and the zone's floor level. null for a window the massing did not make.
 export function massingWindow(m, name) {
   for (const zone of massingGeometry(m)) {
-    const w = zone.windows.find((x) => x.name === name);
+    const w = zone.windows.find((x) => x.name === name && x.opening === undefined);
     if (w) return { zone: zone.zone, face: w.face, index: w.index, z0: zone.z0 };
   }
   return null;
@@ -1156,6 +1194,8 @@ function limited(m, i, x, act) {
   if (!best) return Array.isArray(x) ? [0, 0] : 0;
   m.levels = best.levels; m.zones = best.zones;
   if (best.walls) m.walls = best.walls;
+  if (best.doors) m.doors = best.doors;
+  if (best.openings) m.openings = best.openings;
   return scale(bt);
 }
 // The pushed face, as far as it may go. Returns the distance taken.
@@ -1190,10 +1230,11 @@ function wallsToFace(m, i, k, more = []) {
 export function extrudeFace(m, i, k, d) {
   const shared = sharingFaces(m, i, k).length > 0, N = faceAxes(m, i, k).n;
   return limited(m, i, d, (x, v) => {
-    const ws = shared ? [] : wallsToFace(x, i, k), ends = shared ? [] : endsOnFaces(x, [[i, k]], ws, N, false), r = extrudeRaw(x, i, k, v);
+    const ws = shared ? [] : wallsToFace(x, i, k), ends = shared ? [] : endsOnFaces(x, [[i, k]], ws, N, false), ops = shared ? [] : openingsOnFaces(x, [[i, k]]), r = extrudeRaw(x, i, k, v);
     if (r === false) return false;
     shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]);
     followEnds(x, ends, N, r.d);
+    shiftOpenings(ops, [N[0] * r.d, N[1] * r.d]);
   });
 }
 // The ends of drawn walls (not those in `skip`) that stand on the faces `list` ([[zone, face]]) - the
@@ -1229,6 +1270,11 @@ function followEnds(m, ends, N, d) {
   }
   if (gone.size) m.walls = m.walls.filter((w) => !gone.has(w.id));
 }
+// The doors and windows put one by one standing on the faces `list` ([[zone, face]]): they go with them.
+function openingsOnFaces(m, list) {
+  return [...(m.doors || []), ...(m.openings || [])].filter((o) => list.some(([zi, k]) => doorOn(m, { ...o, w: 0 }, zi, k)));
+}
+function shiftOpenings(ops, [dx, dy]) { for (const o of ops) o.p = [R6(o.p[0] + dx), R6(o.p[1] + dy)]; }
 // Whether point p lies on an edge of a zone on wall w's levels.
 function onZoneEdge(m, w, p) {
   return m.zones.some((z) => levelsOverlap(m, w, z) && z.plate.some((a, k) => {
@@ -1298,10 +1344,11 @@ export function pushWall(m, i, k, d) {
   if (!share.length) return extrudeFace(m, i, k, d);
   const N = faceAxes(m, i, k).n;
   return limited(m, [i, ...share.map(([j]) => j)], d, (x, v) => {
-    const ws = wallsToFace(x, i, k, share), ends = endsOnFaces(x, [[i, k], ...share], ws, N, true), r = extrudeRaw(x, i, k, v);
+    const ws = wallsToFace(x, i, k, share), ends = endsOnFaces(x, [[i, k], ...share], ws, N, true), ops = openingsOnFaces(x, [[i, k], ...share]), r = extrudeRaw(x, i, k, v);
     if (r === false || !share.every(([j, q]) => extrudeRaw(x, j, q, -r.d) !== false)) return false;
     shiftWalls(x, ws, [N[0] * r.d, N[1] * r.d]);
     followEnds(x, ends, N, r.d);
+    shiftOpenings(ops, [N[0] * r.d, N[1] * r.d]);
   });
 }
 
@@ -1579,7 +1626,9 @@ export function moveStorey(m, i, axis, dist) {
 export function moveZone(m, i, d) {
   // the drawn walls on its faces go with it, but for those on a face another zone shares
   const ws = [...new Set(m.zones[i].plate.flatMap((_, k) => (sharingFaces(m, i, k).length ? [] : wallsOn(m, i, k))))];
+  const own = m.zones[i].plate.map((_, k) => k).filter((k) => !sharingFaces(m, i, k).length);
   return limited(m, i, d, (x, [dx, dy]) => {
+    shiftOpenings(openingsOnFaces(x, own.map((k) => [i, k])), [dx, dy]);
     const z = x.zones[i], move = (P) => P.map(([px, py]) => [R6(px + dx), R6(py + dy)]);
     z.plate = move(z.plate);
     if (z.cells) z.cells = z.cells.map(move);
@@ -1755,7 +1804,9 @@ export function addWall(m, { a, b, base, top, asm = GENERIC_ASSEMBLIES.facade[0]
   if (len2(sub2(b, a)) < 0.05 || top <= base) return null;
   m.walls ||= [];
   [a, b] = reachWalls(m, a, b, base, top);
-  const w = { id: nextWallId(m), a: a.map(R6), b: b.map(R6), base, top, asm, line, side };
+  // to the millimetre, as the zones it closes are
+  const R3 = (x) => Math.round(x * 1000) / 1000;
+  const w = { id: nextWallId(m), a: a.map(R3), b: b.map(R3), base, top, asm, line, side };
   m.walls.push(w);
   const split = splitByWall(m, w), made = enclose(m, base, top);
   return { id: w.id, split, made };
@@ -1871,6 +1922,10 @@ export function enclose(m, base, top) {
 // split where they cross or touch, loose ends pruned, and each face traced keeping it on the left.
 export function planarFaces(segs) {
   const key = (p) => `${Math.round(p[0] * 1000)},${Math.round(p[1] * 1000)}`;
+  // every end to the millimetre first, as the faces' corners are: a wall and a zone's edge less than a
+  // millimetre apart are then one line, not two crossing nowhere (a space between them lost)
+  const mm = (p) => [Math.round(p[0] * 1000) / 1000, Math.round(p[1] * 1000) / 1000];
+  segs = segs.map(([a, b]) => [mm(a), mm(b)]).filter(([a, b]) => a[0] !== b[0] || a[1] !== b[1]);
   // every segment split at every crossing and touching point
   const cuts = segs.map(() => [0, 1]);
   for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {

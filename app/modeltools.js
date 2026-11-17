@@ -31,13 +31,18 @@
 //  - Corner (as Revit's Trim/Extend to Corner): pick two drawn walls; each is extended or trimmed to
 //    where their lines cross, the side of each picked kept. Extend: pick the wall to reach, then the
 //    wall to extend (or trim) to it.
+//  - Align (as Revit's): pick the line to align to - a zone's side, a drawn wall's line or either face
+//    of its thickness - then a wall's line or face parallel to it: the wall moves square to itself until
+//    that line lies on the first (a zone's side pushed, with the walls on it and those meeting it). With
+//    Multiple on, the first line stays for more walls; off, the next pick is a new line to align to. Esc
+//    lets the first line go, again stops.
 //  - Push/pull: over a face, the face outlined; dragged, it moves square to itself by 50 mm steps
 //    (100 mm with Shift), stepping out from a seam to make an L or in to make a notch, its neighbours
 //    stretching where it meets a corner; a click types how far. The tool stays on.
 
 import * as THREE from 'three';
 import { label, line, poly } from './handles.js';
-import { addWall, WALL_LINES, cornerWalls, extendWall, sharingFaces } from '../src/model/massing.js';
+import { addWall, WALL_LINES, cornerWalls, extendWall, sharingFaces, pushWall, moveWall, wallsOn } from '../src/model/massing.js';
 import { addZone, splitZone, splitFace, extrudeFace, reentrantCorners, faceAxes, faceLength, zoneLevels, turnPlan, zoneFrame,
   mergeZones, mergeFaces, mergeCells, removeWallSeam, zoneSeams, cellAt, cellsOf } from '../src/model/massing.js';
 import { askNumber } from './sections.js';
@@ -54,8 +59,8 @@ export class ModelTools {
   // wallProps() -> { asm, base, top, line, chain } for Draw wall.
   // wallThickness(asm) -> the assembly's thickness (m), for the wall drawn.
   // onWallLevels(base, top): a wall begun in a plan takes its level; the Place wall tab shows it.
-  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {}, wallProps = () => ({}), wallThickness = () => 0.2, onWallLevels = () => {} }) {
-    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage, wallProps, wallThickness, onWallLevels });
+  constructor(view, { massing, targetAt, onChange, onAdded, onTool = () => {}, keepSeams = () => true, onMessage = () => {}, wallProps = () => ({}), wallThickness = () => 0.2, onWallLevels = () => {}, alignMultiple = () => false }) {
+    Object.assign(this, { view, massing, targetAt, onChange, onAdded, onTool, keepSeams, onMessage, wallProps, wallThickness, onWallLevels, alignMultiple });
     this.picked = [];
     this.tool = null;
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -127,6 +132,7 @@ export class ModelTools {
       }
       if (e.key === 'Escape' && this.tool === 'wall' && this.wall?.typed) { e.stopImmediatePropagation(); this.wall.typed = ''; if (this.last) this.preview(this.last); return; }
       if (e.key === 'Enter' && this.tool === 'wall' && this.wall?.typed && this.last) { e.preventDefault(); e.stopImmediatePropagation(); this.wallClick(this.last); return; }
+      if (e.key === 'Escape' && this.tool === 'align' && this.alignRef) { e.stopImmediatePropagation(); this.alignRef = null; if (this.last) this.preview(this.last); return; }
       if (e.key === 'Escape') { e.stopImmediatePropagation(); this.stop(); }
       if (e.key === 'Enter' && (this.tool === 'merge' || this.tool === 'mergefaces')) { e.preventDefault(); e.stopImmediatePropagation(); this.mergePicked(); }
       if (e.key === 'Enter' && this.tool === 'wall') { e.preventDefault(); e.stopImmediatePropagation(); this.stop(); }
@@ -154,6 +160,7 @@ export class ModelTools {
     this.last = e;
     if (this.tool === 'wall') { this.wallClick(e); return; }
     if (this.tool === 'corner' || this.tool === 'extend') { this.trimClick(e); return; }
+    if (this.tool === 'align') { this.alignClick(e); return; }
     if (this.tool === 'push') { this.pressPush(e); return; }
     if (this.tool === 'merge' || this.tool === 'mergefaces') { this.pick(e); return; }
     this.commit(e);
@@ -162,7 +169,7 @@ export class ModelTools {
   stop() {
     if (!this.tool) return;
     this.off?.();
-    this.tool = null; this.plan = null;
+    this.tool = null; this.plan = null; this.alignRef = null;
     document.body.classList.remove('placedrag', 'placing');
     this.svg.innerHTML = '';
     for (const c of this.contexts) c.svg.innerHTML = '';
@@ -174,6 +181,7 @@ export class ModelTools {
   planAt(e) {
     if (this.tool === 'wall') return this.wallAt(e);
     if (this.tool === 'corner' || this.tool === 'extend') return this.trimAt(e);
+    if (this.tool === 'align') return this.alignAt(e);
     const m = this.massing(), t = m && this.tgt(e);
     if (!t) return null;
     if (this.tool === 'add') return this.addAt(m, t);
@@ -360,6 +368,85 @@ export class ModelTools {
     this.first = null;
     if (this.tool === 'corner') this.onChange((x) => cornerWalls(x, f.w.id, h.w.id, f.t, h.t), 'walls joined at a corner');
     else this.onChange((x) => extendWall(x, f.w.id, h.w.id, h.t), 'wall extended');
+    this.preview(e);
+  }
+
+  // ---------- Align ----------
+  // The lines a wall may be aligned by, on this plan's level (in 3D, all): each zone's sides, each drawn
+  // wall's line and the two faces of its thickness. { kind: 'face', zone, face } or { kind: 'wall', id },
+  // with a, b (plan) and z (its base level's height).
+  alignLines(m) {
+    const L = this.ctx?.level?.(), on = (x) => !Number.isInteger(L) || (x.base <= L && x.top > L), out = [];
+    m.zones.forEach((z, i) => { if (on(z)) z.plate.forEach((a, k) => out.push({ kind: 'face', zone: i, face: k, a, b: z.plate[(k + 1) % z.plate.length], z: m.levels[z.base].z })); });
+    for (const w of m.walls || []) {
+      const len = Math.hypot(w.b[0] - w.a[0], w.b[1] - w.a[1]);
+      if (!on(w) || len < 1e-6) continue;
+      const n = [-(w.b[1] - w.a[1]) / len, (w.b[0] - w.a[0]) / len], t = this.wallThickness(w.asm) || 0.2, side = w.side || 1;
+      const off = w.line === 'exterior' ? -side * t / 2 : w.line === 'interior' ? side * t / 2 : 0;
+      for (const k of [0, off - t / 2, off + t / 2]) {
+        if (k !== 0 && Math.abs(k) < 1e-4) continue;
+        out.push({ kind: 'wall', id: w.id, a: [w.a[0] + n[0] * k, w.a[1] + n[1] * k], b: [w.b[0] + n[0] * k, w.b[1] + n[1] * k], z: m.levels[w.base].z });
+      }
+    }
+    return out;
+  }
+  // the line under the pointer (within 10 px), nearest first
+  alignUnder(e, m) {
+    const [x, y] = this.px(e);
+    let best = null;
+    for (const l of this.alignLines(m)) {
+      const a = this.P([...l.a, l.z]), b = this.P([...l.b, l.z]), dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / l2)), dd = Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy);
+      if (dd < 10 && (!best || dd < best.dd)) best = { ...l, dd };
+    }
+    return best;
+  }
+  // The move that puts line `tgt` on line `ref`: the vector square to tgt (plan), or null when they are
+  // not parallel (within half a degree).
+  alignMove(ref, tgt) {
+    const u = (l) => { const d = [l.b[0] - l.a[0], l.b[1] - l.a[1]], n = Math.hypot(...d) || 1; return [d[0] / n, d[1] / n]; };
+    const ur = u(ref), ut = u(tgt);
+    if (Math.abs(ur[0] * ut[1] - ur[1] * ut[0]) > Math.sin(Math.PI / 360)) return null;
+    const n = [-ut[1], ut[0]], d = (ref.a[0] - tgt.a[0]) * n[0] + (ref.a[1] - tgt.a[1]) * n[1];
+    return [n[0] * d, n[1] * d];
+  }
+  // The move made: a zone's side pushed (with every zone sharing it, the walls on it and meeting it); a
+  // drawn wall on a zone's side pushes that side; a drawn wall standing free moves.
+  alignApply(m, tgt, v) {
+    let face = tgt.kind === 'face' ? [tgt.zone, tgt.face] : null;
+    if (!face) {
+      const j = m.walls.findIndex((w) => w.id === tgt.id);
+      m.zones.some((z, i) => z.plate.some((_, k) => (wallsOn(m, i, k).includes(j) ? ((face = [i, k]), true) : false)));
+      if (!face) return moveWall(m, tgt.id, v) !== false;
+    }
+    const [i, k] = face, P = m.zones[i].plate, a = P[k], b = P[(k + 1) % P.length], L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const N = [(b[1] - a[1]) / L, -(b[0] - a[0]) / L], d = v[0] * N[0] + v[1] * N[1]; // outward: the plate runs counterclockwise
+    if (Math.abs(d) < 1e-6) return false;
+    const took = pushWall(m, i, k, d);
+    if (Math.abs(took - d) > 1e-3) this.onMessage(Math.abs(took) < 1e-6 ? 'That wall cannot move there: a zone would overlap another or cross itself.' : `That wall could only move ${Math.round(Math.abs(took) * 1000)} mm of the ${Math.round(Math.abs(d) * 1000)} mm.`);
+    return Math.abs(took) > 1e-6;
+  }
+  alignAt(e) {
+    const m = this.massing(), h = m && this.alignUnder(e, m);
+    const mark = (l, o) => { const a = this.P([...l.a, l.z]), b = this.P([...l.b, l.z]); return line(a[0], a[1], b[0], b[1], o); };
+    let g = this.alignRef ? mark(this.alignRef, { stroke: 'var(--sun)', w: 3 }) : '';
+    let note = this.alignRef ? 'pick the wall to align' : 'pick the line to align to';
+    if (h) {
+      const v = this.alignRef && this.alignMove(this.alignRef, h);
+      g += mark(h, { stroke: 'var(--glass)', w: 3, op: 0.6 });
+      if (this.alignRef && !v) note = 'not parallel to the line picked';
+      else if (v) g += mark({ ...h, a: [h.a[0] + v[0], h.a[1] + v[1]], b: [h.b[0] + v[0], h.b[1] + v[1]] }, { stroke: 'var(--glass)', w: 1.6, dash: '5 3' });
+    }
+    return { what: '', mutate: null, draw: () => g + (e ? this.noteAt(e, note) : '') };
+  }
+  alignClick(e) {
+    const m = this.massing(), h = m && this.alignUnder(e, m);
+    if (!h) return;
+    if (!this.alignRef) { this.alignRef = h; this.preview(e); return; }
+    const v = this.alignMove(this.alignRef, h);
+    if (!v) { this.onMessage('Align: pick a wall parallel to the line picked.'); return; }
+    if (Math.hypot(...v) > 1e-6) this.onChange((x) => (this.alignApply(x, h, v) ? undefined : false), 'wall aligned');
+    if (!this.alignMultiple()) this.alignRef = null;
     this.preview(e);
   }
 

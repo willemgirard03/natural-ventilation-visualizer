@@ -45,12 +45,17 @@ export class PlanEdit {
       level: () => { const v = this.d.item; return v?.kind === 'plan' && Number.isInteger(v.level) ? v.level : null; },
     };
     this.unregister = api.tools.register(this.ctx);
-    // Tab over a wall: the walls chained to it (end to end) offered, and picked by the next click
+    // Tab over a wall: the walls closing the smallest loop through it offered, Tab again all the walls
+    // joined to it, again none; the next click picks those offered
     this.onKey = (e) => {
       if (e.key !== 'Tab' || !this.over || this.api.tools.tool || e.target.closest?.('input, select, textarea')) return;
       if (!this.hover || !['surface', 'wall'].includes(this.hover.kind)) return;
       e.preventDefault(); e.stopImmediatePropagation();
-      this.chain = this.chain ? null : this.chainOf(this.hover.name);
+      const step = this.chain ? (this.chainStep || 0) + 1 : 0;
+      const loop = step === 0 ? this.loopOf(this.hover.name) : null;
+      if (step === 0 && loop) { this.chain = loop; this.chainStep = 0; }
+      else if (step <= 1) { this.chain = this.chainOf(this.hover.name); this.chainStep = 1; }
+      else { this.chain = null; this.chainStep = 0; }
       this.paint();
     };
     addEventListener('keydown', this.onKey, true);
@@ -66,6 +71,41 @@ export class PlanEdit {
       for (const o of all) if (!seen.has(o.name) && ends(o).some((k) => k === a || k === b)) { seen.add(o.name); todo.push(o); }
     }
     return [...seen];
+  }
+  // The walls closing the shortest loop through this one (end to end, back to where it began), or null
+  // when it closes none. Walls back to back (two zones' sides of one wall) count as one way round.
+  loopOf(name) {
+    const c = this.picks();
+    if (!c) return null;
+    const all = [...c.walls, ...c.free], key = (p) => `${p[0].toFixed(2)},${p[1].toFixed(2)}`;
+    const me = all.find((w) => w.name === name);
+    if (!me) return null;
+    // each line between two ends, with the walls standing on it
+    const edges = new Map(), pt = new Map();
+    for (const w of all) {
+      const [a, b] = w.seg.map(key);
+      if (a === b) continue;
+      pt.set(a, w.seg[0]); pt.set(b, w.seg[1]);
+      const k = a < b ? `${a}|${b}` : `${b}|${a}`;
+      if (!edges.has(k)) edges.set(k, { a, b, len: Math.hypot(w.seg[1][0] - w.seg[0][0], w.seg[1][1] - w.seg[0][1]), names: [] });
+      edges.get(k).names.push(w.name);
+    }
+    const [s, t] = me.seg.map(key), start = s < t ? `${s}|${t}` : `${t}|${s}`;
+    // the shortest way from one end to the other, not along the wall itself (Dijkstra)
+    const adj = new Map();
+    for (const [k, e] of edges) { if (k === start) continue; for (const [u, v] of [[e.a, e.b], [e.b, e.a]]) { if (!adj.has(u)) adj.set(u, []); adj.get(u).push([v, e.len, k]); } }
+    const dist = new Map([[t, 0]]), prev = new Map(), done = new Set();
+    for (;;) {
+      let u = null;
+      for (const [n, d] of dist) if (!done.has(n) && (u === null || d < dist.get(u))) u = n;
+      if (u === null || u === s) break;
+      done.add(u);
+      for (const [v, l, k] of adj.get(u) || []) { const d = dist.get(u) + l; if (!dist.has(v) || d < dist.get(v) - 1e-9) { dist.set(v, d); prev.set(v, [u, k]); } }
+    }
+    if (!dist.has(s)) return null;
+    const names = [...edges.get(start).names];
+    for (let n = s; prev.has(n); n = prev.get(n)[0]) names.push(...edges.get(prev.get(n)[1]).names);
+    return names;
   }
   // A zone's walls cut by this plan.
   zoneWalls(zone) { return (this.picks()?.walls || []).filter((w) => w.zone === zone).map((w) => w.name); }
@@ -98,6 +138,9 @@ export class PlanEdit {
     const fr = this.d.frameNow();
     if (!fr) return null;
     if (this.cache?.key === this.d.key) return this.cache;
+    // cut again (the building changed): what was under the pointer, and Tab's walls, are let go until
+    // the pointer moves (else they would be drawn where they no longer are)
+    if (this.cache) { this.hover = null; this.chain = null; }
     const v = this.api.view, o3 = v.origin || [0, 0, 0], zc = fr.f.o.z, f = fr.f;
     const V = (p) => [p[0] - o3[0], p[1] - o3[1], p[2] - o3[2]];
     const walls = [], windows = [], zones = new Map(), extent = new Map();
@@ -215,11 +258,14 @@ export class PlanEdit {
     for (const n of this.api.selection?.() || []) { if (n === sel) continue; const f = this.find(n); if (f) g += this.selMark(f, false); }
     if (selPick) g += this.selMark(selPick, true);
     for (const n of this.chain || []) { const f = this.find(n); if (f) g += this.outline(f, { stroke: 'var(--glass)', w: 2.4, dash: '6 4' }); }
+    g += this.doorSwings();
     for (const n of this.api.mergeAsk?.() || []) { const f = this.find(n); if (f) g += this.outline(f, { stroke: '#D9822B', w: 3 }); }
     if (this.box) {
       const b = this.box, x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1);
       g += `<rect x="${x}" y="${y}" width="${Math.abs(b.x1 - b.x0)}" height="${Math.abs(b.y1 - b.y0)}" fill="var(--glass)" fill-opacity="0.06" stroke="var(--glass)" stroke-width="1"${b.x1 < b.x0 ? ' stroke-dasharray="5 3"' : ''}/>`;
     }
+    // the hover as the plan is now (after an edit, the thing under the pointer may have moved or gone)
+    if (this.hover) { const f = this.find(this.hover.name); this.hover = f ? { ...f, name: this.hover.name } : null; }
     if (this.hover && this.hover.name !== sel && !this.api.tools.tool) g += this.outline(this.hover, { stroke: 'var(--glass)', w: 2.6, dash: '6 4' });
     this.grips = [];
     if (!this.drag) this.figs = null;
@@ -231,6 +277,21 @@ export class PlanEdit {
       g += line(a[0], a[1], b[0], b[1], { stroke: col, w: 4 }) + label((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 10, this.offer.problem || `${Math.round((this.offer.r.s1 - this.offer.r.s0) * 1000)} mm`, { size: 9, fill: col });
     }
     ov.innerHTML = g;
+  }
+  // Each open door cut here as a plan draws it: its leaf where it has swung to, and the arc its edge
+  // swings through from shut.
+  doorSwings() {
+    const c = this.picks(), v = this.api.view, o3 = v.origin || [0, 0, 0];
+    let g = '';
+    for (const d of c?.doors || []) {
+      const L = v.doorLeafNow?.(d.name);
+      if (!L) continue;
+      const T = (p) => this.d.toPx(p[0] - o3[0], p[1] - o3[1]), H = T(L.hinge), E = T(L.shut), P = T(L.tip), r = Math.hypot(E[0] - H[0], E[1] - H[1]);
+      const sweep = (E[0] - H[0]) * (P[1] - H[1]) - (E[1] - H[1]) * (P[0] - H[0]) > 0 ? 1 : 0;
+      g += `<path d="M${E[0].toFixed(1)},${E[1].toFixed(1)} A${r.toFixed(1)},${r.toFixed(1)} 0 0 ${sweep} ${P[0].toFixed(1)},${P[1].toFixed(1)}" fill="none" stroke="var(--ink3)" stroke-width="0.7" stroke-dasharray="3 2"/>`;
+      g += line(H[0], H[1], P[0], P[1], { stroke: '#9A5B34', w: 2 });
+    }
+    return g;
   }
   // A selected thing as the 3D view shows it: tinted in the selection's colour (walls and windows at
   // 0.42, a zone's floor lighter), outlined.
